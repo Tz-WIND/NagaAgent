@@ -1,210 +1,213 @@
-import asyncio
 import os
 import sys
-import threading
-import time
+import subprocess
+import atexit
 import logging
-from summer_memory.task_manager import start_task_manager
+import traceback
+import webbrowser
 
-# 保留GRAG日志
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("summer_memory")
-logger.setLevel(logging.INFO)
+from .quintuple_extractor import extract_quintuples
+from .quintuple_graph import store_quintuples
+from .quintuple_visualize_v2 import visualize_quintuples
+from .quintuple_rag_query import query_knowledge, set_context
 
-# 只过滤HTTP相关日志
-logging.getLogger("httpcore").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# 添加上级目录以导入 config.py
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from config import GRAG_NEO4J_URI, GRAG_NEO4J_USER, GRAG_NEO4J_PASSWORD, GRAG_NEO4J_DATABASE
 
-from conversation_core import NagaConversation
-
-sys.path.append(os.path.dirname(__file__))
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import QApplication
-
-# 导入配置
-from config import config
-from summer_memory.memory_manager import memory_manager
-from ui.pyqt_chat_window import ChatWindow
-
-# 导入控制台托盘功能
-from ui.tray.console_tray import integrate_console_tray
+# 日志配置
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 
-# 创建专用事件循环
-loop = asyncio.new_event_loop()
-
-
-# 定义后台任务初始化
-async def init_background_services():
-    logger.info("正在启动后台服务...")
+# --- Docker 控制逻辑 ---
+def generate_docker_compose(template_path="docker-compose.template.yml", output_path="docker-compose.yml"):
     try:
-        # 启动任务管理器
-        from summer_memory.task_manager import start_task_manager
-        await start_task_manager()
-
-        # 添加状态检查
-        from summer_memory.task_manager import task_manager
-        logger.info(f"任务管理器状态: running={task_manager.is_running}")
-
-        # 保持事件循环活跃
-        while True:
-            await asyncio.sleep(3600)  # 每小时检查一次
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = f.read()
+        auth = f"{GRAG_NEO4J_USER}/{GRAG_NEO4J_PASSWORD}"
+        content = template.replace("${NEO4J_AUTH}", auth).replace("${NEO4J_DB}", GRAG_NEO4J_DATABASE)
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(content)
+        logger.info("已根据 config.py 生成 docker-compose.yml")
     except Exception as e:
-        logger.error(f"后台服务异常: {e}")
+        logger.error(f"生成 docker-compose.yml 失败: {e}")
+        raise
 
-
-# 在新线程中运行事件循环
-def run_event_loop():
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_background_services())
-    logger.info("后台服务事件循环已启动")
-
-
-# 启动线程
-bg_thread = threading.Thread(target=run_event_loop, daemon=True)
-bg_thread.start()
-logger.info(f"后台服务线程已启动: {bg_thread.name}")
-
-# 短暂等待服务初始化
-time.sleep(1)
-
-n = NagaConversation()
-def show_help():print('系统命令: 清屏, 查看索引, 帮助, 退出')
-def show_index():print('主题分片索引已集成，无需单独索引查看')
-def clear():os.system('cls' if os.name == 'nt' else 'clear')
-
-def check_port_available(host, port):
-    """检查端口是否可用"""
-    import socket
+def is_neo4j_running():
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind((host, port))
-            return True
-    except OSError:
+        output = subprocess.check_output(["docker", "ps", "--filter", "name=rag_neo4j", "--filter", "status=running", "--format", "{{.Names}}"])
+        return "rag_neo4j" in output.decode("utf-8")
+    except Exception as e:
+        logger.error(f"检查容器状态失败: {e}")
         return False
 
-def start_api_server():
-    """在后台启动API服务器"""
+def check_docker_compose_version():
+    """检查可用的 Docker Compose 命令版本"""
+    if os.system("docker compose version") == 0:
+        compose_cmd = ["docker", "compose"]
+    elif os.system("docker-compose --version") == 0:
+        compose_cmd = ["docker-compose"]
+    else:
+        logger.error("未找到有效的 Docker Compose命令")
+        return None
+    return compose_cmd
+
+def start_neo4j_container():
+    if is_neo4j_running():
+        logger.info("Neo4j 容器已在运行，无需重新启动。")
+        return
     try:
-        # 检查端口是否被占用
-        if not check_port_available(config.api_server.host, config.api_server.port):
-            print(f"⚠️ 端口 {config.api_server.port} 已被占用，跳过API服务器启动")
-            return
+        generate_docker_compose()
+        logger.info("正在启动 Neo4j Docker 容器...")
+        # 检查可用的 docker compose 命令
+        compose_cmd = check_docker_compose_version()
+        if not compose_cmd:
+            raise Exception("未找到有效的 Docker Compose 命令")
+        
+        subprocess.run(compose_cmd + ["up", "-d"], check=True)
+        logger.info("Neo4j 容器已启动。")
+    except subprocess.CalledProcessError:
+        logger.error("启动 Neo4j 容器失败，请检查 Docker 配置")
+        raise
+
+
+def stop_neo4j_container():
+    try:
+        logger.info("正在关闭 Neo4j Docker 容器...")
+        # 检查可用的 docker compose 命令
+        compose_cmd = check_docker_compose_version()
+        if not compose_cmd:
+            raise Exception("未找到有效的 Docker Compose 命令")
             
-        import uvicorn
-        # 使用字符串路径而不是直接导入，确保模块重新加载
-        # from apiserver.api_server import app
-        
-        print("🚀 正在启动夏园API服务器...")
-        print(f"📍 地址: http://{config.api_server.host}:{config.api_server.port}")
-        print(f"📚 文档: http://{config.api_server.host}:{config.api_server.port}/docs")
-        
-        # 在新线程中启动API服务器
-        def run_server():
-            try:
-                uvicorn.run(
-                    "apiserver.api_server:app",  # 使用字符串路径
-                    host=config.api_server.host,
-                    port=config.api_server.port,
-                    log_level="error",  # 减少日志输出
-                    access_log=False,
-                    reload=False  # 确保不使用自动重载
-                )
-            except Exception as e:
-                print(f"❌ API服务器启动失败: {e}")
-        
-        api_thread = threading.Thread(target=run_server, daemon=True)
-        api_thread.start()
-        print("✅ API服务器已在后台启动")
-        
-        # 等待服务器启动
-        time.sleep(1)
-        
-    except ImportError as e:
-        print(f"⚠️ API服务器依赖缺失: {e}")
-        print("   请运行: pip install fastapi uvicorn")
-    except Exception as e:
-        print(f"❌ API服务器启动异常: {e}")
+        subprocess.run(compose_cmd + ["down"], check=True)
+        logger.info("Neo4j 容器已关闭。")
+    except subprocess.CalledProcessError:
+        logger.warning("Neo4j 容器关闭失败")
 
-with open('./ui/progress.txt','w')as f:
-    f.write('0')
-mm = memory_manager
-#添加的GRAG相关启动说明
-print("=" * 30)
-print(f"GRAG状态: {'启用' if memory_manager.enabled else '禁用'}")
-if memory_manager.enabled:
-    stats = memory_manager.get_memory_stats()
-    # 检查Neo4j连接
-    from summer_memory.quintuple_graph import graph, GRAG_ENABLED
 
-    print(f"Neo4j连接: {'成功' if graph and GRAG_ENABLED else '失败'}")
-print("=" * 30)
-print('='*30+'\n娜迦系统已启动\n'+'='*30)
+atexit.register(stop_neo4j_container)
 
-# 自动启动API服务器
-if config.api_server.enabled and config.api_server.auto_start:
-    start_api_server()
 
-def check_tts_port_available(port):
-    """检查TTS端口是否可用"""
-    import socket
+# --- 核心业务逻辑 ---
+def batch_add_texts(texts):# 批量处理文本，提取五元组并存储
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(("0.0.0.0", port))
-            return True
-    except OSError:
+        all_quintuples = set()
+        for text in texts:
+            if not text:
+                logger.warning("跳过空文本")
+                continue
+            logger.info(f"处理文本: {text[:50]}...")
+            quintuples = extract_quintuples(text)
+            if not quintuples:
+                logger.warning(f"文本未提取到五元组: {text}")
+            else:
+                logger.info(f"提取到五元组: {quintuples}")
+            all_quintuples.update(quintuples)
+
+        if not all_quintuples:
+            logger.warning("未提取到任何五元组")
+            return False
+
+        valid_quintuples = [
+            t for t in all_quintuples if len(t) == 5 and all(isinstance(x, str) and x.strip() for x in t)
+        ]
+
+        if len(valid_quintuples) < len(all_quintuples):
+            logger.warning(f"过滤掉 {len(all_quintuples) - len(valid_quintuples)} 个无效五元组")
+
+        if not valid_quintuples:
+            logger.warning("无有效五元组")
+            return False
+
+        store_quintuples(valid_quintuples)
+        set_context(texts)# 设置查询上下文
+        return True
+    except Exception as e:
+        logger.error(f"处理文本失败: {e}")
         return False
 
-def start_tts_server():
-    """在后台启动TTS服务"""
+
+def batch_add_from_file(filename):# 从文件批量处理文本
     try:
-        if not check_tts_port_available(config.tts.port):
-            print(f"⚠️ 端口 {config.tts.port} 已被占用，跳过TTS服务启动")
-            return
-        
-        print("🚀 正在启动TTS服务...")
-        print(f"📍 地址: http://127.0.0.1:{config.tts.port}")
-        
-        def run_tts():
-            try:
-                # 使用新的启动脚本
-                from voice.start_voice_service import start_http_server
-                start_http_server()
-            except Exception as e:
-                print(f"❌ TTS服务启动失败: {e}")
-        
-        tts_thread = threading.Thread(target=run_tts, daemon=True)
-        tts_thread.start()
-        print("✅ TTS服务已在后台启动")
-        time.sleep(1)
+        if not os.path.exists(filename):
+            logger.error(f"文件 {filename} 不存在")
+            raise FileNotFoundError(f"文件 {filename} 不存在")
+        with open(filename, 'r', encoding='utf-8') as f:
+            texts = [line.strip() for line in f if line.strip()]
+        if not texts:
+            logger.warning(f"文件 {filename} 为空")
+            return False
+        logger.info(f"读取文件 {filename} 共 {len(texts)} 条文本")
+        return batch_add_texts(texts)
     except Exception as e:
-        print(f"❌ TTS服务启动异常: {e}")
+        logger.error(f"批量处理文本失败: {e}")
+        traceback.print_exc()# 打印完整错误堆栈信息
+        return False
 
-# 自动启动TTS服务
-start_tts_server()
 
-show_help()
-loop=asyncio.new_event_loop()
-threading.Thread(target=loop.run_forever,daemon=True).start()
+def main(): # 主程序
+    logger.info("开始启动 Neo4j 容器...")
+    start_neo4j_container()
+    logger.info("Neo4j 容器启动成功")
+    
+    try:
+        print("请选择输入方式：")
+        print("1 - 手动输入文本")
+        print("2 - 从文件读取文本")
+        choice = input("请输入 1 或 2：").strip()
 
-class NagaAgentAdapter:
- def __init__(s):s.naga=NagaConversation()  # 第二次初始化：NagaAgentAdapter构造函数中创建
- async def respond_stream(s,txt):
-     async for resp in s.naga.process(txt):
-         yield "娜迦",resp,None,True,False
+        if choice == "1":
+            print("请输入要处理的文本（每行一段，输入空行结束）：")
+            texts = []
+            while True:
+                text = input("> ")
+                if not text.strip():
+                    break
+                texts.append(text.strip())
 
-if __name__=="__main__":
- if not asyncio.get_event_loop().is_running():
-    asyncio.set_event_loop(asyncio.new_event_loop())
- app=QApplication(sys.argv)
- icon_path = os.path.join(os.path.dirname(__file__), "ui", "window_icon.png")
- app.setWindowIcon(QIcon(icon_path))
- 
- # 集成控制台托盘功能
- console_tray = integrate_console_tray()
- 
- win=ChatWindow()
- win.setWindowTitle("NagaAgent")
- win.show()
+            if not texts:
+                print("未输入任何文本，使用默认测试文本。")
+                texts = [
+                    "你好，我是娜迦。"
+                ]
 
- sys.exit(app.exec_())
+            success = batch_add_texts(texts)
+
+        elif choice == "2":
+            filename = input("请输入文件路径：").strip()
+            success = batch_add_from_file(filename)
+
+        else:
+            print("无效输入，仅支持 1 或 2。程序退出。")
+            return
+
+        if success:
+            webbrowser.open("logs/knowledge_graph/graph.html")
+            print("\n知识图谱已生成：logs/knowledge_graph/graph.html")
+            print("请输入查询问题（输入空行退出）：")
+            while True:
+                query = input("> ")
+                if not query.strip():
+                    print("退出查询。")
+                    break
+                result = query_knowledge(query)
+                print("\n查询结果：")
+                print(result)
+                print("\n请输入下一个查询问题（输入空行退出）：")
+        else:
+            print("文本处理失败，请检查控制台日志。")
+
+    except KeyboardInterrupt:
+        logger.info("用户中断程序")
+        print("\n程序已中断。")
+    except Exception as e:
+        logger.error(f"主程序运行失败: {e}")
+        print(f"发生错误：{e}")
+
+
+if __name__ == '__main__':
+    main()
