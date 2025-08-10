@@ -4,6 +4,7 @@ import sys
 import threading
 import time
 import logging
+from summer_memory.task_manager import start_task_manager
 
 # 保留GRAG日志
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +29,46 @@ from ui.pyqt_chat_window import ChatWindow
 # 导入控制台托盘功能
 from ui.tray.console_tray import integrate_console_tray
 
-n=NagaConversation()
+
+# 创建专用事件循环
+loop = asyncio.new_event_loop()
+
+
+# 定义后台任务初始化
+async def init_background_services():
+    logger.info("正在启动后台服务...")
+    try:
+        # 启动任务管理器
+        from summer_memory.task_manager import start_task_manager
+        await start_task_manager()
+
+        # 添加状态检查
+        from summer_memory.task_manager import task_manager
+        logger.info(f"任务管理器状态: running={task_manager.is_running}")
+
+        # 保持事件循环活跃
+        while True:
+            await asyncio.sleep(3600)  # 每小时检查一次
+    except Exception as e:
+        logger.error(f"后台服务异常: {e}")
+
+
+# 在新线程中运行事件循环
+def run_event_loop():
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_background_services())
+    logger.info("后台服务事件循环已启动")
+
+
+# 启动线程
+bg_thread = threading.Thread(target=run_event_loop, daemon=True)
+bg_thread.start()
+logger.info(f"后台服务线程已启动: {bg_thread.name}")
+
+# 短暂等待服务初始化
+time.sleep(1)
+
+n = NagaConversation()
 def show_help():print('系统命令: 清屏, 查看索引, 帮助, 退出')
 def show_index():print('主题分片索引已集成，无需单独索引查看')
 def clear():os.system('cls' if os.name == 'nt' else 'clear')
@@ -96,9 +136,9 @@ if memory_manager.enabled:
     stats = memory_manager.get_memory_stats()
     # 检查Neo4j连接
     from summer_memory.quintuple_graph import graph, GRAG_ENABLED
+
     print(f"Neo4j连接: {'成功' if graph and GRAG_ENABLED else '失败'}")
 print("=" * 30)
-
 print('='*30+'\n娜迦系统已启动\n'+'='*30)
 
 # 自动启动API服务器
@@ -154,6 +194,8 @@ class NagaAgentAdapter:
          yield "娜迦",resp,None,True,False
 
 if __name__=="__main__":
+ if not asyncio.get_event_loop().is_running():
+    asyncio.set_event_loop(asyncio.new_event_loop())
  app=QApplication(sys.argv)
  icon_path = os.path.join(os.path.dirname(__file__), "ui", "window_icon.png")
  app.setWindowIcon(QIcon(icon_path))
