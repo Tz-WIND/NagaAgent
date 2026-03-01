@@ -168,7 +168,7 @@ export function enterFloatingMode(): void {
     }
   }
 
-  win.setAlwaysOnTop(true, 'screen-saver')
+  win.setAlwaysOnTop(true, 'modal-panel')
   win.setSkipTaskbar(true)
   win.setResizable(false)
   win.setHasShadow(false)

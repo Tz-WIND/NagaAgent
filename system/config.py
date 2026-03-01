@@ -708,6 +708,16 @@ def load_character(name: str) -> dict:
         return json.load(f)
 
 
+def get_character_voice() -> Optional[str]:
+    """获取当前角色的 TTS voice 名称，未配置时返回 None"""
+    try:
+        char_name = get_config().system.active_character
+        char_data = load_character(char_name)
+        return char_data.get("voice") or None
+    except Exception:
+        return None
+
+
 def set_active_character(name: str) -> None:
     """切换活跃角色 - 将提示词管理器重定向到角色目录"""
     global _prompt_manager

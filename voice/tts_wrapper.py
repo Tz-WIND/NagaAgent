@@ -64,8 +64,9 @@ class TTSWrapper:
             from apiserver import naga_auth
             if naga_auth.is_authenticated():
                 import requests as _req
-                # NagaBusiness TTS 使用独立的 voice 名称，不兼容 edge-tts 格式
-                naga_voice = getattr(config.tts, 'naga_voice', None) or "Cherry"
+                # NagaBusiness TTS 使用角色 voice 名称，回退到 config 或 Cherry
+                from system.config import get_character_voice
+                naga_voice = get_character_voice() or getattr(config.tts, 'naga_voice', None) or "Cherry"
                 resp = _req.post(
                     naga_auth.NAGA_MODEL_URL + "/audio/speech",
                     json={"model": "default", "input": text, "voice": naga_voice,

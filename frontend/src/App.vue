@@ -352,6 +352,7 @@ onUnmounted(() => {
           :phase="phase"
           :model-ready="modelReady"
           :stall-hint="stallHint"
+          :live2d-visible="live2dShouldShow"
           @dismiss="onSplashDismiss"
           @title-done="onTitleDone"
         />

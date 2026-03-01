@@ -2,7 +2,7 @@
   "name": "game_guide",
   "displayName": "游戏攻略服务",
   "version": "0.1.0",
-  "description": "游戏攻略问答与计算服务，支持调用时自动截图注入。",
+  "description": "游戏攻略知识库问答：查角色技能/属性/面板、伤害计算、配队推荐、关卡攻略等。支持明日方舟、原神、崩铁、绝区零、鸣潮等游戏。",
   "author": "NagaAgent",
   "agentType": "mcp",
   "entryPoint": {

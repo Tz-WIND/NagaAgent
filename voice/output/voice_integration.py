@@ -220,8 +220,9 @@ class VoiceIntegration:
                 tts_url = naga_auth.NAGA_MODEL_URL + "/audio/speech"
                 headers["Authorization"] = f"Bearer {naga_auth.get_access_token()}"
                 payload["model"] = "default"
-                # NagaBusiness TTS 使用独立的 voice 名称（如 Cherry），不兼容 edge-tts 格式
-                payload["voice"] = getattr(config.tts, 'naga_voice', None) or "Cherry"
+                # NagaBusiness TTS 使用角色 voice 名称，回退到 config 或 Cherry
+                from system.config import get_character_voice
+                payload["voice"] = get_character_voice() or getattr(config.tts, 'naga_voice', None) or "Cherry"
             else:
                 tts_url = self.tts_url  # http://127.0.0.1:{port}/v1/audio/speech
                 if config.tts.require_api_key:

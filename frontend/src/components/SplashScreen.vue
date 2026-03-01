@@ -9,6 +9,7 @@ const props = defineProps<{
   phase: string
   modelReady: boolean
   stallHint: boolean
+  live2dVisible: boolean
 }>()
 
 const emit = defineEmits<{
@@ -168,6 +169,16 @@ const displayProgress = computed(() => Math.min(100, Math.round(props.progress))
     <!-- 金色神经网络粒子动画（透明背景，Live2D 可从下层透出） -->
     <NetworkCanvas />
 
+    <!-- Logo 水印：在背景之上、Live2D 之后，Live2D 出现后淡出 -->
+    <Transition name="fade">
+      <img
+        v-if="!live2dVisible && !titleOverlayVisible"
+        src="/NA.png"
+        alt=""
+        class="logo-watermark"
+      >
+    </Transition>
+
     <!-- clip-path evenodd 开洞遮罩：中间矩形区域透明，四周深色 -->
     <div class="frame-mask" />
 
@@ -252,6 +263,21 @@ const displayProgress = computed(() => Math.min(100, Math.round(props.progress))
     calc(var(--frame-x) + var(--frame-w)) calc(var(--frame-y) + var(--frame-h)),
     calc(var(--frame-x) + var(--frame-w)) var(--frame-y)
   );
+}
+
+/* Logo 水印：位于框中心，背景之上 */
+.logo-watermark {
+  position: absolute;
+  left: 50%;
+  top: 38%;
+  transform: translate(-50%, -50%);
+  width: 12vw;
+  max-width: 160px;
+  opacity: 0.15;
+  z-index: 200;
+  pointer-events: none;
+  user-select: none;
+  filter: drop-shadow(0 0 20px rgba(212, 175, 55, 0.3));
 }
 
 .frame-mask {
