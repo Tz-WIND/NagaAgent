@@ -2,7 +2,7 @@
 import { Button, ProgressBar } from 'primevue'
 import type { TravelSession } from '@/travel/types'
 import { formatMinutes } from '@/travel/composables/useTravel'
-import DiscoveryCard from '@/explore/components/DiscoveryCard.vue'
+import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 
 defineProps<{
   session: TravelSession
@@ -43,7 +43,7 @@ defineEmits<{ stop: [] }>()
       发现 ({{ session.discoveries.length }})
     </div>
     <div class="flex flex-col gap-1.5 max-h-40 overflow-y-auto">
-      <DiscoveryCard
+      <TravelDiscoveryItem
         v-for="(d, i) in session.discoveries.slice(-5)"
         :key="i"
         :discovery="d"
