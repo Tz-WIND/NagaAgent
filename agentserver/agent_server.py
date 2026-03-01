@@ -1029,6 +1029,106 @@ async def openclaw_wake(payload: Dict[str, Any]):
         raise HTTPException(500, f"触发失败: {e}")
 
 
+# ============ 本地搜索代理（拦截 OpenClaw web_search） ============
+
+_search_http_client: Optional["httpx.AsyncClient"] = None
+
+
+def _get_search_client() -> "httpx.AsyncClient":
+    """搜索代理共享 httpx 客户端"""
+    import httpx
+
+    global _search_http_client
+    if _search_http_client is None or _search_http_client.is_closed:
+        _search_http_client = httpx.AsyncClient(timeout=30.0, proxy=None)
+    return _search_http_client
+
+
+async def _local_search_proxy(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    本地搜索代理：拦截 web_search 请求，走 Naga 或 Brave，不转发给 OpenClaw。
+    返回 MCP 工具结果格式 { success, result: { content: [...] } }
+    """
+    query = args.get("query", "") or args.get("q", "")
+    count = args.get("count", 10) or args.get("limit", 10)
+    freshness = args.get("freshness")
+
+    if not query:
+        return {"success": False, "error": "缺少搜索关键词 (query)"}
+
+    try:
+        # 优先级1: 已登录 Naga → NagaBusiness 搜索代理
+        from apiserver import naga_auth
+
+        if naga_auth.is_authenticated():
+            token = naga_auth.get_access_token()
+            params: Dict[str, Any] = {"q": query, "count": count}
+            if freshness:
+                params["freshness"] = freshness
+            client = _get_search_client()
+            resp = await client.post(
+                naga_auth.NAGA_MODEL_URL + "/tools/search",
+                json=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            source = "naga"
+        else:
+            # 优先级2: 配置了 search_api_key → 直接调 Brave
+            api_key = config.online_search.search_api_key
+            if not api_key:
+                return {"success": False, "error": "未登录且未配置 search_api_key，无法搜索"}
+            api_base = config.online_search.search_api_base
+            params = {"q": query, "count": count}
+            if freshness:
+                params["freshness"] = freshness
+            client = _get_search_client()
+            resp = await client.get(
+                api_base,
+                params=params,
+                headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+            )
+            source = "brave"
+
+        if resp.status_code != 200:
+            try:
+                err = resp.json()
+                msg = err.get("error", {}).get("message", "") if isinstance(err.get("error"), dict) else str(err)
+            except Exception:
+                msg = f"HTTP {resp.status_code}"
+            logger.warning(f"[搜索代理] {source} 搜索失败: {msg}")
+            return {"success": False, "error": f"搜索失败: {msg}"}
+
+        data = resp.json()
+        results = data.get("web", {}).get("results", [])
+
+        # 格式化为可读文本
+        if not results:
+            text = "未找到相关搜索结果。"
+        else:
+            lines = []
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r.get('title', '')}")
+                lines.append(f"   URL: {r.get('url', '')}")
+                if r.get("description"):
+                    lines.append(f"   摘要: {r['description']}")
+                if r.get("age"):
+                    lines.append(f"   时间: {r['age']}")
+                lines.append("")
+            text = "\n".join(lines)
+
+        logger.info(f"[搜索代理] {source} 搜索完成: query=\"{query}\", 结果数={len(results)}")
+
+        # 返回 MCP 工具结果格式
+        return {
+            "success": True,
+            "result": {"content": [{"type": "text", "text": text}]},
+        }
+
+    except Exception as e:
+        logger.error(f"[搜索代理] 搜索异常: {e}")
+        return {"success": False, "error": f"搜索异常: {e}"}
+
+
 @app.post("/openclaw/tools/invoke")
 async def openclaw_invoke_tool(payload: Dict[str, Any]):
     """
@@ -1043,12 +1143,16 @@ async def openclaw_invoke_tool(payload: Dict[str, Any]):
     - action: 动作 (可选)
     - session_key: 会话标识 (可选)
     """
-    if not Modules.openclaw_client:
-        raise HTTPException(503, "OpenClaw 客户端未就绪")
-
     tool = payload.get("tool")
     if not tool:
         raise HTTPException(400, "tool 不能为空")
+
+    # web_search 拦截：走本地搜索代理，不转发给 OpenClaw
+    if tool == "web_search":
+        return await _local_search_proxy(payload.get("args") or {})
+
+    if not Modules.openclaw_client:
+        raise HTTPException(503, "OpenClaw 客户端未就绪")
 
     try:
         result = await Modules.openclaw_client.invoke_tool(
