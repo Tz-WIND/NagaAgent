@@ -7,44 +7,31 @@ import ForumSidebarRight from './components/ForumSidebarRight.vue'
 
 const { profile, load, setForumEnabled } = useForumProfile()
 
+const exploring = computed(() => profile.value?.forumEnabled ?? false)
+
+const realCredits = computed(() => profile.value?.creditsBalance ?? 0)
+
 onMounted(load)
 
-const quota = computed(() => profile.value?.quota)
-const stats = computed(() => profile.value?.stats)
-const forumEnabled = computed(() => profile.value?.forumEnabled ?? false)
+const quotaRemaining = computed(() => {
+  if (!profile.value?.quota) return 0
+  return Math.max(0, profile.value.quota.dailyBudget - profile.value.quota.usedToday)
+})
 
 const quotaPercent = computed(() => {
-  if (!quota.value || !quota.value.dailyBudget) return 0
-  return Math.min(100, Math.round((quota.value.usedToday / quota.value.dailyBudget) * 100))
+  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0) return 0
+  return Math.round((quotaRemaining.value / profile.value.quota.dailyBudget) * 100)
 })
 
-const quotaRemaining = computed(() => {
-  if (!quota.value) return 0
-  return Math.max(0, quota.value.dailyBudget - quota.value.usedToday)
-})
+// SVG 圆环
+const RING_R = 58
+const RING_C = 2 * Math.PI * RING_R
+const ringOffset = computed(() => RING_C * (1 - quotaPercent.value / 100))
 
-// SVG gauge ring constants
-const RADIUS = 54
-const CIRCUMFERENCE = 2 * Math.PI * RADIUS
-const gaugeOffset = computed(() => {
-  return CIRCUMFERENCE - (quotaPercent.value / 100) * CIRCUMFERENCE
-})
-
-function toggleExploration() {
-  setForumEnabled(!forumEnabled.value)
+function toggleExplore() {
+  if (!profile.value) return
+  setForumEnabled(!exploring.value)
 }
-
-const STAT_CARDS = [
-  { key: 'posts' as const, label: '发帖', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6' },
-  { key: 'replies' as const, label: '回帖', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' },
-  { key: 'likes' as const, label: '获赞', icon: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z' },
-]
-
-const BILLING = [
-  { action: '发帖', cost: 5, unit: '积分/篇' },
-  { action: '回帖', cost: 2, unit: '积分/条' },
-  { action: '点赞', cost: 0, unit: '免费' },
-]
 </script>
 
 <template>
@@ -62,113 +49,92 @@ const BILLING = [
         class="size-full"
         :pt="{ barY: { class: 'w-2! rounded! bg-#373737! transition!' } }"
       >
-        <div class="p-4">
-          <h2 class="text-white/90 text-base font-bold mt-0 mb-5">网络探索</h2>
+        <div v-if="profile" class="page">
+          <h2 class="title">网络探索</h2>
 
-          <!-- Quota gauge + toggle -->
-          <div class="card mb-4">
-            <div class="flex items-start gap-5">
-              <!-- SVG Gauge Ring -->
-              <div class="gauge-wrap shrink-0">
-                <svg viewBox="0 0 128 128" class="w-28 h-28">
-                  <!-- Background ring -->
-                  <circle
-                    cx="64" cy="64" :r="RADIUS"
-                    fill="none" stroke="rgba(255,255,255,0.06)" stroke-width="8"
-                  />
-                  <!-- Progress ring -->
-                  <circle
-                    cx="64" cy="64" :r="RADIUS"
-                    fill="none" stroke-width="8"
-                    stroke-linecap="round"
-                    class="gauge-ring"
-                    :class="{ 'gauge-warning': quotaPercent > 80 }"
-                    :stroke-dasharray="CIRCUMFERENCE"
-                    :stroke-dashoffset="gaugeOffset"
-                    transform="rotate(-90 64 64)"
-                  />
-                  <!-- Center text -->
-                  <text x="64" y="58" text-anchor="middle" class="gauge-value">
-                    {{ quotaRemaining }}
-                  </text>
-                  <text x="64" y="74" text-anchor="middle" class="gauge-label">
-                    剩余配额
-                  </text>
-                </svg>
-              </div>
-
-              <div class="flex-1 min-w-0">
-                <!-- Credits balance -->
-                <div v-if="profile?.creditsBalance != null" class="mb-3">
-                  <div class="text-white/30 text-[10px] mb-0.5">账户余额</div>
-                  <div class="flex items-baseline gap-1.5">
-                    <span class="text-white/90 text-xl font-bold font-mono">{{ profile.creditsBalance }}</span>
-                    <span class="text-white/25 text-xs">积分</span>
-                  </div>
-                </div>
-
-                <!-- Quota detail -->
-                <div v-if="quota" class="text-white/35 text-[11px] mb-3">
-                  今日已用 <span class="text-white/60 font-mono">{{ quota.usedToday }}</span>
-                  / <span class="text-white/60 font-mono">{{ quota.dailyBudget }}</span> 配额
-                </div>
-                <div v-else class="text-white/20 text-[11px] mb-3">
-                  配额数据将在服务器支持后显示
-                </div>
-
-                <!-- Toggle button -->
-                <button
-                  class="toggle-btn"
-                  :class="{ active: forumEnabled }"
-                  @click="toggleExploration"
-                >
-                  <span class="toggle-dot" />
-                  <span class="text-xs">{{ forumEnabled ? '探索中' : '已停止' }}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <!-- Stats cards -->
-          <div class="grid grid-cols-3 gap-3 mb-4">
-            <div v-for="card in STAT_CARDS" :key="card.key" class="stat-card">
-              <svg class="w-4 h-4 text-#d4af37/50 mb-1.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path :d="card.icon" />
+          <!-- ── 剩余流量 ── -->
+          <div class="quota-block">
+            <div class="gauge-wrap">
+              <svg class="gauge-svg" viewBox="0 0 136 136">
+                <circle class="gauge-track" cx="68" cy="68" :r="RING_R" />
+                <circle
+                  class="gauge-fill"
+                  :class="{ low: quotaPercent < 20 }"
+                  cx="68" cy="68" :r="RING_R"
+                  :stroke-dasharray="RING_C"
+                  :stroke-dashoffset="ringOffset"
+                />
               </svg>
-              <div class="text-white/80 text-lg font-bold font-mono">
-                {{ stats?.[card.key] ?? '-' }}
+              <div class="gauge-center">
+                <span class="gauge-num">{{ quotaRemaining }}</span>
+                <span class="gauge-sub">剩余积分</span>
               </div>
-              <div class="text-white/30 text-[10px]">{{ card.label }}</div>
+            </div>
+            <div class="quota-meta">
+              <div class="meta-row">
+                <span class="meta-label">每日配额</span>
+                <span class="meta-val">{{ profile.quota?.dailyBudget ?? '-' }}</span>
+              </div>
+              <div class="meta-row">
+                <span class="meta-label">今日已用</span>
+                <span class="meta-val">{{ profile.quota?.usedToday ?? '-' }}</span>
+              </div>
+              <div class="meta-row">
+                <span class="meta-label">账户余额</span>
+                <span class="meta-val accent">{{ realCredits }}</span>
+              </div>
             </div>
           </div>
 
-          <!-- Billing card -->
-          <div class="card mb-4">
-            <div class="card-header">
-              <svg class="w-4 h-4 text-#d4af37" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
+          <!-- ── 本次探索成果 ── -->
+          <div class="stats-block">
+            <div class="stats-label">本次探索</div>
+            <div class="stats-grid">
+              <div class="stat-card">
+                <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                <span class="stat-num">{{ profile.stats?.posts ?? 0 }}</span>
+                <span class="stat-name">发帖</span>
+              </div>
+              <div class="stat-card">
+                <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+                <span class="stat-num">{{ profile.stats?.replies ?? 0 }}</span>
+                <span class="stat-name">回帖</span>
+              </div>
+              <div class="stat-card">
+                <svg class="stat-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>
+                <span class="stat-num">{{ profile.stats?.likes ?? 0 }}</span>
+                <span class="stat-name">获赞</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── 出发 / 终止 ── -->
+          <button
+            class="launch-btn"
+            :class="{ active: exploring }"
+            @click="toggleExplore"
+          >
+            <template v-if="!exploring">
+              <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
-              积分消耗
-            </div>
-            <div class="text-white/25 text-[10px] mt-1.5 mb-3">智能体的论坛活动将从账户余额中扣除积分</div>
-            <div class="cost-table">
-              <div v-for="item in BILLING" :key="item.action" class="cost-row">
-                <span class="text-white/50 text-xs">{{ item.action }}</span>
-                <span class="text-white/70 text-xs font-mono">
-                  <template v-if="item.cost > 0">{{ item.cost }} {{ item.unit }}</template>
-                  <template v-else><span class="text-#4ade80/60">{{ item.unit }}</span></template>
-                </span>
-              </div>
-            </div>
-          </div>
+              出发
+            </template>
+            <template v-else>
+              <svg class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="6" y="4" width="4" height="16" />
+                <rect x="14" y="4" width="4" height="16" />
+              </svg>
+              终止探索
+            </template>
+          </button>
 
-          <!-- Info -->
-          <div class="card info-card">
-            <div class="text-white/30 text-xs leading-relaxed">
-              配额每日 UTC 00:00 重置。智能体开启探索后将自主浏览论坛、发帖互动，消耗配额与积分。
-            </div>
+          <div v-if="exploring" class="explore-hint">
+            智能体正在网络中探索，消耗积分进行发帖与回复
           </div>
         </div>
+
+        <div v-else class="text-white/30 text-sm text-center py-8">加载中...</div>
       </ScrollPanel>
     </div>
 
@@ -182,103 +148,208 @@ const BILLING = [
   border-radius: 8px;
 }
 
-.card {
-  background: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 8px;
-  padding: 16px;
-}
-
-.card-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.05em;
-}
-
-.cost-table {
+.page {
   display: flex;
   flex-direction: column;
-}
-.cost-row {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-}
-.cost-row:last-child {
-  border-bottom: none;
+  padding: 28px 24px 20px;
+  gap: 24px;
 }
 
-.info-card {
-  background: rgba(212, 175, 55, 0.03);
-  border-color: rgba(212, 175, 55, 0.08);
-}
-
-/* Gauge */
-.gauge-ring {
-  stroke: #d4af37;
-  transition: stroke-dashoffset 0.6s ease;
-}
-.gauge-ring.gauge-warning {
-  stroke: #e85d5d;
-}
-.gauge-value {
-  fill: rgba(255, 255, 255, 0.9);
-  font-size: 22px;
+.title {
+  margin: 0;
+  font-size: 16px;
   font-weight: 700;
-  font-family: ui-monospace, monospace;
-}
-.gauge-label {
-  fill: rgba(255, 255, 255, 0.3);
-  font-size: 9px;
+  color: rgba(255, 255, 255, 0.9);
+  font-family: 'Noto Serif SC', serif;
+  letter-spacing: 0.06em;
+  align-self: flex-start;
 }
 
-/* Stat cards */
+/* ── 剩余流量 ── */
+.quota-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+}
+
+.gauge-wrap {
+  position: relative;
+  width: 140px;
+  height: 140px;
+}
+
+.gauge-svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.gauge-track {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.06);
+  stroke-width: 10;
+}
+
+.gauge-fill {
+  fill: none;
+  stroke: rgba(212, 175, 55, 0.85);
+  stroke-width: 10;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.8s ease;
+}
+
+.gauge-fill.low {
+  stroke: rgba(200, 80, 60, 0.85);
+}
+
+.gauge-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
+.gauge-num {
+  font-size: 32px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.92);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.gauge-sub {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+  margin-top: 4px;
+}
+
+.quota-meta {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+}
+
+.meta-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.meta-label {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.meta-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.75);
+  font-variant-numeric: tabular-nums;
+}
+
+.meta-val.accent {
+  color: rgba(212, 175, 55, 0.9);
+}
+
+/* ── 本次探索成果 ── */
+.stats-block {
+  width: 100%;
+}
+
+.stats-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.35);
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
 .stat-card {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 4px;
   padding: 14px 8px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid rgba(255, 255, 255, 0.06);
   border-radius: 8px;
 }
 
-/* Toggle button */
-.toggle-btn {
-  display: inline-flex;
+.stat-icon {
+  width: 18px;
+  height: 18px;
+  color: rgba(212, 175, 55, 0.6);
+}
+
+.stat-num {
+  font-size: 20px;
+  font-weight: 800;
+  color: rgba(255, 255, 255, 0.88);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.stat-name {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+}
+
+/* ── 出发 / 终止 ── */
+.launch-btn {
+  display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  padding: 6px 14px;
-  border-radius: 20px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.04);
-  color: rgba(255, 255, 255, 0.5);
+  width: 100%;
+  padding: 14px 0;
+  border-radius: 10px;
+  font-size: 15px;
+  font-weight: 700;
+  font-family: 'Noto Serif SC', serif;
+  letter-spacing: 0.06em;
   cursor: pointer;
   transition: all 0.2s;
+  /* 默认：出发态 */
+  background: linear-gradient(135deg, rgba(212, 175, 55, 0.2), rgba(180, 140, 30, 0.15));
+  border: 1px solid rgba(212, 175, 55, 0.35);
+  color: rgba(212, 175, 55, 0.95);
 }
-.toggle-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
+
+.launch-btn:hover {
+  background: linear-gradient(135deg, rgba(212, 175, 55, 0.3), rgba(180, 140, 30, 0.25));
+  border-color: rgba(212, 175, 55, 0.55);
+  box-shadow: 0 0 16px rgba(212, 175, 55, 0.08);
 }
-.toggle-btn.active {
-  border-color: rgba(212, 175, 55, 0.3);
-  background: rgba(212, 175, 55, 0.08);
-  color: #d4af37;
+
+/* 探索中：终止态 */
+.launch-btn.active {
+  background: rgba(200, 80, 60, 0.12);
+  border-color: rgba(200, 80, 60, 0.3);
+  color: rgba(200, 80, 60, 0.9);
 }
-.toggle-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
-  transition: background 0.2s;
+
+.launch-btn.active:hover {
+  background: rgba(200, 80, 60, 0.2);
+  border-color: rgba(200, 80, 60, 0.5);
+  box-shadow: 0 0 16px rgba(200, 80, 60, 0.08);
 }
-.toggle-btn.active .toggle-dot {
-  background: #d4af37;
-  box-shadow: 0 0 6px rgba(212, 175, 55, 0.5);
+
+.explore-hint {
+  font-size: 10px;
+  color: rgba(52, 211, 153, 0.6);
+  text-align: center;
+  margin-top: -12px;
 }
 </style>

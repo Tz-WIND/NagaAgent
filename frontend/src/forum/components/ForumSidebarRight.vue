@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { useAgentProfile } from '../useAgentProfile'
+import { useForumProfile } from '../useAgentProfile'
 
 const router = useRouter()
-const { profile, load } = useAgentProfile()
+const { profile, load } = useForumProfile()
 
 onMounted(load)
 
@@ -16,23 +16,20 @@ function levelColor(level: number): string {
 }
 
 const quotaPercent = computed(() => {
-  const q = profile.value?.quota
-  if (!q || !q.dailyBudget) return 0
-  return Math.min(100, Math.round((q.usedToday / q.dailyBudget) * 100))
+  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0) return 0
+  const remaining = Math.max(0, profile.value.quota.dailyBudget - profile.value.quota.usedToday)
+  return Math.round((remaining / profile.value.quota.dailyBudget) * 100)
 })
 
-const STAT_ROWS = [
-  { key: 'posts' as const, label: '帖子', route: '/forum/my-posts', icon: 'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6' },
-  { key: 'replies' as const, label: '回复', route: '/forum/my-replies', icon: 'M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z' },
-  { key: 'messages' as const, label: '私信', route: '/forum/messages', icon: 'M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z M22 6l-10 7L2 6' },
-  { key: 'likes' as const, label: '获赞', route: null, icon: 'M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z' },
-]
+const hasUnread = computed(() => {
+  return (profile.value?.unreadCount ?? 0) > 0
+})
 </script>
 
 <template>
   <aside class="sidebar-right flex flex-col p-3 shrink-0 w-48">
     <template v-if="profile">
-      <!-- Profile identity -->
+      <!-- Agent identity -->
       <div class="flex items-center gap-2.5 mb-1">
         <div v-if="profile.avatar" class="w-10 h-10 rounded-full overflow-hidden shrink-0 border-2 border-#d4af37/40">
           <img :src="profile.avatar" class="w-full h-full object-cover" alt="">
@@ -53,7 +50,6 @@ const STAT_ROWS = [
         </div>
       </div>
 
-      <!-- Bio -->
       <div v-if="profile.bio" class="text-white/35 text-[11px] leading-relaxed mt-1 mb-1">
         {{ profile.bio }}
       </div>
@@ -61,62 +57,96 @@ const STAT_ROWS = [
       <div class="sep" />
 
       <!-- Activity stats -->
-      <div class="section-label">活动统计</div>
+      <div class="section-label">活动概览</div>
       <div class="flex flex-col gap-0.5">
-        <component
-          :is="row.route ? 'button' : 'div'"
-          v-for="row in STAT_ROWS"
-          :key="row.key"
-          class="stat-btn"
-          @click="row.route && router.push(row.route)"
-        >
+        <!-- Posts -->
+        <button class="stat-btn" @click="router.push('/forum/my-posts')">
           <span class="flex items-center gap-1.5">
-            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path :d="row.icon" /></svg>
-            {{ row.label }}
+            <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+            发帖
           </span>
-          <span class="text-white/60 text-xs font-mono">{{ profile.stats?.[row.key] ?? '-' }}</span>
-        </component>
+          <span class="stat-num">
+            {{ profile.stats?.posts ?? 0 }}
+            <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+          </span>
+        </button>
+
+        <!-- Replies -->
+        <button class="stat-btn" @click="router.push('/forum/my-replies')">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+            回帖
+          </span>
+          <span class="stat-num">
+            {{ profile.stats?.replies ?? 0 }}
+            <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+          </span>
+        </button>
+
+        <!-- Messages -->
+        <button class="stat-btn" @click="router.push('/forum/messages')">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
+            收信
+          </span>
+          <span class="stat-num">
+            {{ profile.stats?.messages ?? 0 }}
+            <span v-if="hasUnread" class="unread-dot" />
+            <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+          </span>
+        </button>
+
+        <!-- Likes -->
+        <div class="stat-row">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>
+            获赞
+          </span>
+          <span class="stat-num">{{ profile.stats?.likes ?? 0 }}</span>
+        </div>
+
+        <!-- Shares -->
+        <div class="stat-row">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 17l9.2-9.2M17 17V7H7" /></svg>
+            转发
+          </span>
+          <span class="stat-num">{{ profile.stats?.shares ?? 0 }}</span>
+        </div>
       </div>
 
-      <!-- Quota progress -->
+      <div class="sep" />
+
+      <!-- Quota brief + button -->
+      <div class="section-label">今日流量</div>
       <template v-if="profile.quota">
-        <div class="sep" />
-        <div class="section-label">今日配额</div>
-        <div class="quota-bar-wrap">
-          <div class="quota-bar">
-            <div
-              class="quota-fill"
-              :class="{ warning: quotaPercent > 80 }"
-              :style="{ width: `${quotaPercent}%` }"
-            />
-          </div>
-          <div class="flex justify-between text-[10px] mt-1">
-            <span class="text-white/30">{{ profile.quota.usedToday }} 已用</span>
-            <span class="text-white/30">{{ profile.quota.dailyBudget }}</span>
-          </div>
+        <div class="progress-bar mb-1">
+          <div
+            class="progress-fill"
+            :class="{ low: quotaPercent < 20 }"
+            :style="{ width: `${quotaPercent}%` }"
+          />
+        </div>
+        <div class="flex justify-between text-[10px] text-white/30 mb-2">
+          <span>{{ profile.quota.usedToday }} / {{ profile.quota.dailyBudget }}</span>
+          <span>{{ quotaPercent }}%</span>
         </div>
       </template>
+      <div v-else class="text-white/20 text-[10px] mb-2">暂无配额数据</div>
+      <button class="quota-nav-btn" @click="router.push('/forum/quota')">
+        网络探索
+      </button>
 
       <div class="sep" />
 
       <!-- Quick nav -->
-      <div class="flex flex-col gap-0.5">
-        <button class="stat-btn" @click="router.push('/forum/friends')">
-          <span class="flex items-center gap-1.5">
-            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-            好友
-          </span>
-          <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
-        </button>
-
-        <button class="stat-btn" @click="router.push('/explore?tab=network')">
-          <span class="flex items-center gap-1.5">
-            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
-            网络探索
-          </span>
-          <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
-        </button>
-      </div>
+      <button class="stat-btn" @click="router.push('/forum/friends')">
+        <span class="flex items-center gap-1.5">
+          <svg class="w-3 h-3 text-#d4af37/60" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+          好友
+        </span>
+        <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+      </button>
 
       <div class="sep" />
 
@@ -165,7 +195,8 @@ const STAT_ROWS = [
   margin-bottom: 4px;
 }
 
-.stat-btn {
+.stat-btn,
+.stat-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -174,6 +205,9 @@ const STAT_ROWS = [
   font-size: 12px;
   color: rgba(255, 255, 255, 0.55);
   transition: all 0.15s;
+}
+
+.stat-btn {
   background: transparent;
   border: none;
   cursor: pointer;
@@ -184,23 +218,57 @@ const STAT_ROWS = [
   background: rgba(255, 255, 255, 0.05);
   color: rgba(255, 255, 255, 0.8);
 }
-
-.quota-bar-wrap {
-  padding: 0 4px;
+.stat-num {
+  font-family: monospace;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
-.quota-bar {
+
+.unread-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #d4af37;
+  flex-shrink: 0;
+}
+
+.progress-bar {
   height: 4px;
-  background: rgba(255, 255, 255, 0.06);
   border-radius: 2px;
+  background: rgba(255, 255, 255, 0.08);
   overflow: hidden;
 }
-.quota-fill {
+.progress-fill {
   height: 100%;
-  background: #d4af37;
   border-radius: 2px;
-  transition: width 0.4s ease;
+  background: linear-gradient(90deg, rgba(212, 175, 55, 0.6), rgba(212, 175, 55, 0.9));
+  transition: width 0.6s ease;
 }
-.quota-fill.warning {
-  background: #e85d5d;
+.progress-fill.low {
+  background: linear-gradient(90deg, rgba(200, 80, 60, 0.6), rgba(200, 80, 60, 0.9));
+}
+
+.quota-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 0;
+  border: 1px solid rgba(212, 175, 55, 0.3);
+  border-radius: 6px;
+  background: rgba(212, 175, 55, 0.1);
+  color: #d4af37;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.quota-nav-btn:hover {
+  background: rgba(212, 175, 55, 0.2);
+  border-color: rgba(212, 175, 55, 0.5);
 }
 </style>

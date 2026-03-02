@@ -75,11 +75,31 @@ let expressionTarget: Record<string, number> = {}
 let expressionCurrent: Record<string, number> = {}
 let expressionActive = false
 
-// 嘴巴状态（身体通道附属）
-let mouthTarget = 0
-let mouthCurrent = 0
+// 嘴巴状态（身体通道附属）— 多参数口型混合
+// 中文口型预设：中文以音节为单位，口型变化幅度比英语小，韵母主导
+// 权重 w 控制出现概率（加权随机），高权重的口型更常出现
+const VISEMES: { w: number, p: Record<string, number> }[] = [
+  // 开口韵母 a/ang/an — 中文最常见的大口型
+  { w: 25, p: { ParamMouthOpenY: 0.6, JawOpen: 0.35, MouthFunnel: 0, ParamMouthForm: 0.15 } },
+  // 半开 e/en/ei — 自然放松的半张嘴
+  { w: 20, p: { ParamMouthOpenY: 0.4, JawOpen: 0.2, MouthFunnel: 0, ParamMouthForm: 0.3 } },
+  // 齐齿 i/in/ing — 嘴角略拉，开口小
+  { w: 15, p: { ParamMouthOpenY: 0.25, JawOpen: 0.1, MouthFunnel: 0, ParamMouthForm: 0.4 } },
+  // 合口 u/un/ong — 微收圆
+  { w: 12, p: { ParamMouthOpenY: 0.2, JawOpen: 0.1, MouthFunnel: 0.3, ParamMouthForm: -0.15 } },
+  // 撮口 ü/uan — 小圆口
+  { w: 8, p: { ParamMouthOpenY: 0.15, JawOpen: 0.05, MouthFunnel: 0.4, ParamMouthForm: -0.2 } },
+  // 闭合音节过渡 (声母瞬间) — 嘴几乎闭合
+  { w: 12, p: { ParamMouthOpenY: 0.08, JawOpen: 0, MouthFunnel: 0, ParamMouthForm: 0.1 } },
+  // 句中微停顿 — 完全闭嘴
+  { w: 8, p: { ParamMouthOpenY: 0, JawOpen: 0, MouthFunnel: 0, ParamMouthForm: 0 } },
+]
+const _visemeWeightSum = VISEMES.reduce((s, v) => s + v.w, 0)
+const MOUTH_PARAMS = ['ParamMouthOpenY', 'JawOpen', 'MouthFunnel', 'ParamMouthForm']
+let mouthCurrentValues: Record<string, number> = {}
+let mouthTargetValues: Record<string, number> = {}
 let mouthNextChangeTime = 0
-let lastMouthParam: string | null = null // 记录嘴巴参数名，用于退出 talking 时闭嘴
+let mouthWasTalking = false // 追踪是否刚退出 talking，用于平滑闭嘴
 
 // ─── 手动覆盖通道 ──────────────────────────────────
 
@@ -259,30 +279,72 @@ function computeMouth(now: number, dt: number): Record<string, number> {
   const stateCfg = actionsData.states[currentStateName]
 
   if (!stateCfg?.mouth) {
-    // 非 talking 状态：平滑闭嘴
-    if (lastMouthParam) {
-      mouthCurrent = lerp(mouthCurrent, 0, smoothFactor(30, dt))
-      if (Math.abs(mouthCurrent) < 0.001) {
-        mouthCurrent = 0
-        const param = lastMouthParam
-        lastMouthParam = null
-        return { [param]: 0 }
+    // 非 talking 状态：所有嘴部参数平滑归零
+    if (mouthWasTalking) {
+      let allSettled = true
+      const result: Record<string, number> = {}
+      const sf = smoothFactor(40, dt)
+      for (const p of MOUTH_PARAMS) {
+        const cur = mouthCurrentValues[p] ?? 0
+        if (Math.abs(cur) > 0.001) {
+          mouthCurrentValues[p] = lerp(cur, 0, sf)
+          result[p] = mouthCurrentValues[p]
+          allSettled = false
+        }
+        else {
+          mouthCurrentValues[p] = 0
+          result[p] = 0
+        }
       }
-      return { [lastMouthParam]: mouthCurrent }
+      if (allSettled)
+        mouthWasTalking = false
+      return result
     }
     return {}
   }
 
-  const cfg = stateCfg.mouth
-  lastMouthParam = cfg.param
-  if (now >= mouthNextChangeTime) {
-    mouthTarget = cfg.min + Math.random() * (cfg.max - cfg.min)
-    mouthNextChangeTime = now + 80 + Math.random() * 170
-  }
-  const halfLife = cfg.speed / 3
-  mouthCurrent = lerp(mouthCurrent, mouthTarget, smoothFactor(halfLife, dt))
+  // talking 状态：多参数口型混合
+  mouthWasTalking = true
 
-  return { [cfg.param]: mouthCurrent }
+  if (now >= mouthNextChangeTime) {
+    // 加权随机选择口型
+    let roll = Math.random() * _visemeWeightSum
+    let idx = 0
+    for (let i = 0; i < VISEMES.length; i++) {
+      roll -= VISEMES[i].w
+      if (roll <= 0) { idx = i; break }
+    }
+
+    // 中文语速约 4-6 音节/秒，每音节 170-250ms
+    // 闭合/停顿口型持续更短
+    const isRest = idx >= VISEMES.length - 2
+    mouthNextChangeTime = now + (isRest
+      ? 40 + Math.random() * 80 // 闭合过渡 40-120ms
+      : 120 + Math.random() * 160) // 正常音节 120-280ms
+
+    const viseme = VISEMES[idx].p
+    for (const p of MOUTH_PARAMS) {
+      const base = viseme[p] ?? 0
+      const jitter = (Math.random() - 0.5) * 0.08
+      mouthTargetValues[p] = Math.max(0, Math.min(1, base + jitter))
+    }
+    // MouthForm 允许负值
+    const formBase = viseme.ParamMouthForm ?? 0
+    mouthTargetValues.ParamMouthForm = formBase + (Math.random() - 0.5) * 0.1
+  }
+
+  // 平滑插值到目标口型
+  const halfLife = (stateCfg.mouth.speed || 200) / 3
+  const sf = smoothFactor(halfLife, dt)
+  const result: Record<string, number> = {}
+  for (const p of MOUTH_PARAMS) {
+    const cur = mouthCurrentValues[p] ?? 0
+    const tgt = mouthTargetValues[p] ?? 0
+    mouthCurrentValues[p] = lerp(cur, tgt, sf)
+    result[p] = mouthCurrentValues[p]
+  }
+
+  return result
 }
 
 function computeActionParams(now: number): Record<string, number> {
@@ -519,10 +581,34 @@ export function clearEmotion() {
   currentEmotionName = null
 }
 
+// 情绪动作名 → EmotionCategory 映射
+const ACTION_EMOTION_MAP: Record<string, EmotionCategory> = {
+  happy: 'positive',
+  enjoy: 'positive',
+  sad: 'negative',
+  surprise: 'surprise',
+  normal: 'normal',
+}
+
 export function triggerAction(name: string) {
   console.log('[Live2D] Trigger action:', name)
-  actionQueue = [name]
-  activeAction = null
+
+  // 情绪类动作：同时触发 .exp3.json 持久表情
+  const emotion = ACTION_EMOTION_MAP[name]
+  if (emotion) {
+    // 直接设置目标表情名（不走 setEmotion 的随机逻辑）
+    if (expressionDefs.has(name)) {
+      console.log('[Live2D] Action → emotion expression:', name)
+      currentEmotionName = name
+      _emotionFadeStartTime = performance.now()
+    }
+  }
+
+  // 非情绪动作（nod/shake）正常播放关键帧；情绪动作也播放（提供身体动画）
+  if (actionsData?.actions[name]) {
+    actionQueue = [name]
+    activeAction = null
+  }
 }
 
 /** 设置手动参数覆盖（如闭眼：{ ParamEyeLOpen: 0, ParamEyeROpen: 0 }） */
@@ -602,9 +688,9 @@ export function destroyController() {
   expressionCurrent = {}
   expressionActive = false
   // 嘴巴
-  mouthCurrent = 0
-  mouthTarget = 0
-  lastMouthParam = null
+  mouthCurrentValues = {}
+  mouthTargetValues = {}
+  mouthWasTalking = false
   // 追踪
   lastTickTime = 0
   isTracking = false
