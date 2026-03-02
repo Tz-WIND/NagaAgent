@@ -239,6 +239,18 @@ class ServiceManager:
                         break
                     time.sleep(0.2)
 
+            # API 端口额外诊断日志，方便定位虚拟机内的“无监听/SYN_SENT”问题
+            if port_checks.get('api'):
+                api_port = config.api_server.port
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                api_ready = (s.connect_ex(('127.0.0.1', api_port)) == 0)
+                s.close()
+                if not api_ready:
+                    print(
+                        f"⚠️  API服务器端口 {api_port} 当前不可连接（可能启动失败、仍在启动或本机环回被拦截）"
+                    )
+
             _emit_progress(45, "等待服务就绪...")
 
             print("-" * 30)
@@ -277,17 +289,19 @@ class ServiceManager:
                 print("已清空 requests Session 全局代理配置")
     def _start_api_server(self):
         """内部API服务器启动方法"""
+        import traceback
         try:
-            import asyncio
             import uvicorn
             from apiserver.api_server import app
 
-            print(f"   🚀 API服务器: 正在启动 on {config.api_server.host}:{config.api_server.port}...")
+            host = config.api_server.host
+            port = config.api_server.port
+            print(f"   🚀 API服务器: 正在启动 on {host}:{port}...")
 
             uvicorn.run(
                 app,
-                host=config.api_server.host,
-                port=config.api_server.port,
+                host=host,
+                port=port,
                 log_level="info",
                 access_log=False,
                 reload=False,
@@ -296,8 +310,29 @@ class ServiceManager:
             )
         except ImportError as e:
             print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
+            traceback.print_exc()
         except Exception as e:
             print(f"   ❌ API服务器启动失败: {e}", flush=True)
+            traceback.print_exc()
+            # 某些 Windows/虚拟机环境下 127.0.0.1 绑定会异常，回退尝试 0.0.0.0
+            try:
+                if str(config.api_server.host).strip() == "127.0.0.1":
+                    import uvicorn
+                    from apiserver.api_server import app
+                    print("   🔁 API服务器回退重试: 0.0.0.0", flush=True)
+                    uvicorn.run(
+                        app,
+                        host="0.0.0.0",
+                        port=config.api_server.port,
+                        log_level="info",
+                        access_log=False,
+                        reload=False,
+                        ws_ping_interval=None,
+                        ws_ping_timeout=None,
+                    )
+            except Exception as retry_err:
+                print(f"   ❌ API服务器回退重试失败: {retry_err}", flush=True)
+                traceback.print_exc()
     
     def _start_mcp_server(self):
         """内部MCP服务器启动方法"""
