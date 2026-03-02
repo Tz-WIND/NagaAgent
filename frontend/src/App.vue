@@ -122,8 +122,17 @@ function onModelReady(pos: { faceX: number, faceY: number }) {
   }
 }
 
-// progress >= 50 且标题阶段结束后渐入 Live2D
-const live2dShouldShow = computed(() => progress.value >= 50 && splashVisible.value && titlePhaseDone.value)
+// 【诊断】强制显示 Live2D，测试是否是显示条件问题
+const live2dShouldShow = computed(() => {
+  console.log('[Live2D-Visibility]', {
+    splashVisible: splashVisible.value,
+    titlePhaseDone: titlePhaseDone.value,
+    modelReady: modelReady.value,
+    shouldShow: splashVisible.value && modelReady.value,
+  })
+  // 改为：模型加载完成后就显示（不等标题动画）
+  return modelReady.value
+})
 
 function onTitleDone() {
   titlePhaseDone.value = true

@@ -2,7 +2,7 @@
 import { Button } from 'primevue'
 import type { TravelSession } from '@/travel/types'
 import { formatDate, statusLabel } from '@/travel/composables/useTravel'
-import DiscoveryGrid from '@/explore/components/DiscoveryGrid.vue'
+import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 
 defineProps<{ session: TravelSession }>()
 defineEmits<{ 'new-travel': [] }>()
@@ -35,7 +35,14 @@ defineEmits<{ 'new-travel': [] }>()
     <div class="text-white/40 text-xs">
       发现 ({{ session.discoveries.length }})
     </div>
-    <DiscoveryGrid :discoveries="session.discoveries" clickable />
+    <div class="flex flex-col gap-1.5 max-h-60 overflow-y-auto">
+      <TravelDiscoveryItem
+        v-for="(d, i) in session.discoveries"
+        :key="i"
+        :discovery="d"
+        clickable
+      />
+    </div>
   </div>
 
   <!-- 社交互动 -->

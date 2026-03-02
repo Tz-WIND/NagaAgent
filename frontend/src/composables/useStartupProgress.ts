@@ -137,23 +137,18 @@ export function useStartupProgress() {
 
       // 阶段 25→50：后端已连接
       console.log('[Startup] 后端已连接，开始后连接任务')
-      setTarget(50, '预加载视图...')
+      setTarget(50, '加载资源...')
 
-      // 阶段 50→70：预加载视图（8 秒超时，超时不阻塞启动）
-      console.log('[Startup] 开始预加载 7 个视图组件...')
-      await withTimeout(
-        preloadAllViews((loaded, total) => {
-          const viewProgress = 50 + (loaded / total) * 20
-          console.log(`[Startup] 预加载视图 ${loaded}/${total} (${viewProgress.toFixed(0)}%)`)
-          setTarget(viewProgress, `预加载视图 ${loaded}/${total}...`)
-        }),
-        8000,
-        'preloadAllViews',
-      )
-      console.log('[Startup] 视图预加载完成')
+      // 视图预加载改为后台异步执行，不阻塞启动流程（让 Live2D 优先显示）
+      console.log('[Startup] 在后台异步预加载视图组件...')
+      preloadAllViews((loaded, total) => {
+        console.log(`[Startup] 后台预加载视图 ${loaded}/${total}`)
+      }).catch(() => {
+        console.warn('[Startup] 后台视图预加载失败，不影响启动')
+      })
 
-      // 阶段 70→90：获取会话（5 秒超时）
-      setTarget(70, '获取会话...')
+      // 阶段 50→80：获取会话（5 秒超时）
+      setTarget(80, '获取会话...')
       console.log('[Startup] 获取会话列表...')
       try {
         await withTimeout(API.getSessions(), 5000, 'getSessions')
@@ -162,11 +157,11 @@ export function useStartupProgress() {
       catch {
         console.warn('[Startup] 会话获取失败，不阻塞启动')
       }
-      setTarget(90, '准备就绪')
+      setTarget(95, '准备就绪')
       console.log('[Startup] 所有启动任务完成，进入主界面')
 
-      // 阶段 90→100：完成
-      setTimeout(() => setTarget(100, '准备就绪'), 300)
+      // 阶段 95→100：完成
+      setTimeout(() => setTarget(100, '准备就绪'), 200)
     }
     finally {
       clearTimeout(safetyTimer)

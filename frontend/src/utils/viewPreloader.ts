@@ -5,7 +5,7 @@
 const VIEW_IMPORTS: Array<{ name: string, load: () => Promise<any> }> = [
   { name: 'PanelView', load: () => import('@/views/PanelView.vue') },
   { name: 'MessageView', load: () => import('@/views/MessageView.vue') },
-  { name: 'ExploreView', load: () => import('@/explore/ExploreView.vue') },
+  { name: 'TravelView', load: () => import('@/views/TravelView.vue') },
   { name: 'MemoryView', load: () => import('@/views/MemoryView.vue') },
   { name: 'MindView', load: () => import('@/views/MindView.vue') },
   { name: 'SkillView', load: () => import('@/views/SkillView.vue') },

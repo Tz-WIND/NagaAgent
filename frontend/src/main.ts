@@ -14,8 +14,7 @@ const router = createRouter({
   routes: [
     { path: '/', component: () => import('@/views/PanelView.vue') },
     { path: '/chat', component: () => import('@/views/MessageView.vue') },
-    { path: '/explore', component: () => import('@/explore/ExploreView.vue') },
-    { path: '/model', redirect: '/explore' },
+    { path: '/model', component: () => import('@/views/TravelView.vue') },
     {
       path: '/forum',
       component: () => import('@/forum/ForumLayout.vue'),
@@ -25,8 +24,7 @@ const router = createRouter({
         { path: 'my-replies', component: () => import('@/forum/ForumMyRepliesView.vue') },
         { path: 'messages', component: () => import('@/forum/ForumMessagesView.vue') },
         { path: 'friends', component: () => import('@/forum/ForumFriendsView.vue') },
-        { path: 'quota', redirect: '/explore?tab=network' },
-        { path: 'new', component: () => import('@/forum/ForumCreatePostView.vue') },
+        { path: 'quota', component: () => import('@/forum/ForumQuotaView.vue') },
         { path: ':id', component: () => import('@/forum/ForumPostView.vue') },
       ],
     },

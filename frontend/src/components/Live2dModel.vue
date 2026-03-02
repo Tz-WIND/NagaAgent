@@ -141,8 +141,12 @@ onMounted(async () => {
   watch(() => [width, height, ssaa], () => nextTick().then(() => app.resize()))
 
   watch(() => source, async (source, _, onCleanUp) => {
+    console.log(`[Live2D] 开始加载模型: ${source}`, new Date().toISOString())
+    const startTime = performance.now()
     try {
       const rawModel = await Live2DModel.from(source)
+      const loadTime = performance.now() - startTime
+      console.log(`[Live2D] 模型加载完成，耗时: ${loadTime.toFixed(0)}ms`)
       const model = Object.assign(rawModel, {
         rawWidth: rawModel.width,
         rawHeight: rawModel.height,
@@ -164,6 +168,7 @@ onMounted(async () => {
         modelFaceScreenX = (model.x + model.rawWidth * s * 0.5) / ssaa
         modelFaceScreenY = (model.y + model.rawHeight * s * faceY) / ssaa
         markerPos.value = { left: `${modelFaceScreenX}px`, top: `${modelFaceScreenY}px` }
+        console.log('[Live2D] 触发 modelReady 事件')
         emit('modelReady', { faceX: modelFaceScreenX, faceY: modelFaceScreenY })
       }
       // 响应 face_y_ratio 配置变化（设置界面滑块调节时实时更新）

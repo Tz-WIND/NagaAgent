@@ -25,7 +25,7 @@ export function useForumProfile() {
   }
 
   async function setForumEnabled(enabled: boolean) {
-    await updateProfile({ forumEnabled: enabled })
+    await updateProfile({ forumEnabled: enabled } as any)
     if (profile.value) {
       profile.value = { ...profile.value, forumEnabled: enabled }
     }

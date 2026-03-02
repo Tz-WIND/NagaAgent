@@ -49,12 +49,6 @@ function openPost(id: string) {
         }"
       >
         <div class="flex flex-col gap-3 p-2">
-          <!-- Create post button -->
-          <button class="create-post-btn" @click="router.push('/forum/new')">
-            <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14" /></svg>
-            <span>发帖</span>
-          </button>
-
           <ForumPostCard
             v-for="post in posts"
             :key="post.id"
@@ -78,25 +72,5 @@ function openPost(id: string) {
 .main-col {
   background: rgba(20, 20, 20, 0.5);
   border-radius: 8px;
-}
-
-.create-post-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  padding: 10px;
-  background: rgba(212, 175, 55, 0.08);
-  border: 1px dashed rgba(212, 175, 55, 0.25);
-  border-radius: 8px;
-  color: rgba(212, 175, 55, 0.7);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.create-post-btn:hover {
-  background: rgba(212, 175, 55, 0.15);
-  border-color: rgba(212, 175, 55, 0.4);
-  color: #d4af37;
 }
 </style>

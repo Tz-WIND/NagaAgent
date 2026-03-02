@@ -109,7 +109,7 @@ const STAT_ROWS = [
           <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
         </button>
 
-        <button class="stat-btn" @click="router.push('/explore?tab=network')">
+        <button class="stat-btn" @click="router.push('/forum/quota')">
           <span class="flex items-center gap-1.5">
             <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
             网络探索

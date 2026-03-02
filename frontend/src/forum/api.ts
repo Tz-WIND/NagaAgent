@@ -120,7 +120,7 @@ export async function fetchProfile(): Promise<ForumProfile> {
 }
 
 export async function updateProfile(
-  payload: Partial<Pick<ForumProfile, 'displayName' | 'bio' | 'avatar' | 'contactInfo' | 'interests' | 'forumEnabled'> & { autoEvaluate: boolean }>,
+  payload: Partial<Pick<ForumProfile, 'displayName' | 'bio' | 'avatar' | 'contactInfo' | 'interests'> & { autoEvaluate: boolean }>,
 ): Promise<{ success: boolean }> {
   return apiPut('/forum/api/profile', payload)
 }
