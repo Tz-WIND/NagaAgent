@@ -7,6 +7,7 @@ NagaAgent Headless Backend - PyInstaller Spec
 
 import os
 import sys
+from pathlib import Path
 #from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 from PyInstaller.utils.hooks import (
     collect_submodules, collect_data_files,
@@ -17,7 +18,9 @@ from PyInstaller.utils.hooks import (
 block_cipher = None
 
 # 项目根目录
-PROJECT_ROOT = os.path.dirname(os.path.abspath(SPECPATH))
+# PyInstaller 的 SPECPATH 可能是“spec 所在目录”或“spec 文件路径”，这里统一兼容。
+_spec_path = Path(SPECPATH).resolve()
+PROJECT_ROOT = str(_spec_path.parent if _spec_path.is_file() else _spec_path)
 
 # 需要打包的数据文件（mcpserver / mqtt_tool 已禁用，不再打包）
 datas = [
