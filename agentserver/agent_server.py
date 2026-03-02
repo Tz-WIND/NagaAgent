@@ -121,7 +121,7 @@ def _is_port_in_use(port: int) -> bool:
 
 async def _delayed_health_check():
     """延迟健康检查（等待所有服务启动）"""
-    await asyncio.sleep(3)  # 等待3秒让所有服务就绪
+    await asyncio.sleep(6)  # 虚拟机/低性能环境下启动更慢，适当延长缓冲时间
 
     try:
         from system.health_check import perform_startup_health_check
