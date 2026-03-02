@@ -50,7 +50,7 @@ class ComprehensiveAppScanner:
     async def _scan_registry_async(self) -> List[Dict]:
         """异步扫描Windows注册表获取应用信息 #"""
         # 在线程池中执行同步的注册表扫描 #
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._scan_registry_sync)
     
     def _scan_registry_sync(self) -> List[Dict]:
@@ -169,7 +169,7 @@ class ComprehensiveAppScanner:
     async def _scan_shortcuts_async(self) -> List[Dict]:
         """异步扫描快捷方式获取应用信息 #"""
         # 在线程池中执行同步的快捷方式扫描 #
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, self._scan_shortcuts_sync)
     
     def _scan_shortcuts_sync(self) -> List[Dict]:

@@ -9,6 +9,7 @@ OpenClaw 配置管理器
 import json
 import secrets
 import logging
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass
@@ -46,8 +47,8 @@ class OpenClawConfigManager:
 
     @staticmethod
     def _get_openclaw_dir() -> Path:
-        from system.config import get_data_dir
-        return get_data_dir() / "openclaw"
+        home_override = os.environ.get("OPENCLAW_HOME", "").strip()
+        return Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
 
     @property
     def OPENCLAW_DIR(self) -> Path:

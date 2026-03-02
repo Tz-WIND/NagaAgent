@@ -45,16 +45,18 @@ uv sync --group build
 
 ### Step 2: 准备 OpenClaw 运行时
 
-OpenClaw 需要独立的 Node.js 运行时。打包时预装可避免用户首次启动等待。
+OpenClaw 与 Agent Browser 都依赖独立 Node.js 运行时。打包时预装可避免用户首次启动等待或二次下载浏览器内核。
 
 ```powershell
 # 下载 Node.js v22.13.1 便携版
 # 手动下载: https://nodejs.org/dist/v22.13.1/node-v22.13.1-win-x64.zip
 # 解压到: frontend/backend-dist/openclaw-runtime/node/
 
-# 用内嵌 Node.js 预装 OpenClaw
+# 用内嵌 Node.js 预装 OpenClaw + Agent Browser
 cd frontend/backend-dist/openclaw-runtime
 ..\openclaw-runtime\node\npm.cmd install openclaw --location=project
+..\openclaw-runtime\node\npm.cmd install agent-browser --location=project
+.\openclaw\node_modules\.bin\agent-browser.cmd install
 ```
 
 预装完成后目录结构：
@@ -65,7 +67,7 @@ frontend/backend-dist/openclaw-runtime/
     node.exe
     npm.cmd
     ...
-  openclaw/         # 预装的 OpenClaw
+  openclaw/         # 预装的 OpenClaw + Agent Browser
     node_modules/
     package.json
     package-lock.json
@@ -134,7 +136,7 @@ Naga Agent/
       ...（依赖库）
     openclaw-runtime/          # OpenClaw 运行时
       node/                    # Node.js 便携版
-      openclaw/                # 预装的 OpenClaw
+      openclaw/                # 预装的 OpenClaw + Agent Browser
       LICENSE
 ```
 

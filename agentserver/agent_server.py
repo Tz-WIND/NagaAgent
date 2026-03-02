@@ -121,11 +121,22 @@ def _is_port_in_use(port: int) -> bool:
 
 async def _delayed_health_check():
     """延迟健康检查（等待所有服务启动）"""
-    await asyncio.sleep(3)  # 等待3秒让所有服务就绪
+    await asyncio.sleep(6)  # 虚拟机/低性能环境下启动更慢，适当延长缓冲时间
 
     try:
         from system.health_check import perform_startup_health_check
-        await perform_startup_health_check()
+        results, _summary = await perform_startup_health_check()
+
+        # API 在慢机器上可能晚于首次检查就绪，做一次延迟复检避免启动早期误报
+        api_result = results.get("api_server")
+        api_unhealthy = (
+            api_result is not None
+            and getattr(getattr(api_result, "status", None), "value", "") == "unhealthy"
+        )
+        if api_unhealthy:
+            logger.info("[HealthCheck] 检测到 API 尚未就绪，12 秒后执行一次复检")
+            await asyncio.sleep(12)
+            await perform_startup_health_check()
     except Exception as e:
         logger.error(f"启动时健康检查失败: {e}")
 
@@ -218,8 +229,8 @@ async def lifespan(app: FastAPI):
                 # 兼容旧配置：内嵌 Gateway 场景下补齐 gateway.mode=local，避免启动被阻塞
                 if use_embedded_openclaw:
                     ensure_gateway_local_mode(auto_create=False)
-                # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
-                ensure_hooks_allow_request_session_key(auto_create=False)
+                    # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
+                    ensure_hooks_allow_request_session_key(auto_create=False)
                 # 确保 hooks.path 显式设置，避免 Gateway 不注册 hooks 路由（405）
                 ensure_hooks_path(auto_create=False)
 

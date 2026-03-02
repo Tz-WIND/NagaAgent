@@ -7,6 +7,7 @@ NagaAgent Headless Backend - PyInstaller Spec
 
 import os
 import sys
+from pathlib import Path
 #from PyInstaller.utils.hooks import collect_submodules, collect_data_files
 from PyInstaller.utils.hooks import (
     collect_submodules, collect_data_files,
@@ -17,13 +18,14 @@ from PyInstaller.utils.hooks import (
 block_cipher = None
 
 # 项目根目录
-PROJECT_ROOT = os.path.dirname(os.path.abspath(SPECPATH))
+# PyInstaller 的 SPECPATH 可能是“spec 所在目录”或“spec 文件路径”，这里统一兼容。
+_spec_path = Path(SPECPATH).resolve()
+PROJECT_ROOT = str(_spec_path.parent if _spec_path.is_file() else _spec_path)
 
 # 需要打包的数据文件（mcpserver / mqtt_tool 已禁用，不再打包）
 datas = [
     ('pyproject.toml', '.'),
     ('system/prompts', 'system/prompts'),
-    ('config.json', '.'),
     # ('mcpserver', 'mcpserver'),  # 已禁用
     ('agentserver', 'agentserver'),
     ('apiserver', 'apiserver'),
@@ -33,6 +35,20 @@ datas = [
     # ('mqtt_tool', 'mqtt_tool'),  # 已禁用
     ('skills', 'skills'),
 ]
+
+# 角色资源（/characters 静态挂载依赖）
+if os.path.exists(os.path.join(PROJECT_ROOT, 'characters')):
+    datas.append(('characters', 'characters'))
+else:
+    print("[spec] WARN: characters 目录不存在，角色静态资源将不可用")
+
+# 打包机可能不存在 config.json（仅有 config.json.example）
+if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
+    datas.append(('config.json', '.'))
+elif os.path.exists(os.path.join(PROJECT_ROOT, 'config.json.example')):
+    datas.append(('config.json.example', '.'))
+else:
+    print("[spec] WARN: config.json 与 config.json.example 均不存在，运行时将使用内置默认配置")
 
 # 第三方包的数据文件
 datas += collect_data_files('tiktoken')

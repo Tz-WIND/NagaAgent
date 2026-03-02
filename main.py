@@ -153,8 +153,9 @@ class ServiceManager:
             # 预检查所有端口（端口已在启动前由 kill_port_occupiers 清理）
             from system.config import get_server_port
             port_checks = {
-                'api': config.api_server.enabled and config.api_server.auto_start and
-                      self.check_port_available(config.api_server.host, config.api_server.port),
+                # API 不做“启动前 bind 预检查”，避免在 Windows/虚拟机环境误判为占用导致根本不启动。
+                # 实际绑定冲突交给 uvicorn 抛错并记录详细日志。
+                'api': config.api_server.enabled and config.api_server.auto_start,
                 'mcp': self.check_port_available("0.0.0.0", get_server_port("mcp_server")),
                 'agent': self.check_port_available("0.0.0.0", get_server_port("agent_server")),
                 'tts': self.check_port_available("0.0.0.0", config.tts.port)
@@ -162,12 +163,13 @@ class ServiceManager:
 
             # API服务器（可选）
             if port_checks['api']:
-                api_thread = threading.Thread(target=self._start_api_server, daemon=True)
-                threads.append(("API", api_thread))
+                self.api_thread = threading.Thread(target=self._start_api_server, daemon=True)
+                threads.append(("API", self.api_thread))
                 service_status['API'] = "准备启动"
-            elif config.api_server.enabled and config.api_server.auto_start:
-                print(f"⚠️  API服务器: 端口 {config.api_server.port} 已被占用，跳过启动")
-                service_status['API'] = "端口占用"
+            else:
+                service_status['API'] = (
+                    "自动启动关闭" if config.api_server.enabled else "已禁用"
+                )
 
             # MCP服务器（提供外部统一HTTP API）
             if port_checks['mcp']:
@@ -239,6 +241,21 @@ class ServiceManager:
                         break
                     time.sleep(0.2)
 
+            # API 端口额外诊断日志，方便定位虚拟机内的“无监听/SYN_SENT”问题
+            if port_checks.get('api'):
+                api_port = config.api_server.port
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.2)
+                api_ready = (s.connect_ex(('127.0.0.1', api_port)) == 0)
+                s.close()
+                if not api_ready:
+                    print(
+                        f"⚠️  API服务器端口 {api_port} 当前不可连接（可能启动失败、仍在启动或本机环回被拦截）"
+                    )
+                if self.api_thread is not None and not self.api_thread.is_alive():
+                    print("❌ API服务器线程已退出，启动可能失败（请查看上方异常日志）")
+                    logger.error("API服务器线程已退出，启动可能失败")
+
             _emit_progress(45, "等待服务就绪...")
 
             print("-" * 30)
@@ -277,27 +294,58 @@ class ServiceManager:
                 print("已清空 requests Session 全局代理配置")
     def _start_api_server(self):
         """内部API服务器启动方法"""
-        try:
-            import asyncio
-            import uvicorn
-            from apiserver.api_server import app
+        import traceback
+        host = str(config.api_server.host).strip() or "127.0.0.1"
+        port = config.api_server.port
+        hosts = [host]
+        if host != "0.0.0.0":
+            hosts.append("0.0.0.0")
 
-            print(f"   🚀 API服务器: 正在启动 on {config.api_server.host}:{config.api_server.port}...")
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            for bind_host in hosts:
+                try:
+                    import uvicorn
+                    from apiserver.api_server import app
 
-            uvicorn.run(
-                app,
-                host=config.api_server.host,
-                port=config.api_server.port,
-                log_level="info",
-                access_log=False,
-                reload=False,
-                ws_ping_interval=None,
-                ws_ping_timeout=None
-            )
-        except ImportError as e:
-            print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
-        except Exception as e:
-            print(f"   ❌ API服务器启动失败: {e}", flush=True)
+                    print(
+                        f"   🚀 API服务器: 正在启动 on {bind_host}:{port} (attempt {attempt}/{max_attempts})...",
+                        flush=True,
+                    )
+                    logger.info(
+                        f"API服务器启动: host={bind_host} port={port} attempt={attempt}/{max_attempts}"
+                    )
+
+                    uvicorn.run(
+                        app,
+                        host=bind_host,
+                        port=port,
+                        log_level="info",
+                        access_log=False,
+                        reload=False,
+                        ws_ping_interval=None,
+                        ws_ping_timeout=None,
+                    )
+                    logger.warning(
+                        f"API服务器已退出: host={bind_host} port={port} attempt={attempt}/{max_attempts}"
+                    )
+                    print("   ⚠️ API服务器进程已退出，准备重试...", flush=True)
+                except ImportError as e:
+                    print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
+                    logger.exception(f"API服务器依赖缺失: {e}")
+                    traceback.print_exc()
+                    return
+                except Exception as e:
+                    print(f"   ❌ API服务器启动失败: {e}", flush=True)
+                    logger.exception(f"API服务器启动失败: {e}")
+                    traceback.print_exc()
+
+            if attempt < max_attempts:
+                print("   🔁 API服务器启动重试中...", flush=True)
+                time.sleep(1.5)
+
+        print("   ❌ API服务器连续重试失败，已放弃自动启动", flush=True)
+        logger.error(f"API服务器连续重试失败: host={host} port={port}")
     
     def _start_mcp_server(self):
         """内部MCP服务器启动方法"""
@@ -712,8 +760,11 @@ if __name__ == "__main__":
     print("\n🎉 系统环境检测通过，正在启动应用...")
     print("=" * 50)
 
-    if not asyncio.get_event_loop().is_running():
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
     # 启动后端服务
     _lazy_init_services()

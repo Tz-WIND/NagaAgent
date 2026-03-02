@@ -36,7 +36,7 @@ class HealthChecker:
     """健康检查器"""
 
     def __init__(self):
-        from system.config import get_server_port
+        from system.config import get_server_port, get_config
 
         self.ports = {
             "api_server": get_server_port("api_server"),
@@ -45,6 +45,8 @@ class HealthChecker:
             "tts_server": get_server_port("tts_server"),
             "asr_server": get_server_port("asr_server"),
         }
+        cfg = get_config()
+        self.api_enabled = bool(getattr(cfg.api_server, "enabled", True) and getattr(cfg.api_server, "auto_start", True))
 
     async def check_all(self) -> Dict[str, HealthCheckResult]:
         """检查所有服务"""
@@ -86,6 +88,22 @@ class HealthChecker:
         except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
             return False
 
+    async def wait_port_ready(
+        self,
+        host: str,
+        port: int,
+        retries: int = 6,
+        interval_seconds: float = 0.5,
+        timeout: float = 2.0,
+    ) -> bool:
+        """等待端口就绪（用于虚拟机/慢机器上的启动抖动）"""
+        for i in range(max(1, retries)):
+            if await self.check_port(host, port, timeout=timeout):
+                return True
+            if i < retries - 1:
+                await asyncio.sleep(interval_seconds)
+        return False
+
     async def check_http_endpoint(self, url: str, timeout: float = 5.0) -> Dict[str, Any]:
         """检查HTTP端点"""
         import httpx
@@ -124,15 +142,23 @@ class HealthChecker:
 
     async def check_api_server(self) -> HealthCheckResult:
         """检查API Server"""
+        if not self.api_enabled:
+            return HealthCheckResult(
+                service_name="api_server",
+                status=ServiceStatus.HEALTHY,
+                message="API Server 已禁用，跳过检查",
+                details={"enabled": False},
+            )
+
         port = self.ports["api_server"]
         checks = []
 
         # 1. 检查端口
-        port_ok = await self.check_port("127.0.0.1", port)
+        port_ok = await self.wait_port_ready("127.0.0.1", port, retries=8, interval_seconds=0.5, timeout=1.5)
         checks.append({
             "name": "port_connectivity",
             "passed": port_ok,
-            "message": f"端口 {port} {'可连接' if port_ok else '不可连接'}",
+            "message": f"端口 {port} {'可连接' if port_ok else '不可连接（可能仍在启动）'}",
         })
 
         if not port_ok:
@@ -302,14 +328,18 @@ class HealthChecker:
         if services_check.get("success") and services_check.get("ok"):
             try:
                 import httpx
-
                 async with httpx.AsyncClient(timeout=5.0) as client:
-                    resp = await client.get(f"http://127.0.0.1:{port}/services")
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        services = data.get("services", {})
-                        service_registered = "screen_vision" in services
-
+                    # 给服务注册一点缓冲时间，避免启动早期误报未注册
+                    for i in range(4):
+                        resp = await client.get(f"http://127.0.0.1:{port}/services")
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            services = data.get("services", {})
+                            service_registered = "screen_vision" in services
+                            if service_registered:
+                                break
+                        if i < 3:
+                            await asyncio.sleep(0.5)
             except Exception:
                 pass
 
@@ -340,8 +370,9 @@ class HealthChecker:
             status = ServiceStatus.DEGRADED
             message = "ScreenVision MCP 服务已注册但功能异常"
         else:
-            status = ServiceStatus.UNHEALTHY
-            message = "ScreenVision MCP 服务未注册"
+            # 屏幕视觉是可选能力（尤其在无图形环境/虚拟机中常不可用），记为降级而非硬失败
+            status = ServiceStatus.DEGRADED
+            message = "ScreenVision MCP 服务未注册（可选能力）"
 
         return HealthCheckResult(
             service_name="screen_vision_mcp",
@@ -424,8 +455,31 @@ class HealthChecker:
 
     async def check_websocket(self) -> HealthCheckResult:
         """检查WebSocket功能"""
+        if not self.api_enabled:
+            return HealthCheckResult(
+                service_name="websocket",
+                status=ServiceStatus.HEALTHY,
+                message="WebSocket 依赖 API Server，API 已禁用，跳过检查",
+                details={"enabled": False},
+            )
+
         api_port = self.ports["api_server"]
         checks = []
+
+        # API 端口未就绪时，WebSocket检查没有意义，标记为降级避免误报硬失败
+        api_ready = await self.check_port("127.0.0.1", api_port, timeout=1.0)
+        if not api_ready:
+            checks.append({
+                "name": "api_dependency",
+                "passed": False,
+                "message": f"API端口 {api_port} 未就绪，跳过WebSocket检查",
+            })
+            return HealthCheckResult(
+                service_name="websocket",
+                status=ServiceStatus.DEGRADED,
+                message="WebSocket 依赖 API 服务，当前 API 未就绪",
+                checks=checks,
+            )
 
         # 1. 检查WebSocket统计端点
         stats_check = await self.check_http_endpoint(f"http://127.0.0.1:{api_port}/ws/stats")
