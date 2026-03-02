@@ -218,8 +218,8 @@ async def lifespan(app: FastAPI):
                 # 兼容旧配置：内嵌 Gateway 场景下补齐 gateway.mode=local，避免启动被阻塞
                 if use_embedded_openclaw:
                     ensure_gateway_local_mode(auto_create=False)
-                # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
-                ensure_hooks_allow_request_session_key(auto_create=False)
+                    # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
+                    ensure_hooks_allow_request_session_key(auto_create=False)
                 # 确保 hooks.path 显式设置，避免 Gateway 不注册 hooks 路由（405）
                 ensure_hooks_path(auto_create=False)
 

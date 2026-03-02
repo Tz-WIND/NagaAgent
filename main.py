@@ -167,6 +167,9 @@ class ServiceManager:
                 service_status['API'] = "准备启动"
             elif config.api_server.enabled and config.api_server.auto_start:
                 print(f"⚠️  API服务器: 端口 {config.api_server.port} 已被占用，跳过启动")
+                logger.warning(
+                    f"API服务器未启动: host={config.api_server.host} port={config.api_server.port} 端口预检查失败"
+                )
                 service_status['API'] = "端口占用"
 
             # MCP服务器（提供外部统一HTTP API）
@@ -297,6 +300,7 @@ class ServiceManager:
             host = config.api_server.host
             port = config.api_server.port
             print(f"   🚀 API服务器: 正在启动 on {host}:{port}...")
+            logger.info(f"API服务器启动: host={host} port={port}")
 
             uvicorn.run(
                 app,
@@ -310,9 +314,11 @@ class ServiceManager:
             )
         except ImportError as e:
             print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
+            logger.exception(f"API服务器依赖缺失: {e}")
             traceback.print_exc()
         except Exception as e:
             print(f"   ❌ API服务器启动失败: {e}", flush=True)
+            logger.exception(f"API服务器启动失败: {e}")
             traceback.print_exc()
             # 某些 Windows/虚拟机环境下 127.0.0.1 绑定会异常，回退尝试 0.0.0.0
             try:
@@ -320,6 +326,7 @@ class ServiceManager:
                     import uvicorn
                     from apiserver.api_server import app
                     print("   🔁 API服务器回退重试: 0.0.0.0", flush=True)
+                    logger.warning("API服务器回退重试: host=0.0.0.0")
                     uvicorn.run(
                         app,
                         host="0.0.0.0",
@@ -332,6 +339,7 @@ class ServiceManager:
                     )
             except Exception as retry_err:
                 print(f"   ❌ API服务器回退重试失败: {retry_err}", flush=True)
+                logger.exception(f"API服务器回退重试失败: {retry_err}")
                 traceback.print_exc()
     
     def _start_mcp_server(self):
