@@ -295,54 +295,57 @@ class ServiceManager:
     def _start_api_server(self):
         """内部API服务器启动方法"""
         import traceback
-        try:
-            import uvicorn
-            from apiserver.api_server import app
+        host = str(config.api_server.host).strip() or "127.0.0.1"
+        port = config.api_server.port
+        hosts = [host]
+        if host != "0.0.0.0":
+            hosts.append("0.0.0.0")
 
-            host = config.api_server.host
-            port = config.api_server.port
-            print(f"   🚀 API服务器: 正在启动 on {host}:{port}...")
-            logger.info(f"API服务器启动: host={host} port={port}")
-
-            uvicorn.run(
-                app,
-                host=host,
-                port=port,
-                log_level="info",
-                access_log=False,
-                reload=False,
-                ws_ping_interval=None,
-                ws_ping_timeout=None
-            )
-        except ImportError as e:
-            print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
-            logger.exception(f"API服务器依赖缺失: {e}")
-            traceback.print_exc()
-        except Exception as e:
-            print(f"   ❌ API服务器启动失败: {e}", flush=True)
-            logger.exception(f"API服务器启动失败: {e}")
-            traceback.print_exc()
-            # 某些 Windows/虚拟机环境下 127.0.0.1 绑定会异常，回退尝试 0.0.0.0
-            try:
-                if str(config.api_server.host).strip() == "127.0.0.1":
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            for bind_host in hosts:
+                try:
                     import uvicorn
                     from apiserver.api_server import app
-                    print("   🔁 API服务器回退重试: 0.0.0.0", flush=True)
-                    logger.warning("API服务器回退重试: host=0.0.0.0")
+
+                    print(
+                        f"   🚀 API服务器: 正在启动 on {bind_host}:{port} (attempt {attempt}/{max_attempts})...",
+                        flush=True,
+                    )
+                    logger.info(
+                        f"API服务器启动: host={bind_host} port={port} attempt={attempt}/{max_attempts}"
+                    )
+
                     uvicorn.run(
                         app,
-                        host="0.0.0.0",
-                        port=config.api_server.port,
+                        host=bind_host,
+                        port=port,
                         log_level="info",
                         access_log=False,
                         reload=False,
                         ws_ping_interval=None,
                         ws_ping_timeout=None,
                     )
-            except Exception as retry_err:
-                print(f"   ❌ API服务器回退重试失败: {retry_err}", flush=True)
-                logger.exception(f"API服务器回退重试失败: {retry_err}")
-                traceback.print_exc()
+                    logger.warning(
+                        f"API服务器已退出: host={bind_host} port={port} attempt={attempt}/{max_attempts}"
+                    )
+                    print("   ⚠️ API服务器进程已退出，准备重试...", flush=True)
+                except ImportError as e:
+                    print(f"   ❌ API服务器依赖缺失: {e}", flush=True)
+                    logger.exception(f"API服务器依赖缺失: {e}")
+                    traceback.print_exc()
+                    return
+                except Exception as e:
+                    print(f"   ❌ API服务器启动失败: {e}", flush=True)
+                    logger.exception(f"API服务器启动失败: {e}")
+                    traceback.print_exc()
+
+            if attempt < max_attempts:
+                print("   🔁 API服务器启动重试中...", flush=True)
+                time.sleep(1.5)
+
+        print("   ❌ API服务器连续重试失败，已放弃自动启动", flush=True)
+        logger.error(f"API服务器连续重试失败: host={host} port={port}")
     
     def _start_mcp_server(self):
         """内部MCP服务器启动方法"""
