@@ -211,9 +211,9 @@ function setParam(paramId: string, value: number) {
 
 // ─── 表情加载（从 .exp3.json 文件） ─────────────────
 
-async function loadExpressions(modelBasePath: string, modelSource: string) {
+async function loadExpressions(modelBasePath: string, modelSource: string, cacheBust = '') {
   try {
-    const modelRes = await fetch(modelSource)
+    const modelRes = await fetch(`${modelSource}${cacheBust}`)
     const modelJson = await modelRes.json()
     const expressions = modelJson?.FileReferences?.Expressions ?? []
 
@@ -223,7 +223,7 @@ async function loadExpressions(modelBasePath: string, modelSource: string) {
       const expName = fileName.replace('.exp3.json', '')
 
       try {
-        const expRes = await fetch(`${modelBasePath}/${fileName}`)
+        const expRes = await fetch(`${modelBasePath}/${fileName}${cacheBust}`)
         const expJson = await expRes.json()
 
         const def: ExpressionDef = {
@@ -649,12 +649,13 @@ export async function initController(modelInstance: Live2DModel, modelSource: st
   const basePath = modelSource.replace(/\/[^/]+$/, '')
 
   try {
-    // 加载身体/头部动作数据
-    const response = await fetch(`${basePath}/naga-actions.json`)
+    // 加载身体/头部动作数据（加 cache-busting 防止缓存旧版本）
+    const cacheBust = `?_t=${Date.now()}`
+    const response = await fetch(`${basePath}/naga-actions.json${cacheBust}`)
     actionsData = await response.json() as ActionsData
 
     // 加载 .exp3.json 表情文件
-    await loadExpressions(basePath, modelSource)
+    await loadExpressions(basePath, modelSource, cacheBust)
 
     originalUpdate = model.update.bind(model)
     model.update = function (dt: number) {
