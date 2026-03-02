@@ -984,14 +984,7 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
                 raise HTTPException(status_code=500, detail="缺少安装URL")
             content = _download_text(url)
             _write_skill_file(skill_name, content)
-        if item_id == "agent-browser":
-            _install_agent_browser()
-        if item_id == "search":
-            api_key = None
-            if payload and isinstance(payload, dict):
-                api_key = payload.get("api_key") or payload.get("FIRECRAWL_API_KEY")
-            _update_mcporter_firecrawl_config(api_key)
-        if install_type == "template_dir":
+        elif install_type == "template_dir":
             template_name = install_spec.get("template")
             if not template_name:
                 raise HTTPException(status_code=500, detail="缺少模板名称")
@@ -1000,6 +993,14 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
             raise HTTPException(status_code=400, detail="该条目不支持安装")
         else:
             raise HTTPException(status_code=400, detail="未知安装方式")
+
+        if item_id == "agent-browser":
+            _install_agent_browser()
+        if item_id == "search":
+            api_key = None
+            if payload and isinstance(payload, dict):
+                api_key = payload.get("api_key") or payload.get("FIRECRAWL_API_KEY")
+            _update_mcporter_firecrawl_config(api_key)
     except HTTPException:
         raise
     except Exception as e:
