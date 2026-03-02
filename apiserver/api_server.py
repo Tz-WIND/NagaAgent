@@ -129,7 +129,16 @@ async def sync_auth_token(request: Request, call_next):
 # 挂载静态文件
 from fastapi.staticfiles import StaticFiles as _StaticFiles
 from system.config import CHARACTERS_DIR as _CHARACTERS_DIR
-app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+if _CHARACTERS_DIR.exists():
+    app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+else:
+    # 容错：目录缺失时不阻塞 API 启动，避免打包缺资源导致 8000 端口起不来
+    try:
+        _CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.warning(f"角色目录缺失，已创建空目录: {_CHARACTERS_DIR}")
+        app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+    except Exception as e:
+        logger.error(f"角色静态目录初始化失败，将跳过 /characters 挂载: {e}")
 
 # ============ 内部服务代理 ============
 

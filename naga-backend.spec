@@ -36,6 +36,12 @@ datas = [
     ('skills', 'skills'),
 ]
 
+# 角色资源（/characters 静态挂载依赖）
+if os.path.exists(os.path.join(PROJECT_ROOT, 'characters')):
+    datas.append(('characters', 'characters'))
+else:
+    print("[spec] WARN: characters 目录不存在，角色静态资源将不可用")
+
 # 打包机可能不存在 config.json（仅有 config.json.example）
 if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
     datas.append(('config.json', '.'))
