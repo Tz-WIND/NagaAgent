@@ -372,10 +372,27 @@ def prepare_openclaw_runtime(force: bool = False) -> None:
 # ============ Step 4: PyInstaller 编译后端 ============
 
 
+def ensure_build_config_file() -> None:
+    """确保构建阶段存在 config.json，缺失时从 config.json.example 生成。"""
+    config_path = PROJECT_ROOT / "config.json"
+    if config_path.exists():
+        return
+
+    example_path = PROJECT_ROOT / "config.json.example"
+    if not example_path.exists():
+        raise FileNotFoundError(
+            f"缺少配置文件：{config_path} 与 {example_path} 均不存在，无法执行 PyInstaller 打包"
+        )
+
+    shutil.copy2(example_path, config_path)
+    log(f"检测到缺失 config.json，已从模板生成: {config_path}")
+
+
 def build_backend() -> None:
     """用 PyInstaller 编译 Python 后端"""
     if not SPEC_FILE.exists():
         raise FileNotFoundError(f"spec 文件不存在: {SPEC_FILE}")
+    ensure_build_config_file()
 
     work_dir = PROJECT_ROOT / "build" / "pyinstaller"
     work_dir.mkdir(parents=True, exist_ok=True)
