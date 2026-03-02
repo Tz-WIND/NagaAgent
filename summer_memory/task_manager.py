@@ -483,8 +483,11 @@ def start_auto_cleanup():
     """启动自动清理任务"""
     try:
         # 确保在正确的事件循环中运行
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
             # 如果事件循环已在运行，直接创建任务
             loop.create_task(auto_cleanup_tasks())
         else:

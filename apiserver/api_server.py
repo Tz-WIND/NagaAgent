@@ -724,7 +724,7 @@ async def health_check():
         "status": "healthy",
         "agent_ready": True,
         "websocket_connections": ws_stats["total_connections"],
-        "timestamp": str(asyncio.get_event_loop().time()),
+        "timestamp": str(asyncio.get_running_loop().time()),
     }
 
 
