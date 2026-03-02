@@ -126,7 +126,7 @@ class WebSocketManager:
             "type": "proactive_message",
             "content": message,
             "source": source,
-            "timestamp": asyncio.get_event_loop().time(),
+            "timestamp": asyncio.get_running_loop().time(),
         }
 
         # 广播到所有连接

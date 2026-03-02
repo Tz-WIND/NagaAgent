@@ -11,6 +11,8 @@ OpenClaw 配置自动生成 + LLM 桥接
 import json
 import logging
 import secrets
+import os
+import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -18,12 +20,32 @@ logger = logging.getLogger(__name__)
 
 
 def _get_openclaw_paths():
-    from system.config import get_data_dir
-    config_dir = get_data_dir() / "openclaw"
+    """统一使用 OpenClaw 默认目录 (~/.openclaw)，避免与 CLI 读取路径不一致。"""
+    home_override = os.environ.get("OPENCLAW_HOME", "").strip()
+    config_dir = Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
     return config_dir, config_dir / "openclaw.json"
 
 
 OPENCLAW_CONFIG_DIR, OPENCLAW_CONFIG_FILE = _get_openclaw_paths()
+
+
+def _migrate_legacy_config_if_needed() -> None:
+    """兼容历史路径：%APPDATA%/NagaAgent/openclaw -> ~/.openclaw"""
+    if OPENCLAW_CONFIG_FILE.exists():
+        return
+    try:
+        from system.config import get_data_dir
+
+        legacy_dir = get_data_dir() / "openclaw"
+        legacy_cfg = legacy_dir / "openclaw.json"
+        if not legacy_cfg.exists():
+            return
+
+        OPENCLAW_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy_cfg, OPENCLAW_CONFIG_FILE)
+        logger.info(f"已迁移 OpenClaw 配置: {legacy_cfg} -> {OPENCLAW_CONFIG_FILE}")
+    except Exception as e:
+        logger.warning(f"迁移历史 OpenClaw 配置失败（忽略）: {e}")
 
 
 def _apply_hooks_compat_patch(config_data: Dict[str, Any]) -> bool:
@@ -172,6 +194,8 @@ def ensure_openclaw_config() -> bool:
     Returns:
         是否成功（已存在或新建成功）
     """
+    _migrate_legacy_config_if_needed()
+
     if OPENCLAW_CONFIG_FILE.exists():
         logger.debug("openclaw.json 已存在，跳过生成")
         return True

@@ -90,9 +90,14 @@ class GRAGMemoryManager:
         """包装回调方法，处理实例可能被销毁的情况"""
         instance = self._weak_ref()
         if instance:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
             asyncio.run_coroutine_threadsafe(
                 instance._on_task_completed(task_id, quintuples),
-                loop=asyncio.get_event_loop()
+                loop=loop
             )
 
     async def _on_task_completed(self, task_id: str, quintuples: List) -> None:

@@ -145,7 +145,16 @@ async def sync_auth_token(request: Request, call_next):
 # 挂载静态文件
 from fastapi.staticfiles import StaticFiles as _StaticFiles
 from system.config import CHARACTERS_DIR as _CHARACTERS_DIR
-app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+if _CHARACTERS_DIR.exists():
+    app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+else:
+    # 容错：目录缺失时不阻塞 API 启动，避免打包缺资源导致 8000 端口起不来
+    try:
+        _CHARACTERS_DIR.mkdir(parents=True, exist_ok=True)
+        logger.warning(f"角色目录缺失，已创建空目录: {_CHARACTERS_DIR}")
+        app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
+    except Exception as e:
+        logger.error(f"角色静态目录初始化失败，将跳过 /characters 挂载: {e}")
 
 # ============ 运行时状态检查（naga_control） ============
 
@@ -237,12 +246,12 @@ MARKET_ITEMS: List[Dict[str, Any]] = [
     {
         "id": "agent-browser",
         "title": "Agent Browser",
-        "description": "Browser automation skill (install SKILL.md only, demo mode).",
+        "description": "Browser automation skill (offline template install, prebundled runtime preferred).",
         "skill_name": "agent-browser",
         "enabled": True,
         "install": {
-            "type": "remote_skill",
-            "url": "https://raw.githubusercontent.com/vercel-labs/agent-browser/refs/heads/main/skills/agent-browser/SKILL.md",
+            "type": "template_dir",
+            "template": "agent-browser",
         },
     },
     {
@@ -331,6 +340,31 @@ def _copy_template_dir(template_name: str, skill_name: str) -> None:
         shutil.copy2(path, target_path)
 
 
+def _agent_browser_bin_name() -> str:
+    return "agent-browser.cmd" if sys.platform == "win32" else "agent-browser"
+
+
+def _resolve_packaged_openclaw_runtime_dir() -> Optional[Path]:
+    candidates: List[Path] = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+        candidates.append(meipass.parent.parent / "openclaw-runtime" / "openclaw")
+    # 开发环境下也允许直接复用本地构建产物中的预装运行时
+    candidates.append(Path(__file__).resolve().parent.parent / "frontend" / "backend-dist" / "openclaw-runtime" / "openclaw")
+    for candidate in candidates:
+        if (candidate / "node_modules").exists():
+            return candidate
+    return None
+
+
+def _resolve_prebundled_agent_browser_cmd() -> Optional[str]:
+    runtime_dir = _resolve_packaged_openclaw_runtime_dir()
+    if not runtime_dir:
+        return None
+    cmd = runtime_dir / "node_modules" / ".bin" / _agent_browser_bin_name()
+    return str(cmd) if cmd.exists() else None
+
+
 def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
     MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
     mcporter_config: Dict[str, Any] = {}
@@ -360,16 +394,27 @@ def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
 
 
 def _install_agent_browser() -> None:
+    prebundled_cmd = _resolve_prebundled_agent_browser_cmd()
+    if prebundled_cmd:
+        logger.info(f"检测到预装 agent-browser，跳过在线安装: {prebundled_cmd}")
+        return
+
+    existing_cmd = shutil.which("agent-browser")
+    if existing_cmd:
+        logger.info(f"检测到系统已安装 agent-browser，跳过安装: {existing_cmd}")
+        return
+
     if shutil.which("npm") is None:
-        raise RuntimeError("未找到 npm，无法安装 agent-browser")
-    logger.info("正在 npm install -g agent-browser ...")
+        raise RuntimeError("未检测到预装 agent-browser，且系统未找到 npm，无法在线安装")
+    logger.info("未检测到预装 agent-browser，降级为 npm 在线安装...")
     code, stdout, stderr = _run_command(["npm", "install", "-g", "agent-browser", "--force"], timeout=3000)
     if code != 0:
         raise RuntimeError(stderr or stdout or "npm install -g agent-browser --force 失败")
-    if shutil.which("agent-browser") is None:
+    installed_cmd = shutil.which("agent-browser")
+    if installed_cmd is None:
         raise RuntimeError("agent-browser 未安装成功或未在 PATH 中")
     logger.info("正在 agent-browser install（下载浏览器，可能需要数分钟）...")
-    code, stdout, stderr = _run_command(["agent-browser", "install"], timeout=3000)
+    code, stdout, stderr = _run_command([installed_cmd, "install"], timeout=3000)
     if code != 0:
         raise RuntimeError(stderr or stdout or "agent-browser install 失败")
     logger.info("agent-browser 安装完成")
@@ -752,7 +797,7 @@ async def health_check():
         "status": "healthy",
         "agent_ready": True,
         "websocket_connections": ws_stats["total_connections"],
-        "timestamp": str(asyncio.get_event_loop().time()),
+        "timestamp": str(asyncio.get_running_loop().time()),
     }
 
 
@@ -967,14 +1012,7 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
                 raise HTTPException(status_code=500, detail="缺少安装URL")
             content = _download_text(url)
             _write_skill_file(skill_name, content)
-        if item_id == "agent-browser":
-            _install_agent_browser()
-        if item_id == "search":
-            api_key = None
-            if payload and isinstance(payload, dict):
-                api_key = payload.get("api_key") or payload.get("FIRECRAWL_API_KEY")
-            _update_mcporter_firecrawl_config(api_key)
-        if install_type == "template_dir":
+        elif install_type == "template_dir":
             template_name = install_spec.get("template")
             if not template_name:
                 raise HTTPException(status_code=500, detail="缺少模板名称")
@@ -983,6 +1021,14 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
             raise HTTPException(status_code=400, detail="该条目不支持安装")
         else:
             raise HTTPException(status_code=400, detail="未知安装方式")
+
+        if item_id == "agent-browser":
+            _install_agent_browser()
+        if item_id == "search":
+            api_key = None
+            if payload and isinstance(payload, dict):
+                api_key = payload.get("api_key") or payload.get("FIRECRAWL_API_KEY")
+            _update_mcporter_firecrawl_config(api_key)
     except HTTPException:
         raise
     except Exception as e:
