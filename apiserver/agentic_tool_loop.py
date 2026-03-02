@@ -787,6 +787,27 @@ async def run_agentic_loop(
         tool_result_text = format_tool_results_for_llm(results)
         messages.append({"role": "user", "content": tool_result_text})
 
+        # ★ 消息队列注入：在工具执行完毕、下一轮 LLM 调用前，注入排队消息
+        try:
+            from .message_queue import get_message_queue
+            mq = get_message_queue()
+            queued = mq.drain()
+            if queued:
+                for qm in queued:
+                    tag = f"[{qm.source}]" if qm.source != "user" else ""
+                    inject_content = f"{tag} {qm.content}".strip()
+                    messages.append({"role": "user", "content": inject_content})
+                logger.info(
+                    f"[AgenticLoop] 注入 {len(queued)} 条排队消息: "
+                    f"{[q.source for q in queued]}"
+                )
+                yield _format_sse_event(
+                    "queued_messages",
+                    {"count": len(queued), "sources": [q.source for q in queued]},
+                )
+        except Exception as e:
+            logger.debug(f"[AgenticLoop] 消息队列注入跳过: {e}")
+
         # 9a. 连续失败达到阈值时提前终止，进入总结轮
         if consecutive_failures >= 2:
             logger.warning(f"[AgenticLoop] 连续 {consecutive_failures} 轮工具全部失败，提前终止循环")
