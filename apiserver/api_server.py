@@ -1482,7 +1482,10 @@ async def proxy_search(request: Request):
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as e:
         logger.warning(f"搜索代理失败: {e}")
-        return JSONResponse(content={"error": f"搜索服务不可用: {e}"}, status_code=502)
+        return JSONResponse(
+            content={"error": {"message": f"搜索服务不可用: {e}", "type": "upstream_error"}},
+            status_code=502,
+        )
 
 
 @app.get("/memory/stats")
