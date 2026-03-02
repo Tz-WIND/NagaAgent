@@ -153,8 +153,9 @@ class ServiceManager:
             # 预检查所有端口（端口已在启动前由 kill_port_occupiers 清理）
             from system.config import get_server_port
             port_checks = {
-                'api': config.api_server.enabled and config.api_server.auto_start and
-                      self.check_port_available(config.api_server.host, config.api_server.port),
+                # API 不做“启动前 bind 预检查”，避免在 Windows/虚拟机环境误判为占用导致根本不启动。
+                # 实际绑定冲突交给 uvicorn 抛错并记录详细日志。
+                'api': config.api_server.enabled and config.api_server.auto_start,
                 'mcp': self.check_port_available("0.0.0.0", get_server_port("mcp_server")),
                 'agent': self.check_port_available("0.0.0.0", get_server_port("agent_server")),
                 'tts': self.check_port_available("0.0.0.0", config.tts.port)
@@ -162,15 +163,13 @@ class ServiceManager:
 
             # API服务器（可选）
             if port_checks['api']:
-                api_thread = threading.Thread(target=self._start_api_server, daemon=True)
-                threads.append(("API", api_thread))
+                self.api_thread = threading.Thread(target=self._start_api_server, daemon=True)
+                threads.append(("API", self.api_thread))
                 service_status['API'] = "准备启动"
-            elif config.api_server.enabled and config.api_server.auto_start:
-                print(f"⚠️  API服务器: 端口 {config.api_server.port} 已被占用，跳过启动")
-                logger.warning(
-                    f"API服务器未启动: host={config.api_server.host} port={config.api_server.port} 端口预检查失败"
+            else:
+                service_status['API'] = (
+                    "自动启动关闭" if config.api_server.enabled else "已禁用"
                 )
-                service_status['API'] = "端口占用"
 
             # MCP服务器（提供外部统一HTTP API）
             if port_checks['mcp']:
@@ -253,6 +252,9 @@ class ServiceManager:
                     print(
                         f"⚠️  API服务器端口 {api_port} 当前不可连接（可能启动失败、仍在启动或本机环回被拦截）"
                     )
+                if self.api_thread is not None and not self.api_thread.is_alive():
+                    print("❌ API服务器线程已退出，启动可能失败（请查看上方异常日志）")
+                    logger.error("API服务器线程已退出，启动可能失败")
 
             _emit_progress(45, "等待服务就绪...")
 

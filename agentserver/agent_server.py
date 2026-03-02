@@ -125,7 +125,18 @@ async def _delayed_health_check():
 
     try:
         from system.health_check import perform_startup_health_check
-        await perform_startup_health_check()
+        results, _summary = await perform_startup_health_check()
+
+        # API 在慢机器上可能晚于首次检查就绪，做一次延迟复检避免启动早期误报
+        api_result = results.get("api_server")
+        api_unhealthy = (
+            api_result is not None
+            and getattr(getattr(api_result, "status", None), "value", "") == "unhealthy"
+        )
+        if api_unhealthy:
+            logger.info("[HealthCheck] 检测到 API 尚未就绪，12 秒后执行一次复检")
+            await asyncio.sleep(12)
+            await perform_startup_health_check()
     except Exception as e:
         logger.error(f"启动时健康检查失败: {e}")
 
