@@ -209,12 +209,12 @@ MARKET_ITEMS: List[Dict[str, Any]] = [
     {
         "id": "agent-browser",
         "title": "Agent Browser",
-        "description": "Browser automation skill (install SKILL.md only, demo mode).",
+        "description": "Browser automation skill (offline template install, prebundled runtime preferred).",
         "skill_name": "agent-browser",
         "enabled": True,
         "install": {
-            "type": "remote_skill",
-            "url": "https://raw.githubusercontent.com/vercel-labs/agent-browser/refs/heads/main/skills/agent-browser/SKILL.md",
+            "type": "template_dir",
+            "template": "agent-browser",
         },
     },
     {
@@ -303,6 +303,31 @@ def _copy_template_dir(template_name: str, skill_name: str) -> None:
         shutil.copy2(path, target_path)
 
 
+def _agent_browser_bin_name() -> str:
+    return "agent-browser.cmd" if sys.platform == "win32" else "agent-browser"
+
+
+def _resolve_packaged_openclaw_runtime_dir() -> Optional[Path]:
+    candidates: List[Path] = []
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+        candidates.append(meipass.parent.parent / "openclaw-runtime" / "openclaw")
+    # 开发环境下也允许直接复用本地构建产物中的预装运行时
+    candidates.append(Path(__file__).resolve().parent.parent / "frontend" / "backend-dist" / "openclaw-runtime" / "openclaw")
+    for candidate in candidates:
+        if (candidate / "node_modules").exists():
+            return candidate
+    return None
+
+
+def _resolve_prebundled_agent_browser_cmd() -> Optional[str]:
+    runtime_dir = _resolve_packaged_openclaw_runtime_dir()
+    if not runtime_dir:
+        return None
+    cmd = runtime_dir / "node_modules" / ".bin" / _agent_browser_bin_name()
+    return str(cmd) if cmd.exists() else None
+
+
 def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
     MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
     mcporter_config: Dict[str, Any] = {}
@@ -332,16 +357,27 @@ def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
 
 
 def _install_agent_browser() -> None:
+    prebundled_cmd = _resolve_prebundled_agent_browser_cmd()
+    if prebundled_cmd:
+        logger.info(f"检测到预装 agent-browser，跳过在线安装: {prebundled_cmd}")
+        return
+
+    existing_cmd = shutil.which("agent-browser")
+    if existing_cmd:
+        logger.info(f"检测到系统已安装 agent-browser，跳过安装: {existing_cmd}")
+        return
+
     if shutil.which("npm") is None:
-        raise RuntimeError("未找到 npm，无法安装 agent-browser")
-    logger.info("正在 npm install -g agent-browser ...")
+        raise RuntimeError("未检测到预装 agent-browser，且系统未找到 npm，无法在线安装")
+    logger.info("未检测到预装 agent-browser，降级为 npm 在线安装...")
     code, stdout, stderr = _run_command(["npm", "install", "-g", "agent-browser", "--force"], timeout=3000)
     if code != 0:
         raise RuntimeError(stderr or stdout or "npm install -g agent-browser --force 失败")
-    if shutil.which("agent-browser") is None:
+    installed_cmd = shutil.which("agent-browser")
+    if installed_cmd is None:
         raise RuntimeError("agent-browser 未安装成功或未在 PATH 中")
     logger.info("正在 agent-browser install（下载浏览器，可能需要数分钟）...")
-    code, stdout, stderr = _run_command(["agent-browser", "install"], timeout=3000)
+    code, stdout, stderr = _run_command([installed_cmd, "install"], timeout=3000)
     if code != 0:
         raise RuntimeError(stderr or stdout or "agent-browser install 失败")
     logger.info("agent-browser 安装完成")

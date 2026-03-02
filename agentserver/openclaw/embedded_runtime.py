@@ -198,6 +198,8 @@ class EmbeddedRuntime:
             node_dir = str(self._runtime_root / "node")
             bin_dir = str(self._runtime_root / "openclaw" / "node_modules" / ".bin")
             env["PATH"] = f"{node_dir}{os.pathsep}{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            # 使用预置在 node_modules 下的 Playwright 浏览器，避免首次运行再联网下载。
+            env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
         return env
 
     # ============ Node.js 版本检测 ============
