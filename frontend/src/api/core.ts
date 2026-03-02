@@ -389,6 +389,10 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get('/live2d/actions')
   }
 
+  getMusicCommands(): Promise<{ commands: Array<{ action: string, track?: string }> }> {
+    return this.instance.get('/music/commands')
+  }
+
   // ── ASR 语音识别 ──
 
   transcribeAudio(file: Blob, options?: {

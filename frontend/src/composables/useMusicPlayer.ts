@@ -198,6 +198,30 @@ function pauseBgm() {
   pause()
 }
 
+/** 远程音乐控制：由后端 naga_control 通过轮询下发指令 */
+export function handleMusicCommand(cmd: { action: string, track?: string }) {
+  switch (cmd.action) {
+    case 'play':
+      if (cmd.track)
+        playFile(cmd.track)
+      else
+        play()
+      break
+    case 'pause':
+      pause()
+      break
+    case 'toggle':
+      togglePlay()
+      break
+    case 'next':
+      next()
+      break
+    case 'prev':
+      prev()
+      break
+  }
+}
+
 export function useMusicPlayer() {
   onMounted(() => {
     tracks.value = loadTracksFromStorage()

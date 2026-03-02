@@ -497,6 +497,27 @@ def _extract_openclaw_tool_result(result: Any) -> str:
     return str(result)
 
 
+async def _execute_naga_control(call: Dict[str, Any]) -> Dict[str, Any]:
+    """执行 Naga 自身控制操作（直接调用，无需 HTTP）"""
+    from .naga_control import execute
+
+    action = call.get("action", "")
+    params = call.get("params", {})
+
+    t0 = _time.monotonic()
+    result = await execute(action, params)
+    elapsed = _time.monotonic() - t0
+    logger.info(f"[AgenticLoop] NagaControl 完成: {action} 耗时 {elapsed:.2f}s")
+
+    return {
+        "tool_call": call,
+        "result": json.dumps(result, ensure_ascii=False),
+        "status": "success" if result.get("success") else "error",
+        "service_name": "naga_control",
+        "tool_name": action,
+    }
+
+
 async def _send_live2d_actions(live2d_calls: List[Dict[str, Any]], session_id: str):
     """Fire-and-forget发送Live2D动作到UI"""
 
@@ -538,6 +559,8 @@ async def execute_tool_calls(tool_calls: List[Dict[str, Any]], session_id: str) 
             tasks.append(_execute_openclaw_call(call, session_id))
         elif agent_type == "openclaw_tool":
             tasks.append(_execute_openclaw_tool_call(call))
+        elif agent_type == "naga_control":
+            tasks.append(_execute_naga_control(call))
         else:
             logger.warning(f"[AgenticLoop] 未知agentType: {agent_type}, 跳过: {call}")
 

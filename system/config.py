@@ -799,20 +799,17 @@ def build_context_supplement(
     skills_section = ""
     if not skip_tools and not skill_name and include_skills:
         if route_result is not None and route_result.needed_skills:
-            # 只列出路由指定的技能
+            # 路由指定的技能 → 注入完整技能指令（而非仅元数据）
             try:
-                from system.skill_manager import get_skill_manager
+                from system.skill_manager import get_skill_manager, load_skill
                 mgr = get_skill_manager()
-                lines = ["## 可用技能", ""]
-                for meta in mgr.get_all_metadata():
-                    if meta.name in route_result.needed_skills:
-                        lines.append(f"### {meta.name}")
-                        lines.append(f"- **描述**: {meta.description}")
-                        if meta.tags:
-                            lines.append(f"- **标签**: {', '.join(meta.tags)}")
-                        lines.append("")
-                if len(lines) > 2:
-                    skills_section = "\n\n" + "\n".join(lines)
+                parts = []
+                for sname in route_result.needed_skills:
+                    instructions = load_skill(sname)
+                    if instructions:
+                        parts.append(instructions)
+                if parts:
+                    skills_section = "\n\n" + "\n\n".join(parts)
             except ImportError:
                 pass
         else:

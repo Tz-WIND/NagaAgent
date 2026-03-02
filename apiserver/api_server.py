@@ -131,6 +131,18 @@ from fastapi.staticfiles import StaticFiles as _StaticFiles
 from system.config import CHARACTERS_DIR as _CHARACTERS_DIR
 app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
 
+# ============ 运行时状态检查（naga_control） ============
+
+
+def _is_voice_runtime_paused() -> bool:
+    """检查语音是否被 naga_control 运行时暂停"""
+    try:
+        from apiserver.naga_control import is_voice_paused
+        return is_voice_paused()
+    except Exception:
+        return False
+
+
 # ============ 内部服务代理 ============
 
 
@@ -1181,6 +1193,7 @@ async def chat_stream(request: ChatRequest):
                 and not request.return_audio  # return_audio时不启用实时TTS
                 and get_config().voice_realtime.voice_mode != "hybrid"
                 and not request.disable_tts
+                and not _is_voice_runtime_paused()
             )
 
             if should_enable_tts:
@@ -1969,6 +1982,9 @@ _clawdbot_replies: list = []
 # Web前端 Live2D 动作队列（轮询获取）
 _live2d_actions: list = []
 
+# Web前端 音乐控制队列（轮询获取）
+_music_commands: list = []
+
 
 @app.get("/tool_status")
 async def get_tool_status():
@@ -1990,6 +2006,14 @@ async def get_live2d_actions():
     actions = list(_live2d_actions)
     _live2d_actions.clear()
     return {"actions": actions}
+
+
+@app.get("/music/commands")
+async def get_music_commands():
+    """获取并清空音乐控制指令队列（供Web前端轮询）"""
+    commands = list(_music_commands)
+    _music_commands.clear()
+    return {"commands": commands}
 
 
 @app.post("/tool_notification")
@@ -2198,10 +2222,50 @@ async def ui_notification(payload: Dict[str, Any]):
         except (TypeError, ValueError):
             auto_hide_ms = 0
 
+        logger.info(f"UI通知: {action}, 会话: {session_id}")
+
+        # ── 不需要 session_id 的控制类动作 ──
+
+        # 处理 Live2D 动作（动画表情）
+        if action == "live2d_action":
+            action_name = payload.get("action_name", "")
+            if action_name:
+                _live2d_actions.append(action_name)
+                logger.info(f"[UI通知] Live2D 动作已入队: {action_name}")
+                return {"success": True, "message": f"Live2D 动作 {action_name} 已入队"}
+
+        # 处理 Live2D 开关（naga_control 运行时暂停/恢复）
+        if action == "live2d_toggle":
+            enabled = payload.get("enabled", True)
+            logger.info(f"[UI通知] Live2D 开关: {'显示' if enabled else '隐藏'}")
+            return {"success": True, "message": f"Live2D {'已恢复' if enabled else '已暂停'}"}
+
+        if action == "hide_tool_status":
+            _hide_tool_status_in_ui()
+            return {"success": True, "message": "工具状态已隐藏"}
+
+        # 处理音乐控制
+        if action == "music_control":
+            music_action = payload.get("music_action", "play")
+            cmd: Dict[str, Any] = {"action": music_action}
+            track = payload.get("track")
+            if track:
+                cmd["track"] = track
+            _music_commands.append(cmd)
+            logger.info(f"[UI通知] 音乐指令已入队: {cmd}")
+            return {"success": True, "message": f"音乐指令 {music_action} 已入队"}
+
+        # 处理通用通知（naga_control send_notification）
+        if action == "show_notification":
+            msg = payload.get("message", "")
+            ntype = payload.get("type", "info")
+            logger.info(f"[UI通知] 通知: [{ntype}] {msg}")
+            return {"success": True, "message": "通知已接收"}
+
+        # ── 以下动作需要 session_id ──
+
         if not session_id:
             raise HTTPException(400, "缺少session_id")
-
-        logger.info(f"UI通知: {action}, 会话: {session_id}")
 
         # 处理显示工具AI回复的动作
         if action == "show_tool_ai_response" and ai_response:
@@ -2215,21 +2279,9 @@ async def ui_notification(payload: Dict[str, Any]):
             logger.info(f"[UI通知] AgentServer 回复已存储到队列，长度: {len(ai_response)}")
             return {"success": True, "message": "AgentServer 回复已存储"}
 
-        # 处理 Live2D 动作
-        if action == "live2d_action":
-            action_name = payload.get("action_name", "")
-            if action_name:
-                _live2d_actions.append(action_name)
-                logger.info(f"[UI通知] Live2D 动作已入队: {action_name}")
-                return {"success": True, "message": f"Live2D 动作 {action_name} 已入队"}
-
         if action == "show_tool_status" and status_text:
             _emit_tool_status_to_ui(status_text, auto_hide_ms)
             return {"success": True, "message": "工具状态已显示"}
-
-        if action == "hide_tool_status":
-            _hide_tool_status_in_ui()
-            return {"success": True, "message": "工具状态已隐藏"}
 
         return {"success": True, "message": "UI通知已处理"}
 
