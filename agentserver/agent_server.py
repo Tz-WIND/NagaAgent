@@ -317,6 +317,21 @@ async def lifespan(app: FastAPI):
             logger.warning(f"[ProactiveVision] 初始化失败（可选功能）: {e}")
             Modules.proactive_scheduler = None
 
+        # 初始化心跳系统
+        try:
+            from agentserver.heartbeat import load_heartbeat_config, create_heartbeat_scheduler
+
+            hb_config = load_heartbeat_config()
+            Modules.heartbeat_scheduler = create_heartbeat_scheduler(hb_config)
+            if hb_config.enabled:
+                await Modules.heartbeat_scheduler.start()
+                logger.info("[Heartbeat] 心跳系统已启动")
+            else:
+                logger.info("[Heartbeat] 心跳系统未启用")
+        except Exception as e:
+            logger.warning(f"[Heartbeat] 初始化失败（可选功能）: {e}")
+            Modules.heartbeat_scheduler = None
+
         logger.info("NagaAgent服务初始化完成")
 
         # 执行启动时健康检查（延迟2秒等待所有服务就绪）
@@ -335,6 +350,11 @@ async def lifespan(app: FastAPI):
         if Modules.proactive_scheduler:
             await Modules.proactive_scheduler.stop()
             logger.info("[ProactiveVision] 主动视觉系统已停止")
+
+        # 停止心跳系统
+        if Modules.heartbeat_scheduler:
+            await Modules.heartbeat_scheduler.stop()
+            logger.info("[Heartbeat] 心跳系统已停止")
 
         # 停止 Gateway 进程（内嵌模式）
         embedded_runtime = get_embedded_runtime()
@@ -355,6 +375,7 @@ class Modules:
     task_scheduler = None
     openclaw_client = None
     proactive_scheduler = None  # 主动视觉调度器
+    heartbeat_scheduler = None  # 心跳调度器
 
 
 def _now_iso() -> str:
@@ -516,6 +537,7 @@ async def health_check():
         "modules": {
             "openclaw": Modules.openclaw_client is not None,
             "proactive_vision": Modules.proactive_scheduler is not None,
+            "heartbeat": Modules.heartbeat_scheduler is not None,
         },
     }
 
@@ -1040,6 +1062,106 @@ async def openclaw_wake(payload: Dict[str, Any]):
         raise HTTPException(500, f"触发失败: {e}")
 
 
+# ============ 本地搜索代理（拦截 OpenClaw web_search） ============
+
+_search_http_client: Optional["httpx.AsyncClient"] = None
+
+
+def _get_search_client() -> "httpx.AsyncClient":
+    """搜索代理共享 httpx 客户端"""
+    import httpx
+
+    global _search_http_client
+    if _search_http_client is None or _search_http_client.is_closed:
+        _search_http_client = httpx.AsyncClient(timeout=30.0, proxy=None)
+    return _search_http_client
+
+
+async def _local_search_proxy(args: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    本地搜索代理：拦截 web_search 请求，走 Naga 或 Brave，不转发给 OpenClaw。
+    返回 MCP 工具结果格式 { success, result: { content: [...] } }
+    """
+    query = args.get("query", "") or args.get("q", "")
+    count = args.get("count", 10) or args.get("limit", 10)
+    freshness = args.get("freshness")
+
+    if not query:
+        return {"success": False, "error": "缺少搜索关键词 (query)"}
+
+    try:
+        # 优先级1: 已登录 Naga → NagaBusiness 搜索代理
+        from apiserver import naga_auth
+
+        if naga_auth.is_authenticated():
+            token = naga_auth.get_access_token()
+            params: Dict[str, Any] = {"q": query, "count": count}
+            if freshness:
+                params["freshness"] = freshness
+            client = _get_search_client()
+            resp = await client.post(
+                naga_auth.NAGA_MODEL_URL + "/tools/search",
+                json=params,
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            source = "naga"
+        else:
+            # 优先级2: 配置了 search_api_key → 直接调 Brave
+            api_key = config.online_search.search_api_key
+            if not api_key:
+                return {"success": False, "error": "未登录且未配置 search_api_key，无法搜索"}
+            api_base = config.online_search.search_api_base
+            params = {"q": query, "count": count}
+            if freshness:
+                params["freshness"] = freshness
+            client = _get_search_client()
+            resp = await client.get(
+                api_base,
+                params=params,
+                headers={"Accept": "application/json", "X-Subscription-Token": api_key},
+            )
+            source = "brave"
+
+        if resp.status_code != 200:
+            try:
+                err = resp.json()
+                msg = err.get("error", {}).get("message", "") if isinstance(err.get("error"), dict) else str(err)
+            except Exception:
+                msg = f"HTTP {resp.status_code}"
+            logger.warning(f"[搜索代理] {source} 搜索失败: {msg}")
+            return {"success": False, "error": f"搜索失败: {msg}"}
+
+        data = resp.json()
+        results = data.get("web", {}).get("results", [])
+
+        # 格式化为可读文本
+        if not results:
+            text = "未找到相关搜索结果。"
+        else:
+            lines = []
+            for i, r in enumerate(results, 1):
+                lines.append(f"{i}. {r.get('title', '')}")
+                lines.append(f"   URL: {r.get('url', '')}")
+                if r.get("description"):
+                    lines.append(f"   摘要: {r['description']}")
+                if r.get("age"):
+                    lines.append(f"   时间: {r['age']}")
+                lines.append("")
+            text = "\n".join(lines)
+
+        logger.info(f"[搜索代理] {source} 搜索完成: query=\"{query}\", 结果数={len(results)}")
+
+        # 返回 MCP 工具结果格式
+        return {
+            "success": True,
+            "result": {"content": [{"type": "text", "text": text}]},
+        }
+
+    except Exception as e:
+        logger.error(f"[搜索代理] 搜索异常: {e}")
+        return {"success": False, "error": f"搜索异常: {e}"}
+
+
 @app.post("/openclaw/tools/invoke")
 async def openclaw_invoke_tool(payload: Dict[str, Any]):
     """
@@ -1054,12 +1176,16 @@ async def openclaw_invoke_tool(payload: Dict[str, Any]):
     - action: 动作 (可选)
     - session_key: 会话标识 (可选)
     """
-    if not Modules.openclaw_client:
-        raise HTTPException(503, "OpenClaw 客户端未就绪")
-
     tool = payload.get("tool")
     if not tool:
         raise HTTPException(400, "tool 不能为空")
+
+    # web_search 拦截：走本地搜索代理，不转发给 OpenClaw
+    if tool == "web_search":
+        return await _local_search_proxy(payload.get("args") or {})
+
+    if not Modules.openclaw_client:
+        raise HTTPException(503, "OpenClaw 客户端未就绪")
 
     try:
         result = await Modules.openclaw_client.invoke_tool(
@@ -2084,6 +2210,240 @@ async def get_proactive_vision_metrics_prometheus():
     except Exception as e:
         logger.error(f"获取 Prometheus metrics 失败: {e}")
         raise HTTPException(500, f"获取失败: {e}")
+
+
+# ======================================================================
+# Heartbeat 心跳系统端点
+# ======================================================================
+
+
+@app.post("/heartbeat/conversation_event")
+async def heartbeat_conversation_event(payload: Dict[str, Any]):
+    """接收 api_server 的对话生命周期事件"""
+    event = payload.get("event", "")
+    try:
+        from agentserver.heartbeat.scheduler import get_heartbeat_scheduler
+
+        scheduler = get_heartbeat_scheduler()
+        if not scheduler:
+            return {"status": "no_scheduler"}
+
+        if event == "started":
+            scheduler.on_conversation_started()
+        elif event == "ended":
+            scheduler.on_conversation_ended()
+        else:
+            return {"status": "unknown_event", "event": event}
+
+        logger.info(f"[Heartbeat] 收到对话事件: {event}")
+        return {"status": "ok", "event": event}
+    except Exception as e:
+        logger.error(f"[Heartbeat] 处理对话事件失败: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/heartbeat/config")
+async def get_heartbeat_config():
+    """获取心跳系统配置"""
+    try:
+        from agentserver.heartbeat import load_heartbeat_config
+
+        cfg = load_heartbeat_config()
+        return {"success": True, "config": cfg.model_dump()}
+    except Exception as e:
+        logger.error(f"获取 Heartbeat 配置失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+@app.post("/heartbeat/config")
+async def update_heartbeat_config(payload: Dict[str, Any]):
+    """更新心跳系统配置（含热重载调度器）"""
+    try:
+        from agentserver.heartbeat import (
+            load_heartbeat_config,
+            save_heartbeat_config,
+            HeartbeatConfig,
+            replace_heartbeat_scheduler_async,
+        )
+
+        old_config = load_heartbeat_config()
+        config_dict = old_config.model_dump()
+        config_dict.update(payload)
+        new_config = HeartbeatConfig(**config_dict)
+
+        if not save_heartbeat_config(new_config):
+            raise HTTPException(500, "配置保存失败")
+
+        # 热重载调度器
+        if Modules.heartbeat_scheduler:
+            was_running = Modules.heartbeat_scheduler._running
+            Modules.heartbeat_scheduler = await replace_heartbeat_scheduler_async(new_config)
+            if new_config.enabled:
+                await Modules.heartbeat_scheduler.start()
+            logger.info(f"[Heartbeat] 配置已热重载 (was_running={was_running})")
+
+        return {"success": True, "message": "配置已更新", "config": new_config.model_dump()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新 Heartbeat 配置失败: {e}")
+        raise HTTPException(500, f"更新失败: {e}")
+
+
+@app.post("/heartbeat/enable")
+async def enable_heartbeat(payload: Dict[str, Any]):
+    """快捷开关：启用/禁用心跳系统"""
+    try:
+        enabled = payload.get("enabled", True)
+
+        from agentserver.heartbeat import load_heartbeat_config, save_heartbeat_config
+
+        cfg = load_heartbeat_config()
+        cfg.enabled = enabled
+
+        if save_heartbeat_config(cfg):
+            if Modules.heartbeat_scheduler:
+                if enabled:
+                    Modules.heartbeat_scheduler.config = cfg
+                    await Modules.heartbeat_scheduler.start()
+                else:
+                    Modules.heartbeat_scheduler.config = cfg
+                    await Modules.heartbeat_scheduler.stop()
+
+            status = "已启用" if enabled else "已禁用"
+            return {"success": True, "message": f"心跳系统{status}", "enabled": enabled}
+        else:
+            raise HTTPException(500, "配置保存失败")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"切换 Heartbeat 状态失败: {e}")
+        raise HTTPException(500, f"操作失败: {e}")
+
+
+@app.post("/heartbeat/trigger")
+async def trigger_heartbeat():
+    """手动触发一次心跳检查"""
+    try:
+        if not Modules.heartbeat_scheduler:
+            raise HTTPException(400, "心跳调度器未初始化")
+
+        await Modules.heartbeat_scheduler.trigger_once()
+        return {
+            "success": True,
+            "message": "心跳已触发",
+            "status": Modules.heartbeat_scheduler.get_status(),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"手动触发 Heartbeat 失败: {e}")
+        raise HTTPException(500, f"触发失败: {e}")
+
+
+@app.get("/heartbeat/status")
+async def get_heartbeat_status():
+    """获取心跳系统运行状态"""
+    try:
+        if not Modules.heartbeat_scheduler:
+            return {
+                "success": True,
+                "running": False,
+                "enabled": False,
+                "message": "调度器未初始化",
+            }
+
+        return {
+            "success": True,
+            **Modules.heartbeat_scheduler.get_status(),
+        }
+    except Exception as e:
+        logger.error(f"获取 Heartbeat 状态失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+# ======================================================================
+# Heartbeat Checklist CRUD 端点
+# ======================================================================
+
+
+@app.get("/heartbeat/checklist")
+async def get_heartbeat_checklist(status: Optional[str] = None):
+    """获取 checklist 条目列表，可选 ?status=pending 过滤"""
+    try:
+        from agentserver.heartbeat import load_checklist
+
+        cl = load_checklist()
+        items = cl.items
+        if status:
+            items = [i for i in items if i.status == status]
+        return {
+            "success": True,
+            "items": [i.model_dump() for i in items],
+            "total": len(items),
+        }
+    except Exception as e:
+        logger.error(f"获取 Checklist 失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+@app.post("/heartbeat/checklist")
+async def create_checklist_item(payload: Dict[str, Any]):
+    """新增 checklist 条目 {"content": "...", "priority": "normal"}"""
+    try:
+        from agentserver.heartbeat import add_item
+
+        content = payload.get("content", "").strip()
+        if not content:
+            raise HTTPException(400, "content 不能为空")
+
+        priority = payload.get("priority", "normal")
+        item = add_item(content, source="user", priority=priority)
+        return {"success": True, "item": item.model_dump()}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"新增 Checklist 条目失败: {e}")
+        raise HTTPException(500, f"新增失败: {e}")
+
+
+@app.put("/heartbeat/checklist/{item_id}")
+async def update_checklist_item(item_id: str, payload: Dict[str, Any]):
+    """更新 checklist 条目 {"status": "done", "notes": "..."}"""
+    try:
+        from agentserver.heartbeat import update_item
+
+        allowed_fields = {"status", "notes", "priority", "content"}
+        updates = {k: v for k, v in payload.items() if k in allowed_fields}
+        if not updates:
+            raise HTTPException(400, "无有效更新字段")
+
+        ok = update_item(item_id, **updates)
+        if not ok:
+            raise HTTPException(404, f"条目不存在: {item_id}")
+        return {"success": True, "message": "更新成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"更新 Checklist 条目失败: {e}")
+        raise HTTPException(500, f"更新失败: {e}")
+
+
+@app.delete("/heartbeat/checklist/{item_id}")
+async def delete_checklist_item(item_id: str):
+    """删除 checklist 条目"""
+    try:
+        from agentserver.heartbeat import remove_item
+
+        ok = remove_item(item_id)
+        if not ok:
+            raise HTTPException(404, f"条目不存在: {item_id}")
+        return {"success": True, "message": "删除成功"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"删除 Checklist 条目失败: {e}")
+        raise HTTPException(500, f"删除失败: {e}")
 
 
 if __name__ == "__main__":

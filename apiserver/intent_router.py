@@ -115,6 +115,14 @@ _FEW_SHOT_EXAMPLES = [
     {"role": "assistant", "content": "{{screen_vision}}"},
     {"role": "user", "content": "搜一下最近的新闻然后写个总结"},
     {"role": "assistant", "content": "{{openclaw}}"},
+    {"role": "user", "content": "帮我关一下语音"},
+    {"role": "assistant", "content": "{{naga_control}}"},
+    {"role": "user", "content": "你现在用的什么模型"},
+    {"role": "assistant", "content": "{{naga_control}}"},
+    {"role": "user", "content": "把温度调到0.5"},
+    {"role": "assistant", "content": "{{naga_control}}"},
+    {"role": "user", "content": "播放一首音乐"},
+    {"role": "assistant", "content": "{{naga_control}}"},
 ]
 
 

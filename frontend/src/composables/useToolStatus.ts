@@ -2,6 +2,7 @@ import { ref } from 'vue'
 import API from '@/api/core'
 import { triggerAction } from '@/utils/live2dController'
 import { MESSAGES } from '@/utils/session'
+import { handleMusicCommand } from '@/composables/useMusicPlayer'
 
 export const toolMessage = ref('')
 export const openclawTasks = ref<Array<Record<string, any>>>([])
@@ -9,11 +10,12 @@ let timer: ReturnType<typeof setInterval> | null = null
 
 async function poll() {
   try {
-    const [status, clawdbot, tasks, live2d] = await Promise.allSettled([
+    const [status, clawdbot, tasks, live2d, music] = await Promise.allSettled([
       API.getToolStatus(),
       API.getClawdbotReplies(),
       API.getOpenclawTasks(),
       API.getLive2dActions(),
+      API.getMusicCommands(),
     ])
 
     if (status.status === 'fulfilled') {
@@ -41,6 +43,12 @@ async function poll() {
     if (live2d.status === 'fulfilled' && live2d.value.actions?.length) {
       for (const action of live2d.value.actions) {
         triggerAction(action)
+      }
+    }
+
+    if (music.status === 'fulfilled' && music.value.commands?.length) {
+      for (const cmd of music.value.commands) {
+        handleMusicCommand(cmd)
       }
     }
   }

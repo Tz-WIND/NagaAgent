@@ -33,8 +33,13 @@ class ProactiveVisionTrigger:
         # 渲染消息模板
         message = rule.message_template.format(context=context)
 
-        # 发送到前端（通过API Server的通知接口）
-        success = await self._notify_frontend(message, rule.name)
+        # 通过消息队列路由（临时屏幕消息 + 队列入队）
+        queue_ok = await self._route_via_queue(message, rule.name)
+
+        # 同时保留原有 UI 展示通道（屏幕监测消息需要立即展示给用户）
+        display_ok = await self._notify_frontend(message, rule.name)
+
+        success = queue_ok or display_ok
 
         # 记录metrics
         metrics.record_notification(success)
@@ -55,6 +60,31 @@ class ProactiveVisionTrigger:
 
         elapsed = time.time() - self._rule_last_triggered[rule.rule_id]
         return elapsed >= rule.cooldown_seconds
+
+    async def _route_via_queue(self, message: str, source: str) -> bool:
+        """通过 api_server 的消息队列路由（设置临时屏幕槽 + 对话中入队）"""
+        import httpx
+        from system.config import get_server_port
+
+        api_port = get_server_port("api_server")
+        try:
+            async with httpx.AsyncClient(timeout=5.0, proxy=None) as client:
+                resp = await client.post(
+                    f"http://localhost:{api_port}/queue/push",
+                    json={
+                        "content": message,
+                        "source": "screen_monitor",
+                        "metadata": {"rule": source},
+                    },
+                )
+                if resp.status_code == 200:
+                    result = resp.json()
+                    logger.debug(f"[ProactiveVision] 消息队列路由: {result.get('status')}")
+                    return True
+                return False
+        except Exception as e:
+            logger.warning(f"[ProactiveVision] 消息队列路由失败: {e}")
+            return False
 
     async def _notify_frontend(self, message: str, source: str) -> bool:
         """通知前端显示主动消息（优先使用WebSocket，降级HTTP）"""

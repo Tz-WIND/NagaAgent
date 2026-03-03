@@ -552,6 +552,8 @@ class OnlineSearchConfig(BaseModel):
     searxng_url: str = Field(default="http://localhost:8080", description="SearXNG实例URL")
     engines: List[str] = Field(default=["google"], description="默认搜索引擎列表")
     num_results: int = Field(default=5, ge=1, le=20, description="搜索结果数量")
+    search_api_key: str = Field(default="", description="Brave Search API Key（未登录Naga时使用）")
+    search_api_base: str = Field(default="https://api.search.brave.com/res/v1/web/search", description="搜索API地址")
 
 
 class OpenClawConfig(BaseModel):
@@ -799,20 +801,17 @@ def build_context_supplement(
     skills_section = ""
     if not skip_tools and not skill_name and include_skills:
         if route_result is not None and route_result.needed_skills:
-            # 只列出路由指定的技能
+            # 路由指定的技能 → 注入完整技能指令（而非仅元数据）
             try:
-                from system.skill_manager import get_skill_manager
+                from system.skill_manager import get_skill_manager, load_skill
                 mgr = get_skill_manager()
-                lines = ["## 可用技能", ""]
-                for meta in mgr.get_all_metadata():
-                    if meta.name in route_result.needed_skills:
-                        lines.append(f"### {meta.name}")
-                        lines.append(f"- **描述**: {meta.description}")
-                        if meta.tags:
-                            lines.append(f"- **标签**: {', '.join(meta.tags)}")
-                        lines.append("")
-                if len(lines) > 2:
-                    skills_section = "\n\n" + "\n".join(lines)
+                parts = []
+                for sname in route_result.needed_skills:
+                    instructions = load_skill(sname)
+                    if instructions:
+                        parts.append(instructions)
+                if parts:
+                    skills_section = "\n\n" + "\n\n".join(parts)
             except ImportError:
                 pass
         else:

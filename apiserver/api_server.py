@@ -72,6 +72,22 @@ def _save_conversation_and_logs(session_id: str, user_message: str, assistant_re
     message_manager.save_conversation_and_logs(session_id, user_message, assistant_response)
 
 
+async def _notify_conversation_event(event: str):
+    """通知 agent_server 对话生命周期事件"""
+    try:
+        from system.config import get_server_port
+        import httpx
+
+        async with httpx.AsyncClient(timeout=3.0, proxy=None) as client:
+            await client.post(
+                f"http://localhost:{get_server_port('agent_server')}/heartbeat/conversation_event",
+                json={"event": event},
+            )
+        logger.info(f"[ConversationEvent] 已通知 agent_server: {event}")
+    except Exception as e:
+        logger.debug(f"[ConversationEvent] 通知失败: {e}")
+
+
 # 回调工厂类已移除 - 功能已整合到streaming_tool_extractor
 
 
@@ -139,6 +155,18 @@ else:
         app.mount("/characters", _StaticFiles(directory=str(_CHARACTERS_DIR)), name="characters")
     except Exception as e:
         logger.error(f"角色静态目录初始化失败，将跳过 /characters 挂载: {e}")
+
+# ============ 运行时状态检查（naga_control） ============
+
+
+def _is_voice_runtime_paused() -> bool:
+    """检查语音是否被 naga_control 运行时暂停"""
+    try:
+        from apiserver.naga_control import is_voice_paused
+        return is_voice_paused()
+    except Exception:
+        return False
+
 
 # ============ 内部服务代理 ============
 
@@ -1129,12 +1157,20 @@ async def chat_stream(request: ChatRequest):
 
     async def generate_response() -> AsyncGenerator[str, None]:
         complete_text = ""  # 用于累积最终轮的完整文本（供 return_audio 模式使用）
+        _mq_initialized = False  # 标记消息队列是否已设置 active
         try:
             import time as _time
             t_api_start = _time.monotonic()
 
             # 获取或创建会话ID
             session_id = message_manager.create_session(request.session_id, temporary=request.temporary)
+
+            # ★ 通知对话开始 + 设置消息队列状态
+            from .message_queue import get_message_queue
+            mq = get_message_queue()
+            mq.set_conversation_active(True)
+            _mq_initialized = True
+            asyncio.create_task(_notify_conversation_event("started"))
 
             # 发送会话ID信息
             yield f"data: session_id: {session_id}\n\n"
@@ -1144,6 +1180,12 @@ async def chat_stream(request: ChatRequest):
 
             # 用户消息使用带技能前缀的版本
             effective_message = user_message
+
+            # ★ 检查是否有临时屏幕消息需要提升为正式上下文
+            ephemeral = mq.promote_ephemeral_screen()
+            if ephemeral:
+                message_manager.add_message(session_id, "user", f"[屏幕观察] {ephemeral.content}")
+                logger.info("[ChatStream] 提升临时屏幕消息为正式上下文")
 
             # 先构建对话消息（人格在 messages[0]）
             messages = message_manager.build_conversation_messages(
@@ -1227,6 +1269,7 @@ async def chat_stream(request: ChatRequest):
                 and not request.return_audio  # return_audio时不启用实时TTS
                 and get_config().voice_realtime.voice_mode != "hybrid"
                 and not request.disable_tts
+                and not _is_voice_runtime_paused()
             )
 
             if should_enable_tts:
@@ -1262,7 +1305,7 @@ async def chat_stream(request: ChatRequest):
                 print(f"流式文本切割器初始化失败: {e}")
 
             # ====== Agentic Tool Loop ======
-            yield 'data: {"type":"status","text":"生成回复"}\n\n'
+            yield 'data: {"type":"status","text":"娜迦打字中..."}\n\n'
             from .agentic_tool_loop import run_agentic_loop
 
             t_prepare_elapsed = _time.monotonic() - t_api_start
@@ -1421,6 +1464,10 @@ async def chat_stream(request: ChatRequest):
             # 统一保存对话历史与日志
             _save_conversation_and_logs(session_id, user_message, complete_response)
 
+            # ★ 通知对话结束 + 设置消息队列状态
+            mq.set_conversation_active(False)
+            asyncio.create_task(_notify_conversation_event("ended"))
+
             # 运行时压缩成功时，在会话末尾追加 info 标记
             # 该标记持久化到磁盘，下次启动用于判断上一个会话是否已被压缩
             if was_compressed:
@@ -1432,6 +1479,17 @@ async def chat_stream(request: ChatRequest):
             print(f"流式对话处理错误: {e}")
             traceback.print_exc()
             yield f"data: error:{str(e)}\n\n"
+        finally:
+            # ★ 确保对话结束事件一定触发，即使异常/客户端断开
+            if _mq_initialized:
+                try:
+                    from .message_queue import get_message_queue
+                    _mq = get_message_queue()
+                    if _mq.is_conversation_active():
+                        _mq.set_conversation_active(False)
+                        asyncio.create_task(_notify_conversation_event("ended"))
+                except Exception:
+                    pass
 
     return StreamingResponse(
         generate_response(),
@@ -1470,7 +1528,10 @@ async def proxy_search(request: Request):
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
     except Exception as e:
         logger.warning(f"搜索代理失败: {e}")
-        return JSONResponse(content={"error": f"搜索服务不可用: {e}"}, status_code=502)
+        return JSONResponse(
+            content={"error": {"message": f"搜索服务不可用: {e}", "type": "upstream_error"}},
+            status_code=502,
+        )
 
 
 @app.get("/memory/stats")
@@ -2015,6 +2076,9 @@ _clawdbot_replies: list = []
 # Web前端 Live2D 动作队列（轮询获取）
 _live2d_actions: list = []
 
+# Web前端 音乐控制队列（轮询获取）
+_music_commands: list = []
+
 
 @app.get("/tool_status")
 async def get_tool_status():
@@ -2036,6 +2100,47 @@ async def get_live2d_actions():
     actions = list(_live2d_actions)
     _live2d_actions.clear()
     return {"actions": actions}
+
+
+@app.get("/music/commands")
+async def get_music_commands():
+    """获取并清空音乐控制指令队列（供Web前端轮询）"""
+    commands = list(_music_commands)
+    _music_commands.clear()
+    return {"commands": commands}
+
+
+@app.post("/queue/push")
+async def queue_push(payload: Dict[str, Any]):
+    """接收外部消息并入队或设置临时屏幕消息
+
+    source: "screen_monitor" | "heartbeat"
+    对话进行中 → 入队等待注入
+    对话未进行 → 直接推送 UI（心跳通过 clawdbot_replies，屏幕通过临时槽）
+    """
+    content = payload.get("content", "")
+    source = payload.get("source", "unknown")
+    metadata = payload.get("metadata", {})
+
+    if not content:
+        return {"status": "empty"}
+
+    from .message_queue import get_message_queue
+    mq = get_message_queue()
+
+    # 屏幕监测：同时设置临时消息槽（无论对话是否活跃）
+    if source == "screen_monitor":
+        mq.set_ephemeral_screen(content, metadata)
+
+    # 如果对话正在进行，入队等待注入
+    if mq.is_conversation_active():
+        mq.push(content, source, metadata)
+        return {"status": "queued"}
+    else:
+        # 对话未进行：心跳消息直接推送 UI
+        if source == "heartbeat":
+            _clawdbot_replies.append(content)
+        return {"status": "direct"}
 
 
 @app.post("/tool_notification")
@@ -2244,10 +2349,50 @@ async def ui_notification(payload: Dict[str, Any]):
         except (TypeError, ValueError):
             auto_hide_ms = 0
 
+        logger.info(f"UI通知: {action}, 会话: {session_id}")
+
+        # ── 不需要 session_id 的控制类动作 ──
+
+        # 处理 Live2D 动作（动画表情）
+        if action == "live2d_action":
+            action_name = payload.get("action_name", "")
+            if action_name:
+                _live2d_actions.append(action_name)
+                logger.info(f"[UI通知] Live2D 动作已入队: {action_name}")
+                return {"success": True, "message": f"Live2D 动作 {action_name} 已入队"}
+
+        # 处理 Live2D 开关（naga_control 运行时暂停/恢复）
+        if action == "live2d_toggle":
+            enabled = payload.get("enabled", True)
+            logger.info(f"[UI通知] Live2D 开关: {'显示' if enabled else '隐藏'}")
+            return {"success": True, "message": f"Live2D {'已恢复' if enabled else '已暂停'}"}
+
+        if action == "hide_tool_status":
+            _hide_tool_status_in_ui()
+            return {"success": True, "message": "工具状态已隐藏"}
+
+        # 处理音乐控制
+        if action == "music_control":
+            music_action = payload.get("music_action", "play")
+            cmd: Dict[str, Any] = {"action": music_action}
+            track = payload.get("track")
+            if track:
+                cmd["track"] = track
+            _music_commands.append(cmd)
+            logger.info(f"[UI通知] 音乐指令已入队: {cmd}")
+            return {"success": True, "message": f"音乐指令 {music_action} 已入队"}
+
+        # 处理通用通知（naga_control send_notification）
+        if action == "show_notification":
+            msg = payload.get("message", "")
+            ntype = payload.get("type", "info")
+            logger.info(f"[UI通知] 通知: [{ntype}] {msg}")
+            return {"success": True, "message": "通知已接收"}
+
+        # ── 以下动作需要 session_id ──
+
         if not session_id:
             raise HTTPException(400, "缺少session_id")
-
-        logger.info(f"UI通知: {action}, 会话: {session_id}")
 
         # 处理显示工具AI回复的动作
         if action == "show_tool_ai_response" and ai_response:
@@ -2261,21 +2406,9 @@ async def ui_notification(payload: Dict[str, Any]):
             logger.info(f"[UI通知] AgentServer 回复已存储到队列，长度: {len(ai_response)}")
             return {"success": True, "message": "AgentServer 回复已存储"}
 
-        # 处理 Live2D 动作
-        if action == "live2d_action":
-            action_name = payload.get("action_name", "")
-            if action_name:
-                _live2d_actions.append(action_name)
-                logger.info(f"[UI通知] Live2D 动作已入队: {action_name}")
-                return {"success": True, "message": f"Live2D 动作 {action_name} 已入队"}
-
         if action == "show_tool_status" and status_text:
             _emit_tool_status_to_ui(status_text, auto_hide_ms)
             return {"success": True, "message": "工具状态已显示"}
-
-        if action == "hide_tool_status":
-            _hide_tool_status_in_ui()
-            return {"success": True, "message": "工具状态已隐藏"}
 
         return {"success": True, "message": "UI通知已处理"}
 

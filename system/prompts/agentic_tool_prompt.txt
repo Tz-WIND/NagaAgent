@@ -65,6 +65,9 @@
 {"agentType": "live2d", "action": "normal或happy或enjoy或sad或surprise"}
 ```
 
+### Naga 自身控制
+当需要控制自身功能（语音开关、模型切换、音乐播放等）时，使用 `agentType: "naga_control"`。详细动作表见注入的技能文档。
+
 ### 可用MCP服务
 {available_mcp_tools}
 

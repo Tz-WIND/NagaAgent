@@ -24,6 +24,10 @@ import {
 
 let isQuitting = false
 
+// 防止 EPIPE 导致 Electron 崩溃（后端进程 stdout 管道断开时会触发）
+process.stdout?.on('error', () => {})
+process.stderr?.on('error', () => {})
+
 // Prevent multiple instances
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
