@@ -161,7 +161,10 @@ export function chatStream(content: string, options?: { skill?: string, images?:
       delete message.generating
       delete message.status
       if (!message.reasoning) delete message.reasoning
-      speak(spokenContent).catch(() => {
+      speak(spokenContent).then(() => {
+        // speak() 内容被 stripCodeBlocks 清空时立即 resolve，不会触发 isPlaying watcher
+        if (!isPlaying.value) live2dState.value = 'idle'
+      }).catch(() => {
         live2dState.value = 'idle'
       })
     }

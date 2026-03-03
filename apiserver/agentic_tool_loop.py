@@ -950,15 +950,19 @@ async def run_agentic_loop(
         messages.append({"role": "user", "content": tool_result_text})
 
         # ★ 消息队列注入：在工具执行完毕、下一轮 LLM 调用前，注入排队消息
+        # 合并到最后一条 user 消息中，避免连续多条 user 破坏角色交替
         try:
             from .message_queue import get_message_queue
             mq = get_message_queue()
             queued = mq.drain()
             if queued:
+                inject_parts = []
                 for qm in queued:
                     tag = f"[{qm.source}]" if qm.source != "user" else ""
-                    inject_content = f"{tag} {qm.content}".strip()
-                    messages.append({"role": "user", "content": inject_content})
+                    inject_parts.append(f"{tag} {qm.content}".strip())
+                inject_text = "\n\n".join(inject_parts)
+                # 追加到最后一条 user 消息（即工具结果），保持角色交替
+                messages[-1]["content"] += f"\n\n--- 排队消息 ---\n{inject_text}"
                 logger.info(
                     f"[AgenticLoop] 注入 {len(queued)} 条排队消息: "
                     f"{[q.source for q in queued]}"

@@ -2685,7 +2685,10 @@ async def _call_nagabusiness(
             pass
         raise HTTPException(status_code=resp.status_code, detail=detail)
 
-    return resp.json()
+    try:
+        return resp.json()
+    except Exception:
+        return resp.text or ""
 
 
 @app.get("/forum/api/posts")

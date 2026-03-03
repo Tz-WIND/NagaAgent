@@ -6,6 +6,7 @@ const audio = ref<HTMLAudioElement | null>(null)
 export const isPlaying = ref(false)
 let maxDurationTimer: number | null = null
 let abortController: AbortController | null = null
+let currentObjectUrl: string | null = null
 
 const MAX_PLAYBACK_DURATION = 30000 // 30秒最大播放时长
 
@@ -72,16 +73,27 @@ export function speak(text: string): Promise<void> {
   })
 }
 
+/** 等待 sourceBuffer 更新完成，同时监听 error 事件防止永远挂起 */
+function waitForUpdateEnd(sb: SourceBuffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const onEnd = () => { sb.removeEventListener('error', onErr); resolve() }
+    const onErr = () => { sb.removeEventListener('updateend', onEnd); reject(new Error('SourceBuffer error')) }
+    sb.addEventListener('updateend', onEnd, { once: true })
+    sb.addEventListener('error', onErr, { once: true })
+  })
+}
+
 /** 流式播放——边接收边播放，首音延迟降至 <500ms */
 async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void> {
   const mediaSource = new MediaSource()
   const objectUrl = URL.createObjectURL(mediaSource)
+  currentObjectUrl = objectUrl
   const el = new Audio(objectUrl)
   audio.value = el
 
   el.onplay = () => { isPlaying.value = true }
-  el.onended = () => { cleanup(objectUrl) }
-  el.onerror = () => { cleanup(objectUrl) }
+  el.onended = () => { cleanup() }
+  el.onerror = () => { cleanup() }
 
   // 设置30秒最大播放时长定时器
   maxDurationTimer = window.setTimeout(() => {
@@ -93,7 +105,7 @@ async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void
       const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
       const reader = res.body?.getReader()
       if (!reader) {
-        cleanup(objectUrl)
+        cleanup()
         reject(new Error('No response body'))
         return
       }
@@ -108,10 +120,10 @@ async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void
 
           // 等待 sourceBuffer 可写
           if (sourceBuffer.updating) {
-            await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+            await waitForUpdateEnd(sourceBuffer)
           }
           sourceBuffer.appendBuffer(value)
-          await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+          await waitForUpdateEnd(sourceBuffer)
 
           // 收到第一块数据后立即开始播放
           if (firstChunk) {
@@ -128,7 +140,7 @@ async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void
       try {
         if (mediaSource.readyState === 'open') {
           if (sourceBuffer.updating) {
-            await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+            await waitForUpdateEnd(sourceBuffer)
           }
           mediaSource.endOfStream()
         }
@@ -146,28 +158,38 @@ async function _blobPlayback(res: Response, signal: AbortSignal): Promise<void> 
 
   const audioBlob = blob.type.startsWith('audio/') ? blob : new Blob([blob], { type: 'audio/mpeg' })
   const objectUrl = URL.createObjectURL(audioBlob)
+  currentObjectUrl = objectUrl
   const el = new Audio(objectUrl)
   audio.value = el
 
   el.onplay = () => { isPlaying.value = true }
-  el.onended = () => { cleanup(objectUrl) }
-  el.onerror = () => { cleanup(objectUrl) }
+  el.onended = () => { cleanup() }
+  el.onerror = () => { cleanup() }
 
   maxDurationTimer = window.setTimeout(() => {
     if (audio.value) stop()
   }, MAX_PLAYBACK_DURATION)
 
-  el.play()
+  el.play().catch(() => {})
 }
 
-function cleanup(objectUrl?: string) {
+function cleanup() {
   if (maxDurationTimer) {
     clearTimeout(maxDurationTimer)
     maxDurationTimer = null
   }
   isPlaying.value = false
-  if (objectUrl) {
-    URL.revokeObjectURL(objectUrl)
+  if (currentObjectUrl) {
+    URL.revokeObjectURL(currentObjectUrl)
+    currentObjectUrl = null
+  }
+  if (audio.value) {
+    audio.value.onplay = null
+    audio.value.onended = null
+    audio.value.onerror = null
+    audio.value.pause()
+    audio.value.removeAttribute('src')
+    audio.value.load()
   }
   audio.value = null
 }
@@ -179,16 +201,5 @@ export function stop() {
     abortController = null
   }
 
-  // 清除定时器
-  if (maxDurationTimer) {
-    clearTimeout(maxDurationTimer)
-    maxDurationTimer = null
-  }
-
-  if (audio.value) {
-    audio.value.pause()
-    audio.value = null
-  }
-  // 立即闭嘴
-  isPlaying.value = false
+  cleanup()
 }
