@@ -674,8 +674,10 @@ def _ensure_wav_header(audio_data: bytes) -> tuple[bytes, str]:
 
 @app.post("/tts/speech")
 async def tts_speech_proxy(request: Request):
-    """代理前端 TTS 请求到 NagaBusiness，避免浏览器 CORS 限制"""
+    """流式代理 TTS 请求——边收边转发，前端可立即开始播放"""
     import httpx
+    from starlette.responses import StreamingResponse
+
     try:
         body = await request.json()
     except Exception:
@@ -699,23 +701,42 @@ async def tts_speech_proxy(request: Request):
         tts_url = f"http://localhost:{tts_port}/v1/audio/speech"
         headers = {"Content-Type": "application/json"}
 
+    # 使用流式请求——不等待完整响应，逐块转发
+    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10), trust_env=False)
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(tts_url, json=body, headers=headers)
-        if resp.status_code != 200:
-            logger.error(f"TTS 代理失败: {resp.status_code} url={tts_url}")
-            raise HTTPException(status_code=resp.status_code, detail="TTS service error")
-        # 检查音频格式，raw PCM 自动包装为 WAV
-        audio_data, content_type = _ensure_wav_header(resp.content)
-        from fastapi.responses import Response
-        return Response(content=audio_data, media_type=content_type)
+        upstream = await client.send(
+            client.build_request("POST", tts_url, json=body, headers=headers),
+            stream=True,
+        )
     except httpx.TimeoutException:
+        await client.aclose()
         raise HTTPException(status_code=504, detail="TTS service timeout")
-    except HTTPException:
-        raise
     except Exception as e:
-        logger.error(f"TTS 代理异常: {e}")
+        await client.aclose()
+        logger.error(f"TTS 代理连接失败: {e}")
         raise HTTPException(status_code=502, detail=f"TTS proxy error: {str(e)}")
+
+    if upstream.status_code != 200:
+        body_text = (await upstream.aread()).decode(errors="replace")[:300]
+        await upstream.aclose()
+        await client.aclose()
+        logger.error(f"TTS 代理失败: {upstream.status_code} url={tts_url}")
+        raise HTTPException(status_code=upstream.status_code, detail="TTS service error")
+
+    # 检测 Content-Type（NagaBusiness 返回 audio/mpeg，edge-tts 可能返回 audio/wav 或 raw PCM）
+    ct = upstream.headers.get("content-type", "audio/mpeg")
+    if "audio" not in ct:
+        ct = "audio/mpeg"
+
+    async def _stream_and_close():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=4096):
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(_stream_and_close(), media_type=ct)
 
 
 @app.post("/asr/transcribe")
@@ -828,7 +849,11 @@ async def full_health_check():
 @app.get("/openclaw/tasks")
 async def api_openclaw_list_tasks():
     """列出本地缓存的 OpenClaw 任务（来自 agentserver）"""
-    return await _call_agentserver("GET", "/openclaw/tasks")
+    try:
+        return await _call_agentserver("GET", "/openclaw/tasks")
+    except Exception:
+        # 轮询端点——agent_server 不可达时返回空列表而非 503
+        return {"tasks": []}
 
 
 @app.get("/openclaw/tasks/{task_id}")
@@ -2642,6 +2667,9 @@ async def _call_nagabusiness(
         auth = request.headers.get("authorization", "")
         if auth:
             headers["Authorization"] = auth
+    # 前端未传 token 时，使用后端已同步的认证状态
+    if "Authorization" not in headers and naga_auth.is_authenticated():
+        headers["Authorization"] = f"Bearer {naga_auth.get_access_token()}"
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:

@@ -573,7 +573,7 @@ class OpenClawConfig(BaseModel):
 class NagaBusinessConfig(BaseModel):
     """NagaBusiness 服务配置（娜迦网络）"""
 
-    forum_api_url: str = Field(default="https://business.naga.ac", description="NagaBusiness API 地址")
+    forum_api_url: str = Field(default="http://62.234.131.204:30031", description="NagaBusiness API 地址")
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 

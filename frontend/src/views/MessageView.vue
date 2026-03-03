@@ -156,24 +156,14 @@ export function chatStream(content: string, options?: { skill?: string, images?:
     }
 
     if (voiceSync && spokenContent) {
-      // "组织语言中" 阶段：等待 TTS 首段音频就绪
-      message.status = '组织语言中'
-      speak(spokenContent).catch(() => {
-        live2dState.value = 'idle'
-      })
-      // 等待音频开始播放（或超时 10s 兜底）
-      await new Promise<void>((resolve) => {
-        if (isPlaying.value) { resolve(); return }
-        const unwatch = watch(isPlaying, (playing) => {
-          if (playing) { unwatch(); resolve() }
-        })
-        setTimeout(() => { unwatch(); resolve() }, 10000)
-      })
-      // 释放缓冲内容
+      // 流式 TTS：文字立即显示，音频异步播放
       message.content = contentBuf
       delete message.generating
       delete message.status
       if (!message.reasoning) delete message.reasoning
+      speak(spokenContent).catch(() => {
+        live2dState.value = 'idle'
+      })
     }
     else {
       // 无语音 / 无朗读内容：直接显示

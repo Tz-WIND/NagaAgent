@@ -52,39 +52,17 @@ export function speak(text: string): Promise<void> {
   }).then(async (res) => {
     if (!res.ok)
       throw new Error(`TTS responded ${res.status}`)
-    const blob = await res.blob()
-    if (blob.size === 0)
-      throw new Error('TTS returned empty audio')
 
     // 如果已被 stop() 中止，不再播放
     if (signal.aborted) return
 
-    const audioBlob = blob.type.startsWith('audio/') ? blob : new Blob([blob], { type: 'audio/mpeg' })
-    const objectUrl = URL.createObjectURL(audioBlob)
-    const el = new Audio(objectUrl)
-    audio.value = el
-
-    // 严格时机：音频真正开始播放时才设 isPlaying=true（驱动 Live2D 张嘴）
-    el.onplay = () => {
-      isPlaying.value = true
+    // ★ 流式播放：用 MediaSource 边收边播，大幅减少首音延迟
+    if (typeof MediaSource !== 'undefined' && MediaSource.isTypeSupported('audio/mpeg')) {
+      await _streamPlayback(res, signal)
+    } else {
+      // 降级：不支持 MediaSource 的浏览器走原始 blob 方式
+      await _blobPlayback(res, signal)
     }
-
-    el.onended = () => {
-      cleanup(objectUrl)
-    }
-
-    el.onerror = () => {
-      cleanup(objectUrl)
-    }
-
-    // 设置30秒最大播放时长定时器
-    maxDurationTimer = window.setTimeout(() => {
-      if (audio.value) {
-        stop()
-      }
-    }, MAX_PLAYBACK_DURATION)
-
-    el.play()
   }).catch((err) => {
     // AbortError 是正常取消，不需要报错
     if (err instanceof DOMException && err.name === 'AbortError') return
@@ -92,6 +70,94 @@ export function speak(text: string): Promise<void> {
     console.error('[TTS] speak failed:', err)
     throw err
   })
+}
+
+/** 流式播放——边接收边播放，首音延迟降至 <500ms */
+async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void> {
+  const mediaSource = new MediaSource()
+  const objectUrl = URL.createObjectURL(mediaSource)
+  const el = new Audio(objectUrl)
+  audio.value = el
+
+  el.onplay = () => { isPlaying.value = true }
+  el.onended = () => { cleanup(objectUrl) }
+  el.onerror = () => { cleanup(objectUrl) }
+
+  // 设置30秒最大播放时长定时器
+  maxDurationTimer = window.setTimeout(() => {
+    if (audio.value) stop()
+  }, MAX_PLAYBACK_DURATION)
+
+  return new Promise<void>((resolve, reject) => {
+    mediaSource.addEventListener('sourceopen', async () => {
+      const sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg')
+      const reader = res.body?.getReader()
+      if (!reader) {
+        cleanup(objectUrl)
+        reject(new Error('No response body'))
+        return
+      }
+
+      let firstChunk = true
+      try {
+        while (true) {
+          if (signal.aborted) { reader.cancel(); break }
+          const { done, value } = await reader.read()
+          if (done) break
+          if (!value || value.length === 0) continue
+
+          // 等待 sourceBuffer 可写
+          if (sourceBuffer.updating) {
+            await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+          }
+          sourceBuffer.appendBuffer(value)
+          await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+
+          // 收到第一块数据后立即开始播放
+          if (firstChunk) {
+            firstChunk = false
+            el.play().catch(() => {})
+          }
+        }
+      } catch (e: any) {
+        if (e?.name === 'AbortError' || signal.aborted) { /* 正常取消 */ }
+        else { console.warn('[TTS] stream error:', e) }
+      }
+
+      // 流结束，关闭 MediaSource
+      try {
+        if (mediaSource.readyState === 'open') {
+          if (sourceBuffer.updating) {
+            await new Promise<void>(r => sourceBuffer.addEventListener('updateend', () => r(), { once: true }))
+          }
+          mediaSource.endOfStream()
+        }
+      } catch { /* ignore */ }
+      resolve()
+    }, { once: true })
+  })
+}
+
+/** 降级播放——完整下载后播放（老浏览器兜底） */
+async function _blobPlayback(res: Response, signal: AbortSignal): Promise<void> {
+  const blob = await res.blob()
+  if (blob.size === 0) throw new Error('TTS returned empty audio')
+  if (signal.aborted) return
+
+  const audioBlob = blob.type.startsWith('audio/') ? blob : new Blob([blob], { type: 'audio/mpeg' })
+  const objectUrl = URL.createObjectURL(audioBlob)
+  const el = new Audio(objectUrl)
+  audio.value = el
+
+  el.onplay = () => { isPlaying.value = true }
+  el.onended = () => { cleanup(objectUrl) }
+  el.onerror = () => { cleanup(objectUrl) }
+
+  maxDurationTimer = window.setTimeout(() => {
+    if (audio.value) stop()
+  }, MAX_PLAYBACK_DURATION)
+
+  el.play()
 }
 
 function cleanup(objectUrl?: string) {
