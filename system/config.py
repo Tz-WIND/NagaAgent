@@ -552,6 +552,8 @@ class OnlineSearchConfig(BaseModel):
     searxng_url: str = Field(default="http://localhost:8080", description="SearXNG实例URL")
     engines: List[str] = Field(default=["google"], description="默认搜索引擎列表")
     num_results: int = Field(default=5, ge=1, le=20, description="搜索结果数量")
+    search_api_key: str = Field(default="", description="Brave Search API Key（未登录Naga时使用）")
+    search_api_base: str = Field(default="https://api.search.brave.com/res/v1/web/search", description="搜索API地址")
 
 
 class OpenClawConfig(BaseModel):

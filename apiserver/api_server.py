@@ -1305,7 +1305,7 @@ async def chat_stream(request: ChatRequest):
                 print(f"流式文本切割器初始化失败: {e}")
 
             # ====== Agentic Tool Loop ======
-            yield 'data: {"type":"status","text":"生成回复"}\n\n'
+            yield 'data: {"type":"status","text":"娜迦打字中..."}\n\n'
             from .agentic_tool_loop import run_agentic_loop
 
             t_prepare_elapsed = _time.monotonic() - t_api_start

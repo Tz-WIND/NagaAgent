@@ -14,6 +14,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 
 from system.config import get_config, get_server_port
+from apiserver import naga_auth
 
 logger = logging.getLogger(__name__)
 
@@ -245,8 +246,6 @@ async def _execute_mcp_call(call: Dict[str, Any]) -> Dict[str, Any]:
 
     # 游戏攻略功能仅登录用户可用
     if service_name == "game_guide":
-        from apiserver import naga_auth
-
         if not naga_auth.is_authenticated():
             return {
                 "tool_call": call,
@@ -370,76 +369,158 @@ async def _execute_openclaw_call(call: Dict[str, Any], session_id: str) -> Dict[
         }
 
 
-async def _execute_local_web_search(call: Dict[str, Any], args: Dict[str, Any]) -> Dict[str, Any]:
-    """本地搜索代理：绕过 OpenClaw Brave API，直接调 NagaBusiness /v1/tools/search"""
-    from . import naga_auth
+async def _execute_naga_search(call: Dict[str, Any]) -> Dict[str, Any]:
+    """通过 NagaBusiness 搜索代理执行 web_search（已登录时优先使用）"""
+    tool_args = call.get("args", {})
+    query = tool_args.get("query", "") or tool_args.get("q", "")
+    count = tool_args.get("count", 10)
+    freshness = tool_args.get("freshness")
 
-    query = args.get("query", "")
     if not query:
         return {
-            "tool_call": call, "result": "缺少搜索关键词 (query)",
-            "status": "error", "service_name": "openclaw_tool", "tool_name": "web_search",
+            "tool_call": call, "result": "缺少搜索关键词",
+            "status": "error", "service_name": "naga_search", "tool_name": "web_search",
         }
-
-    if not naga_auth.is_authenticated():
-        return {
-            "tool_call": call, "result": "未登录 NagaModel，无法执行搜索",
-            "status": "error", "service_name": "openclaw_tool", "tool_name": "web_search",
-        }
-
-    params = {"q": query}
-    if args.get("count"):
-        params["count"] = args["count"]
-    if args.get("freshness"):
-        params["freshness"] = args["freshness"]
 
     try:
-        import httpx
+        token = naga_auth.get_access_token()
+        params: Dict[str, Any] = {"q": query, "count": count}
+        if freshness:
+            params["freshness"] = freshness
+
+        client = _get_openclaw_client()
         t0 = _time.monotonic()
-        async with httpx.AsyncClient(timeout=30.0, proxy=None) as client:
-            resp = await client.post(
-                naga_auth.NAGA_MODEL_URL + "/tools/search",
-                json=params,
-                headers={"Authorization": f"Bearer {naga_auth.get_access_token()}"},
-            )
+        resp = await client.post(
+            naga_auth.NAGA_MODEL_URL + "/tools/search",
+            json=params,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30.0,
+        )
         elapsed = _time.monotonic() - t0
 
         if resp.status_code != 200:
-            error_body = resp.text[:300]
-            logger.error(f"[AgenticLoop] 本地搜索失败: HTTP {resp.status_code}, body={error_body}")
+            try:
+                error_data = resp.json()
+                error_msg = error_data.get("error", {}).get("message", f"HTTP {resp.status_code}")
+            except Exception:
+                error_msg = f"HTTP {resp.status_code}"
+            logger.error(f"[AgenticLoop] Naga搜索代理错误: {error_msg}")
             return {
-                "tool_call": call, "result": f"搜索失败: HTTP {resp.status_code} - {error_body}",
-                "status": "error", "service_name": "openclaw_tool", "tool_name": "web_search",
+                "tool_call": call, "result": f"搜索失败: {error_msg}",
+                "status": "error", "service_name": "naga_search", "tool_name": "web_search",
             }
 
         data = resp.json()
         results = data.get("web", {}).get("results", [])
+        # 格式化搜索结果为可读文本
+        if not results:
+            readable = "未找到相关搜索结果。"
+        else:
+            lines = []
+            for i, r in enumerate(results, 1):
+                title = r.get("title", "")
+                url = r.get("url", "")
+                desc = r.get("description", "")
+                age = r.get("age", "")
+                lines.append(f"{i}. {title}")
+                lines.append(f"   URL: {url}")
+                if desc:
+                    lines.append(f"   摘要: {desc}")
+                if age:
+                    lines.append(f"   时间: {age}")
+                lines.append("")
+            readable = "\n".join(lines)
 
-        # 格式化为 LLM 可读的文本
-        lines = [f"搜索「{query}」共 {len(results)} 条结果：\n"]
-        for i, r in enumerate(results, 1):
-            title = r.get("title", "")
-            url = r.get("url", "")
-            desc = r.get("description", "")
-            age = r.get("age", "")
-            lines.append(f"{i}. [{title}]({url})")
-            if age:
-                lines.append(f"   时间: {age}")
-            if desc:
-                lines.append(f"   {desc}")
-            lines.append("")
-
-        readable = "\n".join(lines).strip()
-        logger.info(f"[AgenticLoop] 本地搜索完成: query={query}, {len(results)}条结果, {elapsed:.1f}s")
+        logger.info(f"[AgenticLoop] Naga搜索完成: query=\"{query}\" 耗时 {elapsed:.2f}s, 结果数={len(results)}")
         return {
             "tool_call": call, "result": readable,
-            "status": "success", "service_name": "openclaw_tool", "tool_name": "web_search",
+            "status": "success", "service_name": "naga_search", "tool_name": "web_search",
         }
     except Exception as e:
-        logger.error(f"[AgenticLoop] 本地搜索异常: {e}")
+        logger.error(f"[AgenticLoop] Naga搜索代理异常: {e}")
         return {
             "tool_call": call, "result": f"搜索异常: {e}",
-            "status": "error", "service_name": "openclaw_tool", "tool_name": "web_search",
+            "status": "error", "service_name": "naga_search", "tool_name": "web_search",
+        }
+
+
+async def _execute_brave_search(call: Dict[str, Any]) -> Dict[str, Any]:
+    """通过配置的 Brave Search API Key 直接搜索（未登录 Naga 时使用）"""
+    tool_args = call.get("args", {})
+    query = tool_args.get("query", "") or tool_args.get("q", "")
+    count = tool_args.get("count", 10)
+    freshness = tool_args.get("freshness")
+
+    if not query:
+        return {
+            "tool_call": call, "result": "缺少搜索关键词",
+            "status": "error", "service_name": "brave_search", "tool_name": "web_search",
+        }
+
+    try:
+        cfg = get_config()
+        api_key = cfg.online_search.search_api_key
+        api_base = cfg.online_search.search_api_base
+
+        params: Dict[str, Any] = {"q": query, "count": count}
+        if freshness:
+            params["freshness"] = freshness
+
+        client = _get_openclaw_client()
+        t0 = _time.monotonic()
+        resp = await client.get(
+            api_base,
+            params=params,
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": api_key,
+            },
+            timeout=30.0,
+        )
+        elapsed = _time.monotonic() - t0
+
+        if resp.status_code != 200:
+            try:
+                error_data = resp.json()
+                error_msg = str(error_data)[:200]
+            except Exception:
+                error_msg = f"HTTP {resp.status_code}"
+            logger.error(f"[AgenticLoop] Brave搜索错误: {error_msg}")
+            return {
+                "tool_call": call, "result": f"搜索失败: {error_msg}",
+                "status": "error", "service_name": "brave_search", "tool_name": "web_search",
+            }
+
+        data = resp.json()
+        results = data.get("web", {}).get("results", [])
+        if not results:
+            readable = "未找到相关搜索结果。"
+        else:
+            lines = []
+            for i, r in enumerate(results, 1):
+                title = r.get("title", "")
+                url = r.get("url", "")
+                desc = r.get("description", "")
+                age = r.get("age", "")
+                lines.append(f"{i}. {title}")
+                lines.append(f"   URL: {url}")
+                if desc:
+                    lines.append(f"   摘要: {desc}")
+                if age:
+                    lines.append(f"   时间: {age}")
+                lines.append("")
+            readable = "\n".join(lines)
+
+        logger.info(f"[AgenticLoop] Brave搜索完成: query=\"{query}\" 耗时 {elapsed:.2f}s, 结果数={len(results)}")
+        return {
+            "tool_call": call, "result": readable,
+            "status": "success", "service_name": "brave_search", "tool_name": "web_search",
+        }
+    except Exception as e:
+        logger.error(f"[AgenticLoop] Brave搜索异常: {e}")
+        return {
+            "tool_call": call, "result": f"搜索异常: {e}",
+            "status": "error", "service_name": "brave_search", "tool_name": "web_search",
         }
 
 
@@ -454,9 +535,13 @@ async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
             "status": "error", "service_name": "openclaw_tool", "tool_name": "unknown",
         }
 
-    # ★ 拦截 web_search：绕过 OpenClaw Brave API，直接走本地搜索代理
+    # web_search: 已登录走 Naga 代理，未登录有 key 走 Brave，都没有走 OpenClaw
     if tool_name == "web_search":
-        return await _execute_local_web_search(call, tool_args)
+        if naga_auth.is_authenticated():
+            return await _execute_naga_search(call)
+        cfg = get_config()
+        if cfg.online_search.search_api_key:
+            return await _execute_brave_search(call)
 
     if not await _check_openclaw_available():
         return {
