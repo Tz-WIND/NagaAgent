@@ -1,0 +1,298 @@
+"""NagaCAS 认证 + TTS/ASR 代理路由"""
+
+import logging
+import struct
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response, JSONResponse
+
+from apiserver import naga_auth
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# ============ NagaCAS 认证端点 ============
+
+
+@router.post("/auth/login")
+async def auth_login(body: dict):
+    """NagaCAS 登录"""
+    username = body.get("username", "")
+    password = body.get("password", "")
+    captcha_id = body.get("captcha_id", "")
+    captcha_answer = body.get("captcha_answer", "")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="用户名和密码不能为空")
+    try:
+        result = await naga_auth.login(username, password, captcha_id, captcha_answer)
+        return result
+    except Exception as e:
+        import httpx
+        status = 401
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+        logger.error(f"登录失败 [{status}]: {detail}")
+        raise HTTPException(status_code=status, detail=detail)
+
+
+@router.get("/auth/me")
+async def auth_me(request: Request):
+    """获取当前用户信息（优先使用服务端 token，其次从请求头恢复）"""
+    token = naga_auth.get_access_token()
+    if not token:
+        # 尝试从 Authorization 头恢复会话
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+    user = await naga_auth.get_me(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="token 已失效")
+    # 恢复服务端认证状态
+    naga_auth.restore_token(token)
+    return {"user": user, "memory_url": naga_auth.NAGA_MEMORY_URL}
+
+
+@router.post("/auth/logout")
+async def auth_logout():
+    """登出"""
+    naga_auth.logout()
+    return {"success": True}
+
+
+@router.post("/auth/register")
+async def auth_register(body: dict):
+    """NagaBusiness 注册"""
+    username = body.get("username", "")
+    email = body.get("email", "")
+    password = body.get("password", "")
+    verification_code = body.get("verification_code", "")
+    if not username or not email or not password or not verification_code:
+        raise HTTPException(status_code=400, detail="用户名、邮箱、密码和验证码不能为空")
+    try:
+        result = await naga_auth.register(username, email, password, verification_code)
+        return {"success": True, **result}
+    except Exception as e:
+        import httpx
+        status = 500
+        detail = f"注册失败: {str(e)}"
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+        logger.error(f"注册失败 [{status}]: {detail}")
+        raise HTTPException(status_code=status, detail=detail)
+
+
+@router.get("/auth/captcha")
+async def auth_captcha():
+    """获取验证码（数学计算题）"""
+    try:
+        result = await naga_auth.get_captcha()
+        return result
+    except Exception as e:
+        logger.error(f"获取验证码失败: {e}")
+        raise HTTPException(status_code=500, detail=f"获取验证码失败: {str(e)}")
+
+
+@router.post("/auth/send-verification")
+async def auth_send_verification(body: dict):
+    """发送邮箱验证码"""
+    email = body.get("email", "")
+    username = body.get("username", "")
+    captcha_id = body.get("captcha_id", "")
+    captcha_answer = body.get("captcha_answer", "")
+    if not email or not username:
+        raise HTTPException(status_code=400, detail="邮箱和用户名不能为空")
+    try:
+        result = await naga_auth.send_verification(email, username, captcha_id, captcha_answer)
+        return {"success": True, "message": "验证码已发送"}
+    except Exception as e:
+        import httpx
+        status = 500
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+        logger.error(f"发送验证码失败 [{status}]: {detail}")
+        raise HTTPException(status_code=status, detail=detail)
+
+
+@router.post("/auth/refresh")
+async def auth_refresh(request: Request):
+    """刷新 token（后端管理 refresh_token，兼容接受 body 中的 refresh_token 用于迁移/非浏览器客户端）"""
+    rt_override = None
+    try:
+        body = await request.json()
+        rt_override = body.get("refresh_token") if isinstance(body, dict) else None
+    except Exception:
+        pass
+    try:
+        result = await naga_auth.refresh(rt_override)
+        return result
+    except Exception as e:
+        logger.error(f"刷新 token 失败: {e}")
+        raise HTTPException(status_code=401, detail=f"刷新失败: {str(e)}")
+
+
+# ============ TTS 代理（解决前端跨域问题） ============
+
+def _ensure_wav_header(audio_data: bytes) -> tuple[bytes, str]:
+    """检查音频数据是否有有效容器头部，若是 raw PCM 则包装为 WAV 格式（浏览器可播放）"""
+    if len(audio_data) < 4:
+        return audio_data, "audio/mpeg"
+
+    header = audio_data[:4]
+    # 只检测有可靠 magic bytes 的容器格式，MP3 sync word (0xFF 0xEx) 容易和 PCM 数据混淆
+    if header[:3] == b'ID3':                          # MP3 with ID3 tag
+        return audio_data, "audio/mpeg"
+    if header == b'RIFF':                              # WAV
+        return audio_data, "audio/wav"
+    if header == b'OggS':                              # OGG
+        return audio_data, "audio/ogg"
+    if header == b'fLaC':                              # FLAC
+        return audio_data, "audio/flac"
+
+    # 无法识别的格式 → 假定 raw PCM，包装为 WAV (24kHz, 16-bit, mono)
+    sample_rate = 24000
+    bits_per_sample = 16
+    num_channels = 1
+    data_size = len(audio_data)
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
+
+    wav_header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF',
+        36 + data_size,
+        b'WAVE',
+        b'fmt ',
+        16,
+        1,
+        num_channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b'data',
+        data_size,
+    )
+    logger.info(f"[TTS] raw PCM detected ({data_size} bytes), wrapped as WAV (24kHz/16bit/mono)")
+    return wav_header + audio_data, "audio/wav"
+
+
+@router.post("/tts/speech")
+async def tts_speech_proxy(request: Request):
+    """代理前端 TTS 请求到 NagaBusiness，避免浏览器 CORS 限制"""
+    import httpx
+    from system.config import get_config
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+
+    # 从前端请求头获取 token，或使用后端认证状态
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header and naga_auth.is_authenticated():
+        auth_header = f"Bearer {naga_auth.get_access_token()}"
+
+    if auth_header:
+        # 已登录 → 代理到 NagaBusiness
+        tts_url = naga_auth.NAGA_MODEL_URL + "/audio/speech"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": auth_header,
+        }
+    else:
+        # 未登录 → 转发到本地 edge-tts
+        config = get_config()
+        tts_port = config.tts.port if hasattr(config, 'tts') else 5048
+        tts_url = f"http://localhost:{tts_port}/v1/audio/speech"
+        headers = {"Content-Type": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(tts_url, json=body, headers=headers)
+        if resp.status_code != 200:
+            logger.error(f"TTS 代理失败: {resp.status_code} url={tts_url}")
+            raise HTTPException(status_code=resp.status_code, detail="TTS service error")
+        # 检查音频格式，raw PCM 自动包装为 WAV
+        audio_data, content_type = _ensure_wav_header(resp.content)
+        return Response(content=audio_data, media_type=content_type)
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="TTS service timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"TTS 代理异常: {e}")
+        raise HTTPException(status_code=502, detail=f"TTS proxy error: {str(e)}")
+
+
+@router.post("/asr/transcribe")
+async def asr_transcribe_proxy(request: Request):
+    """代理前端 ASR 请求到 NagaBusiness /v1/audio/transcriptions"""
+    import httpx
+
+    content_type = request.headers.get("content-type", "")
+    if "multipart/form-data" not in content_type:
+        raise HTTPException(status_code=400, detail="Content-Type must be multipart/form-data")
+
+    # 优先从请求头获取 token，其次使用后端已同步的认证状态
+    auth_header = request.headers.get("authorization", "")
+    token = auth_header[7:].strip() if auth_header.lower().startswith("bearer ") else ""
+    if not token and naga_auth.is_authenticated():
+        token = naga_auth.get_access_token()
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录，ASR 服务需要登录后使用")
+    upstream_auth = f"Bearer {token}"
+
+    # 解析 multipart 表单
+    form = await request.form()
+    audio_file = form.get("file")
+    if not audio_file:
+        raise HTTPException(status_code=400, detail="缺少 file 字段")
+
+    # 构建转发请求
+    asr_url = naga_auth.NAGA_MODEL_URL + "/audio/transcriptions"
+    files = {"file": (audio_file.filename or "recording.webm", await audio_file.read(), audio_file.content_type or "audio/webm")}
+    data = {}
+    for key in ("model", "language", "prompt", "response_format", "temperature"):
+        val = form.get(key)
+        if val is not None:
+            data[key] = val
+    if "model" not in data:
+        data["model"] = "default"
+    if "language" not in data:
+        data["language"] = "zh"
+
+    try:
+        async with httpx.AsyncClient(timeout=30, trust_env=False) as client:
+            resp = await client.post(asr_url, files=files, data=data, headers={"Authorization": upstream_auth})
+        if resp.status_code != 200:
+            detail = resp.text[:200] if resp.text else "ASR service error"
+            logger.error(f"ASR 代理失败: {resp.status_code} url={asr_url} detail={detail}")
+            raise HTTPException(status_code=resp.status_code, detail=detail)
+        return JSONResponse(content=resp.json())
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="ASR service timeout")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"ASR 代理异常: {e}")
+        raise HTTPException(status_code=502, detail=f"ASR proxy error: {str(e)}")

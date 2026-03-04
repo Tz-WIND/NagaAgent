@@ -1,5 +1,5 @@
 """
-Proactive Vision Metrics 监控统计
+屏幕感知 Metrics 监控统计
 提供Prometheus风格的性能指标
 """
 

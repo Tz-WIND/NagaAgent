@@ -1,5 +1,5 @@
 """
-Heartbeat Checklist — 持久化待办条目
+军牌系统 Checklist — 持久化待办条目
 
 条目来源：
 - LLM 从对话中自动提取 (source="llm")
@@ -11,6 +11,7 @@ Heartbeat Checklist — 持久化待办条目
 import json
 import logging
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -80,6 +81,32 @@ def save_checklist(cl: HeartbeatChecklist) -> bool:
         return False
 
 
+# ── 批量操作 ──
+
+# 模块级别的批量操作状态
+_batch_checklist: Optional[HeartbeatChecklist] = None
+
+
+@contextmanager
+def batch_update():
+    """批量操作上下文管理器 — 多次 add_item/update_item 只做一次 load + save
+
+    用法：
+        with batch_update():
+            add_item("task1", source="llm")
+            add_item("task2", source="llm")
+            update_item("xxx", status="done")
+        # 退出时自动保存一次
+    """
+    global _batch_checklist
+    _batch_checklist = load_checklist()
+    try:
+        yield _batch_checklist
+    finally:
+        save_checklist(_batch_checklist)
+        _batch_checklist = None
+
+
 # ── CRUD ──
 
 
@@ -88,24 +115,34 @@ def add_item(
     source: str = "user",
     priority: str = "normal",
 ) -> ChecklistItem:
-    """新增一条 checklist 条目并持久化"""
-    cl = load_checklist()
+    """新增一条 checklist 条目并持久化
+
+    在 batch_update() 上下文中，跳过独立的 load/save，共享同一份 checklist。
+    """
+    global _batch_checklist
+    cl = _batch_checklist if _batch_checklist is not None else load_checklist()
     item = ChecklistItem(content=content, source=source, priority=priority)
     cl.items.append(item)
-    save_checklist(cl)
+    if _batch_checklist is None:
+        save_checklist(cl)
     logger.info(f"[Checklist] 新增条目: {item.id} ({source}) — {content[:50]}")
     return item
 
 
 def update_item(item_id: str, **kwargs) -> bool:
-    """更新指定条目的字段（status, notes, priority 等）"""
-    cl = load_checklist()
+    """更新指定条目的字段（status, notes, priority 等）
+
+    在 batch_update() 上下文中，跳过独立的 load/save，共享同一份 checklist。
+    """
+    global _batch_checklist
+    cl = _batch_checklist if _batch_checklist is not None else load_checklist()
     for item in cl.items:
         if item.id == item_id:
             for k, v in kwargs.items():
                 if hasattr(item, k):
                     setattr(item, k, v)
-            save_checklist(cl)
+            if _batch_checklist is None:
+                save_checklist(cl)
             logger.info(f"[Checklist] 更新条目 {item_id}: {kwargs}")
             return True
     logger.warning(f"[Checklist] 条目不存在: {item_id}")

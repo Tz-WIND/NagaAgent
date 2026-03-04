@@ -1,5 +1,5 @@
 """
-Proactive Vision 分析器
+屏幕感知分析器
 负责调用screen_vision并分析结果
 """
 
@@ -24,7 +24,7 @@ try:
 except ImportError:
     IMAGEHASH_AVAILABLE = False
     logger.warning(
-        "[ProactiveVision] imagehash库未安装，差异检测将降级到简单模式。"
+        "[ScreenVision] imagehash库未安装，差异检测将降级到简单模式。"
         "安装命令: pip install imagehash pillow"
     )
 
@@ -41,6 +41,21 @@ class ProactiveVisionAnalyzer:
         self._screen_unchanged_count = 0  # 屏幕未变化计数
         self._total_checks = 0  # 总检查次数
         self._skipped_checks = 0  # 跳过的检查次数（差异检测节省的AI调用）
+        self._http_client: Optional["httpx.AsyncClient"] = None
+
+    def _get_http_client(self) -> "httpx.AsyncClient":
+        """获取或创建共享 httpx 客户端"""
+        import httpx
+
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
+        return self._http_client
+
+    async def close(self):
+        """关闭共享 httpx 客户端"""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def analyze_screen(self):
         """分析当前屏幕并决定是否触发"""
@@ -50,7 +65,7 @@ class ProactiveVisionAnalyzer:
         check_start = time.time()
 
         self._total_checks += 1
-        logger.debug(f"[ProactiveVision] 开始屏幕分析 (总检查: {self._total_checks})")
+        logger.debug(f"[ScreenVision] 开始屏幕分析 (总检查: {self._total_checks})")
 
         # 1. 仅截图（不调用AI分析）
         screenshot_start = time.time()
@@ -58,7 +73,7 @@ class ProactiveVisionAnalyzer:
         screenshot_duration = time.time() - screenshot_start
 
         if not screenshot_data_url:
-            logger.warning("[ProactiveVision] 截图失败")
+            logger.warning("[ScreenVision] 截图失败")
             metrics.record_screenshot(screenshot_duration, error=True)
             metrics.record_check(time.time() - check_start, skipped=False)
             return
@@ -70,7 +85,7 @@ class ProactiveVisionAnalyzer:
             hash_start = time.time()
             current_hash = self._calculate_screenshot_hash(screenshot_data_url)
             hash_duration = time.time() - hash_start
-            logger.debug(f"[ProactiveVision] Hash计算耗时: {hash_duration*1000:.1f}ms")
+            logger.debug(f"[ScreenVision] Hash计算耗时: {hash_duration*1000:.1f}ms")
 
             if current_hash and self._last_screenshot_hash:
                 # 比较hash
@@ -88,14 +103,14 @@ class ProactiveVisionAnalyzer:
                     if self._screen_unchanged_count % 10 == 0:
                         skip_rate = (self._skipped_checks / self._total_checks) * 100
                         logger.info(
-                            f"[ProactiveVision] 屏幕未显著变化 (连续{self._screen_unchanged_count}次)，跳过分析 "
+                            f"[ScreenVision] 屏幕未显著变化 (连续{self._screen_unchanged_count}次)，跳过分析 "
                             f"(节省AI调用: {skip_rate:.1f}%)"
                         )
                     return
 
             # 屏幕发生显著变化，更新hash
             if self._screen_unchanged_count > 0:
-                logger.info(f"[ProactiveVision] 检测到屏幕显著变化，调用AI分析")
+                logger.info(f"[ScreenVision] 检测到屏幕显著变化，调用AI分析")
             self._screen_unchanged_count = 0
             self._last_screenshot_hash = current_hash
 
@@ -105,11 +120,11 @@ class ProactiveVisionAnalyzer:
         ai_duration = time.time() - ai_start
 
         if not screen_description:
-            logger.warning("[ProactiveVision] AI分析失败")
+            logger.warning("[ScreenVision] AI分析失败")
             metrics.record_check(time.time() - check_start, skipped=False)
             return
 
-        logger.debug(f"[ProactiveVision] AI分析耗时: {ai_duration:.2f}s, 结果: {screen_description[:100]}...")
+        logger.debug(f"[ScreenVision] AI分析耗时: {ai_duration:.2f}s, 结果: {screen_description[:100]}...")
         self._last_screen_description = screen_description
 
         # 4. 根据模式执行规则匹配
@@ -129,10 +144,10 @@ class ProactiveVisionAnalyzer:
 
         # 5. 触发匹配的规则
         if matched_rules:
-            logger.info(f"[ProactiveVision] 匹配到 {len(matched_rules)} 条规则")
+            logger.info(f"[ScreenVision] 匹配到 {len(matched_rules)} 条规则")
             await self._trigger_rules(matched_rules, screen_description)
         else:
-            logger.debug("[ProactiveVision] 未匹配到任何规则")
+            logger.debug("[ScreenVision] 未匹配到任何规则")
 
         # 记录完整检查耗时
         metrics.record_check(time.time() - check_start, skipped=False)
@@ -151,7 +166,7 @@ class ProactiveVisionAnalyzer:
         # 如果选择none或imagehash不可用，降级到简单模式
         if algorithm == "none" or not IMAGEHASH_AVAILABLE:
             if algorithm != "none":
-                logger.warning("[ProactiveVision] imagehash不可用，降级到MD5 hash")
+                logger.warning("[ScreenVision] imagehash不可用，降级到MD5 hash")
             # 简单MD5 hash（对base64数据直接hash）
             return hashlib.md5(data_url.encode('utf-8')).hexdigest()
 
@@ -171,13 +186,13 @@ class ProactiveVisionAnalyzer:
             elif algorithm == "ahash":
                 img_hash = imagehash.average_hash(img, hash_size=8)
             else:
-                logger.warning(f"[ProactiveVision] 未知hash算法: {algorithm}，降级到pHash")
+                logger.warning(f"[ScreenVision] 未知hash算法: {algorithm}，降级到pHash")
                 img_hash = imagehash.phash(img, hash_size=8)
 
             return str(img_hash)
 
         except Exception as e:
-            logger.error(f"[ProactiveVision] Hash计算失败: {e}，降级到MD5")
+            logger.error(f"[ScreenVision] Hash计算失败: {e}，降级到MD5")
             # 降级到简单hash
             return hashlib.md5(data_url.encode('utf-8')).hexdigest()
 
@@ -206,11 +221,11 @@ class ProactiveVisionAnalyzer:
             # 距离小于等于阈值认为相似
             is_similar = distance <= self.config.diff_threshold
             if not is_similar:
-                logger.debug(f"[ProactiveVision] Hash距离: {distance} > 阈值{self.config.diff_threshold}，判定为变化")
+                logger.debug(f"[ScreenVision] Hash距离: {distance} > 阈值{self.config.diff_threshold}，判定为变化")
             return is_similar
 
         except Exception as e:
-            logger.error(f"[ProactiveVision] Hash比较失败: {e}，降级到字符串比较")
+            logger.error(f"[ScreenVision] Hash比较失败: {e}，降级到字符串比较")
             return hash1 == hash2
 
     def get_performance_stats(self) -> Dict[str, Any]:
@@ -238,7 +253,7 @@ class ProactiveVisionAnalyzer:
             return screenshot_result.data_url
 
         except Exception as e:
-            logger.error(f"[ProactiveVision] 截图失败: {e}")
+            logger.error(f"[ScreenVision] 截图失败: {e}")
             return None
 
     async def _analyze_screenshot_with_ai(self, data_url: str) -> Optional[str]:
@@ -250,7 +265,6 @@ class ProactiveVisionAnalyzer:
         Returns:
             AI分析的屏幕描述，失败返回None
         """
-        import httpx
         from system.config import get_server_port
 
         mcp_port = get_server_port("mcp_server")
@@ -264,26 +278,28 @@ class ProactiveVisionAnalyzer:
         }
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    result = resp.json()
-                    if result.get("status") == "ok":
-                        # 解析嵌套的JSON结果
-                        inner_result_str = result.get("result", "{}")
-                        inner_result = json.loads(inner_result_str)
-                        if inner_result.get("status") == "success":
-                            return inner_result.get("message", "")
-                else:
-                    logger.warning(f"[ProactiveVision] MCP服务返回错误: {resp.status_code}")
-        except httpx.ConnectError:
-            logger.warning("[ProactiveVision] 无法连接到MCP服务器，请检查服务是否启动")
-        except httpx.TimeoutException:
-            logger.warning("[ProactiveVision] 调用screen_vision超时")
+            client = self._get_http_client()
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                result = resp.json()
+                if result.get("status") == "ok":
+                    # 解析嵌套的JSON结果
+                    inner_result_str = result.get("result", "{}")
+                    inner_result = json.loads(inner_result_str)
+                    if inner_result.get("status") == "success":
+                        return inner_result.get("message", "")
+            else:
+                logger.warning(f"[ScreenVision] MCP服务返回错误: {resp.status_code}")
         except json.JSONDecodeError as e:
-            logger.error(f"[ProactiveVision] 解析screen_vision响应失败: {e}")
+            logger.error(f"[ScreenVision] 解析screen_vision响应失败: {e}")
         except Exception as e:
-            logger.error(f"[ProactiveVision] 调用screen_vision失败: {e}")
+            err_name = type(e).__name__
+            if err_name == "ConnectError":
+                logger.warning("[ScreenVision] 无法连接到MCP服务器，请检查服务是否启动")
+            elif "Timeout" in err_name:
+                logger.warning("[ScreenVision] 调用screen_vision超时")
+            else:
+                logger.error(f"[ScreenVision] 调用screen_vision失败: {e}")
 
         return None
 
@@ -305,7 +321,7 @@ class ProactiveVisionAnalyzer:
                     continue
 
             matched.append(rule)
-            logger.debug(f"[ProactiveVision] 规则匹配成功: {rule.name}")
+            logger.debug(f"[ScreenVision] 规则匹配成功: {rule.name}")
 
         return matched
 
@@ -344,7 +360,6 @@ class ProactiveVisionAnalyzer:
 
             response = await llm_service.chat_with_context_and_reasoning(
                 messages=[{"role": "user", "content": prompt}],
-                stream=False
             )
 
             # 解析AI返回的规则编号
@@ -356,10 +371,10 @@ class ProactiveVisionAnalyzer:
                 for idx in indices:
                     if 0 <= idx < len(enabled_rules):
                         matched_rules.append(enabled_rules[idx])
-                        logger.debug(f"[ProactiveVision] AI匹配规则: {enabled_rules[idx].name}")
+                        logger.debug(f"[ScreenVision] AI匹配规则: {enabled_rules[idx].name}")
                 return matched_rules
         except Exception as e:
-            logger.error(f"[ProactiveVision] AI规则匹配失败: {e}")
+            logger.error(f"[ScreenVision] AI规则匹配失败: {e}")
 
         return []
 
@@ -377,7 +392,7 @@ class ProactiveVisionAnalyzer:
                 if success:
                     metrics.record_rule_triggered(rule.rule_id)
             except Exception as e:
-                logger.error(f"[ProactiveVision] 触发规则 {rule.name} 失败: {e}")
+                logger.error(f"[ScreenVision] 触发规则 {rule.name} 失败: {e}")
 
 
 # 全局单例
@@ -396,7 +411,7 @@ def create_proactive_analyzer(config: ProactiveVisionConfig) -> ProactiveVisionA
     """
     global _analyzer
     if _analyzer is not None:
-        logger.debug("[ProactiveVision] 分析器已存在，将被替换")
+        logger.debug("[ScreenVision] 分析器已存在，将被替换")
 
     _analyzer = ProactiveVisionAnalyzer(config)
     return _analyzer
