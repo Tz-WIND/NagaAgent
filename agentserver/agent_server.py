@@ -6,17 +6,15 @@ NagaAgent独立服务 - 通过OpenClaw执行任务
 """
 
 import asyncio
-import uuid
 import shutil
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
 from contextlib import asynccontextmanager
 
 from system.config import config, add_config_listener, logger
-from agentserver.task_scheduler import get_task_scheduler, TaskStep
 from agentserver.openclaw import get_openclaw_client, set_openclaw_config
 from agentserver.openclaw.embedded_runtime import get_embedded_runtime, EmbeddedRuntime
 
@@ -146,14 +144,6 @@ async def lifespan(app: FastAPI):
     """FastAPI应用生命周期"""
     # startup
     try:
-        # 初始化任务调度器
-        Modules.task_scheduler = get_task_scheduler()
-
-        # 设置LLM配置用于智能压缩
-        if hasattr(config, "api") and config.api:
-            llm_config = {"model": config.api.model, "api_key": config.api.api_key, "api_base": config.api.base_url}
-            Modules.task_scheduler.set_llm_config(llm_config)
-
         # 初始化 OpenClaw 客户端 - 三层回退策略
         try:
             from agentserver.openclaw import detect_openclaw, OpenClawConfig as ClientOpenClawConfig
@@ -294,43 +284,45 @@ async def lifespan(app: FastAPI):
         add_config_listener(_on_config_changed)
         logger.debug("已注册 OpenClaw 配置变更监听器")
 
-        # 初始化主动视觉系统
+        # 初始化军牌系统（统一后台任务调度）
         try:
-            from agentserver.proactive_vision import (
+            from agentserver.dogtag import (
+                create_dogtag_scheduler,
+                get_dogtag_registry,
+                load_heartbeat_config,
+                create_heartbeat_executor,
                 load_proactive_config,
-                create_proactive_scheduler,
                 create_proactive_analyzer,
                 create_proactive_trigger,
             )
+            from agentserver.dogtag.duties.heartbeat_duty import create_heartbeat_duty
+            from agentserver.dogtag.duties.screen_vision_duty import create_screen_vision_duty
 
+            # 1. 初始化子组件
             pv_config = load_proactive_config()
             create_proactive_trigger()
             create_proactive_analyzer(pv_config)
-            Modules.proactive_scheduler = create_proactive_scheduler(pv_config)
-
-            if pv_config.enabled:
-                await Modules.proactive_scheduler.start()
-                logger.info("[ProactiveVision] 主动视觉系统已启动")
-            else:
-                logger.info("[ProactiveVision] 主动视觉系统未启用")
-        except Exception as e:
-            logger.warning(f"[ProactiveVision] 初始化失败（可选功能）: {e}")
-            Modules.proactive_scheduler = None
-
-        # 初始化心跳系统
-        try:
-            from agentserver.heartbeat import load_heartbeat_config, create_heartbeat_scheduler
 
             hb_config = load_heartbeat_config()
-            Modules.heartbeat_scheduler = create_heartbeat_scheduler(hb_config)
-            if hb_config.enabled:
-                await Modules.heartbeat_scheduler.start()
-                logger.info("[Heartbeat] 心跳系统已启动")
-            else:
-                logger.info("[Heartbeat] 心跳系统未启用")
+            create_heartbeat_executor(hb_config)
+
+            # 2. 创建军牌调度器
+            Modules.dogtag_scheduler = create_dogtag_scheduler()
+            registry = get_dogtag_registry()
+
+            # 3. 注册职责
+            hb_tag, hb_exec = create_heartbeat_duty(hb_config)
+            registry.register(hb_tag, hb_exec)
+
+            sv_tag, sv_exec = create_screen_vision_duty(pv_config)
+            registry.register(sv_tag, sv_exec)
+
+            # 4. 启动调度器
+            await Modules.dogtag_scheduler.start()
+            logger.info("[DogTag] 军牌系统已启动")
         except Exception as e:
-            logger.warning(f"[Heartbeat] 初始化失败（可选功能）: {e}")
-            Modules.heartbeat_scheduler = None
+            logger.warning(f"[DogTag] 军牌系统初始化失败（可选功能）: {e}")
+            Modules.dogtag_scheduler = None
 
         logger.info("NagaAgent服务初始化完成")
 
@@ -346,15 +338,16 @@ async def lifespan(app: FastAPI):
 
     # shutdown
     try:
-        # 停止主动视觉系统
-        if Modules.proactive_scheduler:
-            await Modules.proactive_scheduler.stop()
-            logger.info("[ProactiveVision] 主动视觉系统已停止")
+        # 停止军牌系统
+        if Modules.dogtag_scheduler:
+            await Modules.dogtag_scheduler.stop()
+            logger.info("[DogTag] 军牌系统已停止")
 
-        # 停止心跳系统
-        if Modules.heartbeat_scheduler:
-            await Modules.heartbeat_scheduler.stop()
-            logger.info("[Heartbeat] 心跳系统已停止")
+        # 关闭心跳执行器的 HTTP 客户端
+        from agentserver.dogtag import get_heartbeat_executor
+        hb_executor = get_heartbeat_executor()
+        if hb_executor:
+            await hb_executor.close()
 
         # 停止 Gateway 进程（内嵌模式）
         embedded_runtime = get_embedded_runtime()
@@ -372,10 +365,8 @@ app = FastAPI(title="NagaAgent Server", version="1.0.0", lifespan=lifespan)
 class Modules:
     """全局模块管理器"""
 
-    task_scheduler = None
     openclaw_client = None
-    proactive_scheduler = None  # 主动视觉调度器
-    heartbeat_scheduler = None  # 心跳调度器
+    dogtag_scheduler = None  # 军牌系统统一调度器
 
 
 def _now_iso() -> str:
@@ -415,116 +406,6 @@ async def _process_openclaw_task(instruction: str, session_id: Optional[str] = N
         return {"success": False, "error": str(e), "task_type": "openclaw", "instruction": instruction}
 
 
-async def _execute_agent_tasks_async(
-    agent_calls: List[Dict[str, Any]],
-    session_id: str,
-    analysis_session_id: str,
-    request_id: str,
-    callback_url: Optional[str] = None,
-):
-    """异步执行Agent任务 - 应用与MCP服务器相同的会话管理逻辑"""
-    try:
-        logger.info(f"[异步执行] 开始执行 {len(agent_calls)} 个Agent任务")
-
-        # 处理每个Agent任务
-        results = []
-        for i, agent_call in enumerate(agent_calls):
-            try:
-                instruction = agent_call.get("instruction", "")
-                tool_name = agent_call.get("tool_name", "未知工具")
-                service_name = agent_call.get("service_name", "未知服务")
-
-                logger.info(f"[异步执行] 执行任务 {i + 1}/{len(agent_calls)}: {tool_name} - {instruction}")
-
-                # 添加任务步骤到调度器
-                await Modules.task_scheduler.add_task_step(
-                    request_id,
-                    TaskStep(
-                        step_id=f"step_{i + 1}",
-                        task_id=request_id,
-                        purpose=f"执行Agent任务: {tool_name}",
-                        content=instruction,
-                        output="",
-                        analysis=None,
-                        success=True,
-                    ),
-                )
-
-                # 通过 OpenClaw 执行任务
-                result = await _process_openclaw_task(instruction, session_id)
-                results.append({"agent_call": agent_call, "result": result, "step_index": i})
-
-                # 更新任务步骤结果
-                await Modules.task_scheduler.add_task_step(
-                    request_id,
-                    TaskStep(
-                        step_id=f"step_{i + 1}_result",
-                        task_id=request_id,
-                        purpose=f"任务结果: {tool_name}",
-                        content=f"执行结果: {result.get('success', False)}",
-                        output=str(result.get("result", "")),
-                        analysis={
-                            "analysis": f"任务类型: {result.get('task_type', 'unknown')}, 工具: {tool_name}, 服务: {service_name}"
-                        },
-                        success=result.get("success", False),
-                        error=result.get("error"),
-                    ),
-                )
-
-                logger.info(f"[异步执行] 任务 {i + 1} 完成: {result.get('success', False)}")
-
-            except Exception as e:
-                logger.error(f"[异步执行] 任务 {i + 1} 执行失败: {e}")
-                results.append(
-                    {"agent_call": agent_call, "result": {"success": False, "error": str(e)}, "step_index": i}
-                )
-
-        # 发送回调通知（如果提供了回调URL）
-        if callback_url:
-            await _send_callback_notification(callback_url, request_id, session_id, analysis_session_id, results)
-
-        logger.info(f"[异步执行] 所有Agent任务执行完成: {len(results)} 个任务")
-
-    except Exception as e:
-        logger.error(f"[异步执行] Agent任务执行失败: {e}")
-        # 发送错误回调
-        if callback_url:
-            await _send_callback_notification(callback_url, request_id, session_id, analysis_session_id, [], str(e))
-
-
-async def _send_callback_notification(
-    callback_url: str,
-    request_id: str,
-    session_id: str,
-    analysis_session_id: str,
-    results: List[Dict[str, Any]],
-    error: Optional[str] = None,
-):
-    """发送回调通知 - 应用与MCP服务器相同的回调机制"""
-    try:
-        import httpx
-
-        callback_payload = {
-            "request_id": request_id,
-            "session_id": session_id,
-            "analysis_session_id": analysis_session_id,
-            "success": error is None,
-            "error": error,
-            "results": results,
-            "completed_at": _now_iso(),
-        }
-
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(callback_url, json=callback_payload)
-            if response.status_code == 200:
-                logger.info(f"[回调通知] Agent任务结果回调成功: {request_id}")
-            else:
-                logger.error(f"[回调通知] Agent任务结果回调失败: {response.status_code}")
-
-    except Exception as e:
-        logger.error(f"[回调通知] 发送Agent任务回调失败: {e}")
-
-
 # ============ API端点 ============
 
 
@@ -536,8 +417,7 @@ async def health_check():
         "timestamp": _now_iso(),
         "modules": {
             "openclaw": Modules.openclaw_client is not None,
-            "proactive_vision": Modules.proactive_scheduler is not None,
-            "heartbeat": Modules.heartbeat_scheduler is not None,
+            "dogtag": Modules.dogtag_scheduler is not None,
         },
     }
 
@@ -567,363 +447,6 @@ async def full_health_check():
         "services": results_dict,
         "timestamp": _now_iso(),
     }
-
-
-@app.post("/schedule")
-async def schedule_agent_tasks(payload: Dict[str, Any]):
-    """统一的任务调度端点 - 应用与MCP服务器相同的会话管理逻辑"""
-    if not Modules.openclaw_client or not Modules.task_scheduler:
-        raise HTTPException(503, "OpenClaw客户端或任务调度器未就绪")
-
-    # 提取新的请求格式参数
-    query = payload.get("query", "")
-    agent_calls = payload.get("agent_calls", [])
-    session_id = payload.get("session_id")
-    analysis_session_id = payload.get("analysis_session_id")
-    request_id = payload.get("request_id", str(uuid.uuid4()))
-    callback_url = payload.get("callback_url")
-
-    try:
-        logger.info(f"[统一调度] 接收Agent任务调度请求: {query}")
-        logger.info(f"[统一调度] 会话ID: {session_id}, 分析会话ID: {analysis_session_id}, 请求ID: {request_id}")
-
-        if not agent_calls:
-            return {
-                "success": True,
-                "status": "no_tasks",
-                "message": "未发现可执行的Agent任务",
-                "task_id": request_id,
-                "accepted_at": _now_iso(),
-                "session_id": session_id,
-                "analysis_session_id": analysis_session_id,
-            }
-
-        logger.info(f"[统一调度] 会话 {session_id} 发现 {len(agent_calls)} 个Agent任务")
-
-        # 创建任务调度器任务
-        task_id = await Modules.task_scheduler.create_task(
-            task_id=request_id,
-            purpose=f"执行Agent任务: {query}",
-            session_id=session_id,
-            analysis_session_id=analysis_session_id,
-        )
-
-        # 异步执行任务（不阻塞响应）
-        asyncio.create_task(
-            _execute_agent_tasks_async(agent_calls, session_id, analysis_session_id, request_id, callback_url)
-        )
-
-        return {
-            "success": True,
-            "status": "scheduled",
-            "task_id": request_id,
-            "message": f"已调度 {len(agent_calls)} 个Agent任务",
-            "accepted_at": _now_iso(),
-            "session_id": session_id,
-            "analysis_session_id": analysis_session_id,
-        }
-
-    except Exception as e:
-        logger.error(f"[统一调度] Agent任务调度失败: {e}")
-        raise HTTPException(500, f"调度失败: {e}")
-
-
-@app.post("/analyze_and_execute")
-async def analyze_and_execute(payload: Dict[str, Any]):
-    """意图分析和任务执行 - 保持向后兼容"""
-    if not Modules.openclaw_client:
-        raise HTTPException(503, "OpenClaw客户端未就绪")
-
-    messages = (payload or {}).get("messages", [])
-    if not isinstance(messages, list):
-        raise HTTPException(400, "messages必须是{role, content}格式的列表")
-
-    session_id = (payload or {}).get("session_id")
-
-    try:
-        # 直接执行电脑控制任务，不进行意图分析
-        # 意图分析已在API服务器中完成，这里只负责执行具体的Agent任务
-
-        # 从消息中提取任务指令
-        tasks = []
-        for msg in messages:
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if "执行Agent任务:" in content:
-                    # 提取任务指令
-                    instruction = content.replace("执行Agent任务:", "").strip()
-                    tasks.append({"instruction": instruction})
-
-        if not tasks:
-            return {
-                "success": True,
-                "status": "no_tasks",
-                "message": "未发现可执行的任务",
-                "accepted_at": _now_iso(),
-                "session_id": session_id,
-            }
-
-        logger.info(f"会话 {session_id} 发现 {len(tasks)} 个任务")
-
-        # 通过 OpenClaw 处理每个任务
-        results = []
-        for task_instruction in tasks:
-            result = await _process_openclaw_task(task_instruction["instruction"], session_id)
-            results.append(result)
-
-        return {
-            "success": True,
-            "status": "completed",
-            "tasks_processed": len(tasks),
-            "results": results,
-            "accepted_at": _now_iso(),
-            "session_id": session_id,
-        }
-
-    except Exception as e:
-        logger.error(f"意图分析和任务执行失败: {e}")
-        raise HTTPException(500, f"处理失败: {e}")
-
-
-# ============ 任务记忆管理API ============
-
-
-@app.get("/tasks")
-async def get_tasks(session_id: Optional[str] = None):
-    """获取任务列表"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        running_tasks = await Modules.task_scheduler.get_running_tasks()
-        return {"success": True, "running_tasks": running_tasks, "session_id": session_id}
-    except Exception as e:
-        logger.error(f"获取任务列表失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/tasks/{task_id}")
-async def get_task_status(task_id: str):
-    """获取指定任务状态"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        task_status = await Modules.task_scheduler.get_task_status(task_id)
-        if not task_status:
-            raise HTTPException(404, f"任务 {task_id} 不存在")
-
-        return {"success": True, "task": task_status}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取任务状态失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/tasks/{task_id}/memory")
-async def get_task_memory(task_id: str, include_key_facts: bool = True):
-    """获取任务记忆摘要"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        memory_summary = await Modules.task_scheduler.get_task_memory_summary(task_id, include_key_facts)
-        return {"success": True, "task_id": task_id, "memory_summary": memory_summary}
-    except Exception as e:
-        logger.error(f"获取任务记忆失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/memory/global")
-async def get_global_memory():
-    """获取全局记忆摘要"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        global_summary = await Modules.task_scheduler.get_global_memory_summary()
-        failed_attempts = await Modules.task_scheduler.get_failed_attempts_summary()
-
-        return {"success": True, "global_summary": global_summary, "failed_attempts": failed_attempts}
-    except Exception as e:
-        logger.error(f"获取全局记忆失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.post("/tasks/{task_id}/steps")
-async def add_task_step(task_id: str, payload: Dict[str, Any]):
-    """添加任务步骤"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        step = TaskStep(
-            step_id=payload.get("step_id", str(uuid.uuid4())),
-            task_id=task_id,
-            purpose=payload.get("purpose", "执行步骤"),
-            content=payload.get("content", ""),
-            output=payload.get("output", ""),
-            analysis=payload.get("analysis"),
-            success=payload.get("success", True),
-            error=payload.get("error"),
-        )
-
-        await Modules.task_scheduler.add_task_step(task_id, step)
-
-        return {"success": True, "message": "步骤添加成功", "step_id": step.step_id}
-    except Exception as e:
-        logger.error(f"添加任务步骤失败: {e}")
-        raise HTTPException(500, f"添加失败: {e}")
-
-
-@app.delete("/tasks/{task_id}/memory")
-async def clear_task_memory(task_id: str):
-    """清除任务记忆"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        success = await Modules.task_scheduler.clear_task_memory(task_id)
-        if not success:
-            raise HTTPException(404, f"任务 {task_id} 不存在")
-
-        return {"success": True, "message": f"任务 {task_id} 的记忆已清除"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"清除任务记忆失败: {e}")
-        raise HTTPException(500, f"清除失败: {e}")
-
-
-@app.delete("/memory/global")
-async def clear_global_memory():
-    """清除全局记忆"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        await Modules.task_scheduler.clear_all_memory()
-        return {"success": True, "message": "全局记忆已清除"}
-    except Exception as e:
-        logger.error(f"清除全局记忆失败: {e}")
-        raise HTTPException(500, f"清除失败: {e}")
-
-
-# ============ 会话级别的记忆管理API ============
-
-
-@app.get("/sessions")
-async def get_all_sessions():
-    """获取所有会话的摘要信息"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        sessions = await Modules.task_scheduler.get_all_sessions()
-        return {"success": True, "sessions": sessions, "total_sessions": len(sessions)}
-    except Exception as e:
-        logger.error(f"获取会话列表失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/sessions/{session_id}/memory")
-async def get_session_memory_summary(session_id: str):
-    """获取会话记忆摘要"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        summary = await Modules.task_scheduler.get_session_memory_summary(session_id)
-        if "error" in summary:
-            raise HTTPException(404, summary["error"])
-
-        return {"success": True, "session_id": session_id, "memory_summary": summary}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"获取会话记忆摘要失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/sessions/{session_id}/compressed_memories")
-async def get_session_compressed_memories(session_id: str):
-    """获取会话的压缩记忆"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        memories = await Modules.task_scheduler.get_session_compressed_memories(session_id)
-        return {"success": True, "session_id": session_id, "compressed_memories": memories, "count": len(memories)}
-    except Exception as e:
-        logger.error(f"获取会话压缩记忆失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/sessions/{session_id}/key_facts")
-async def get_session_key_facts(session_id: str):
-    """获取会话的关键事实"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        key_facts = await Modules.task_scheduler.get_session_key_facts(session_id)
-        return {"success": True, "session_id": session_id, "key_facts": key_facts, "count": len(key_facts)}
-    except Exception as e:
-        logger.error(f"获取会话关键事实失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/sessions/{session_id}/failed_attempts")
-async def get_session_failed_attempts(session_id: str):
-    """获取会话的失败尝试"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        failed_attempts = await Modules.task_scheduler.get_session_failed_attempts(session_id)
-        return {
-            "success": True,
-            "session_id": session_id,
-            "failed_attempts": failed_attempts,
-            "count": len(failed_attempts),
-        }
-    except Exception as e:
-        logger.error(f"获取会话失败尝试失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.get("/sessions/{session_id}/tasks")
-async def get_session_tasks(session_id: str):
-    """获取会话的所有任务"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        tasks = await Modules.task_scheduler.get_session_tasks(session_id)
-        return {"success": True, "session_id": session_id, "tasks": tasks, "count": len(tasks)}
-    except Exception as e:
-        logger.error(f"获取会话任务失败: {e}")
-        raise HTTPException(500, f"获取失败: {e}")
-
-
-@app.delete("/sessions/{session_id}/memory")
-async def clear_session_memory(session_id: str):
-    """清除指定会话的记忆"""
-    if not Modules.task_scheduler:
-        raise HTTPException(503, "任务调度器未就绪")
-
-    try:
-        success = await Modules.task_scheduler.clear_session_memory(session_id)
-        if not success:
-            raise HTTPException(404, f"会话 {session_id} 不存在")
-
-        return {"success": True, "message": f"会话 {session_id} 的记忆已清除"}
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"清除会话记忆失败: {e}")
-        raise HTTPException(500, f"清除失败: {e}")
 
 
 # ============ OpenClaw 集成 API ============
@@ -1935,7 +1458,7 @@ async def _run_travel_session(session_id: str):
 async def get_proactive_vision_config():
     """获取主动视觉系统配置"""
     try:
-        from agentserver.proactive_vision import load_proactive_config
+        from agentserver.dogtag import load_proactive_config
 
         config = load_proactive_config()
         return {"success": True, "config": config.model_dump()}
@@ -1948,13 +1471,14 @@ async def get_proactive_vision_config():
 async def update_proactive_vision_config(payload: Dict[str, Any]):
     """更新主动视觉系统配置"""
     try:
-        from agentserver.proactive_vision import (
+        from agentserver.dogtag import (
             load_proactive_config,
             save_proactive_config,
             ProactiveVisionConfig,
-            replace_proactive_scheduler_async,
             create_proactive_analyzer,
         )
+        from agentserver.dogtag import get_dogtag_registry
+        from agentserver.dogtag.duties.screen_vision_duty import create_screen_vision_duty
 
         # 加载当前配置并备份到内存（用于回滚）
         old_config_backup = load_proactive_config()
@@ -1970,37 +1494,29 @@ async def update_proactive_vision_config(payload: Dict[str, Any]):
         if not save_proactive_config(new_config):
             raise HTTPException(500, "配置保存失败")
 
-        # 如果调度器已启动，需要重启以应用新配置
-        if Modules.proactive_scheduler:
-            was_running = Modules.proactive_scheduler._running
-
+        # 重新注册 screen_vision 职责
+        try:
+            create_proactive_analyzer(new_config)
+            registry = get_dogtag_registry()
+            sv_tag, sv_exec = create_screen_vision_duty(new_config)
+            registry.register(sv_tag, sv_exec)
+            logger.info("[ProactiveVision] 配置已更新，screen_vision 职责已重新注册")
+        except Exception as e:
+            logger.error(f"[ProactiveVision] 应用新配置失败: {e}")
+            # 回滚
             try:
-                # 使用线程安全的异步替换（会自动停止旧调度器）
-                create_proactive_analyzer(new_config)
-                Modules.proactive_scheduler = await replace_proactive_scheduler_async(new_config)
-
-                # 如果配置启用且之前在运行，则启动新调度器
-                if new_config.enabled and was_running:
-                    await Modules.proactive_scheduler.start()
-                elif new_config.enabled and not was_running:
-                    # 如果配置启用但之前未运行，也启动
-                    await Modules.proactive_scheduler.start()
-
-            except Exception as e:
-                logger.error(f"[ProactiveVision] 应用新配置失败: {e}")
-                # 回滚：恢复旧配置（从内存备份）
-                try:
-                    save_proactive_config(old_config_backup)  # 恢复磁盘配置
-                    create_proactive_analyzer(old_config_backup)
-                    Modules.proactive_scheduler = await replace_proactive_scheduler_async(old_config_backup)
-                    if was_running and old_config_backup.enabled:
-                        await Modules.proactive_scheduler.start()
-                    logger.info("[ProactiveVision] 已成功回滚到旧配置")
-                except Exception as rollback_error:
-                    logger.error(f"[ProactiveVision] 回滚失败: {rollback_error}")
-                raise HTTPException(500, f"应用新配置失败，已尝试回滚: {e}")
+                save_proactive_config(old_config_backup)
+                create_proactive_analyzer(old_config_backup)
+                sv_tag_old, sv_exec_old = create_screen_vision_duty(old_config_backup)
+                registry.register(sv_tag_old, sv_exec_old)
+                logger.info("[ProactiveVision] 已成功回滚到旧配置")
+            except Exception as rollback_error:
+                logger.error(f"[ProactiveVision] 回滚失败: {rollback_error}")
+            raise HTTPException(500, f"应用新配置失败，已尝试回滚: {e}")
 
         return {"success": True, "message": "配置已更新", "config": new_config.model_dump()}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"更新 ProactiveVision 配置失败: {e}")
         raise HTTPException(500, f"更新失败: {e}")
@@ -2012,17 +1528,18 @@ async def enable_proactive_vision(payload: Dict[str, Any]):
     try:
         enabled = payload.get("enabled", True)
 
-        from agentserver.proactive_vision import load_proactive_config, save_proactive_config
+        from agentserver.dogtag import load_proactive_config, save_proactive_config, get_dogtag_registry
+        from agentserver.dogtag.models import DutyStatus
 
         config = load_proactive_config()
         config.enabled = enabled
 
         if save_proactive_config(config):
-            if Modules.proactive_scheduler:
-                if enabled:
-                    await Modules.proactive_scheduler.start()
-                else:
-                    await Modules.proactive_scheduler.stop()
+            registry = get_dogtag_registry()
+            registry.update_status(
+                "screen_vision",
+                DutyStatus.ENABLED if enabled else DutyStatus.DISABLED,
+            )
 
             status = "已启用" if enabled else "已禁用"
             return {"success": True, "message": f"主动视觉系统{status}", "enabled": enabled}
@@ -2037,7 +1554,7 @@ async def enable_proactive_vision(payload: Dict[str, Any]):
 async def get_proactive_vision_status():
     """获取主动视觉系统运行状态"""
     try:
-        if not Modules.proactive_scheduler:
+        if not Modules.dogtag_scheduler:
             return {
                 "success": True,
                 "running": False,
@@ -2045,9 +1562,11 @@ async def get_proactive_vision_status():
                 "message": "调度器未初始化",
             }
 
-        from agentserver.proactive_vision import load_proactive_config, get_proactive_analyzer
+        from agentserver.dogtag import load_proactive_config, get_proactive_analyzer, get_dogtag_registry
 
         config = load_proactive_config()
+        registry = get_dogtag_registry()
+        sv_tag = registry.get("screen_vision")
 
         # 获取性能统计
         performance_stats = {}
@@ -2057,10 +1576,11 @@ async def get_proactive_vision_status():
 
         return {
             "success": True,
-            "running": Modules.proactive_scheduler._running,
+            "running": Modules.dogtag_scheduler._running,
             "enabled": config.enabled,
-            "last_check": Modules.proactive_scheduler._last_check_time,
-            "last_activity": Modules.proactive_scheduler._last_user_activity_time,
+            "duty_status": sv_tag.status.value if sv_tag else "unregistered",
+            "last_check": Modules.dogtag_scheduler._last_check_times.get("screen_vision", 0),
+            "last_activity": Modules.dogtag_scheduler._last_user_activity,
             "check_interval": config.check_interval_seconds,
             "performance": performance_stats,
         }
@@ -2077,7 +1597,7 @@ async def test_proactive_vision_trigger(payload: Dict[str, Any]):
         if not rule_id:
             raise HTTPException(400, "rule_id 不能为空")
 
-        from agentserver.proactive_vision import load_proactive_config, get_proactive_trigger
+        from agentserver.dogtag import load_proactive_config, get_proactive_trigger
 
         config = load_proactive_config()
         rule = None
@@ -2112,8 +1632,8 @@ async def test_proactive_vision_trigger(payload: Dict[str, Any]):
 async def update_user_activity():
     """更新用户活动时间（由前端定期调用）"""
     try:
-        if Modules.proactive_scheduler:
-            Modules.proactive_scheduler.update_user_activity()
+        if Modules.dogtag_scheduler:
+            Modules.dogtag_scheduler.update_user_activity()
         return {"success": True}
     except Exception as e:
         logger.error(f"更新用户活动时间失败: {e}")
@@ -2135,8 +1655,8 @@ async def set_proactive_vision_window_mode(payload: Dict[str, Any]):
         if mode not in ("classic", "ball", "compact", "full"):
             return {"success": False, "error": f"无效的窗口模式: {mode}"}
 
-        if Modules.proactive_scheduler:
-            Modules.proactive_scheduler.set_window_mode(mode)
+        if Modules.dogtag_scheduler:
+            Modules.dogtag_scheduler.set_window_mode(mode)
 
         return {
             "success": True,
@@ -2161,8 +1681,8 @@ async def reset_proactive_vision_timer(payload: Dict[str, Any]):
     try:
         reason = payload.get("reason", "external_trigger")
 
-        if Modules.proactive_scheduler:
-            Modules.proactive_scheduler.reset_check_timer(reason)
+        if Modules.dogtag_scheduler:
+            Modules.dogtag_scheduler.reset_check_timer("screen_vision", reason)
             return {
                 "success": True,
                 "message": "计时器已重置",
@@ -2171,7 +1691,7 @@ async def reset_proactive_vision_timer(payload: Dict[str, Any]):
         else:
             return {
                 "success": False,
-                "error": "ProactiveVision调度器未初始化",
+                "error": "军牌调度器未初始化",
             }
     except Exception as e:
         logger.error(f"重置ProactiveVision计时器失败: {e}")
@@ -2182,7 +1702,7 @@ async def reset_proactive_vision_timer(payload: Dict[str, Any]):
 async def get_proactive_vision_metrics():
     """获取ProactiveVision性能指标"""
     try:
-        from agentserver.proactive_vision.metrics import get_metrics
+        from agentserver.dogtag.screen_vision.metrics import get_metrics
 
         metrics = get_metrics()
         all_metrics = metrics.get_all_metrics()
@@ -2200,7 +1720,7 @@ async def get_proactive_vision_metrics():
 async def get_proactive_vision_metrics_prometheus():
     """获取Prometheus格式的性能指标"""
     try:
-        from agentserver.proactive_vision.metrics import get_metrics
+        from agentserver.dogtag.screen_vision.metrics import get_metrics
         from fastapi.responses import PlainTextResponse
 
         metrics = get_metrics()
@@ -2219,34 +1739,15 @@ async def get_proactive_vision_metrics_prometheus():
 
 @app.post("/heartbeat/conversation_event")
 async def heartbeat_conversation_event(payload: Dict[str, Any]):
-    """接收 api_server 的对话生命周期事件"""
-    event = payload.get("event", "")
-    try:
-        from agentserver.heartbeat.scheduler import get_heartbeat_scheduler
-
-        scheduler = get_heartbeat_scheduler()
-        if not scheduler:
-            return {"status": "no_scheduler"}
-
-        if event == "started":
-            scheduler.on_conversation_started()
-        elif event == "ended":
-            scheduler.on_conversation_ended()
-        else:
-            return {"status": "unknown_event", "event": event}
-
-        logger.info(f"[Heartbeat] 收到对话事件: {event}")
-        return {"status": "ok", "event": event}
-    except Exception as e:
-        logger.error(f"[Heartbeat] 处理对话事件失败: {e}")
-        return {"status": "error", "error": str(e)}
+    """接收 api_server 的对话生命周期事件（兼容旧路由，委托给军牌系统）"""
+    return await dogtag_conversation_event(payload)
 
 
 @app.get("/heartbeat/config")
 async def get_heartbeat_config():
     """获取心跳系统配置"""
     try:
-        from agentserver.heartbeat import load_heartbeat_config
+        from agentserver.dogtag import load_heartbeat_config
 
         cfg = load_heartbeat_config()
         return {"success": True, "config": cfg.model_dump()}
@@ -2257,14 +1758,16 @@ async def get_heartbeat_config():
 
 @app.post("/heartbeat/config")
 async def update_heartbeat_config(payload: Dict[str, Any]):
-    """更新心跳系统配置（含热重载调度器）"""
+    """更新心跳系统配置（含重新注册职责）"""
     try:
-        from agentserver.heartbeat import (
+        from agentserver.dogtag import (
             load_heartbeat_config,
             save_heartbeat_config,
             HeartbeatConfig,
-            replace_heartbeat_scheduler_async,
+            create_heartbeat_executor,
+            get_dogtag_registry,
         )
+        from agentserver.dogtag.duties.heartbeat_duty import create_heartbeat_duty
 
         old_config = load_heartbeat_config()
         config_dict = old_config.model_dump()
@@ -2274,13 +1777,12 @@ async def update_heartbeat_config(payload: Dict[str, Any]):
         if not save_heartbeat_config(new_config):
             raise HTTPException(500, "配置保存失败")
 
-        # 热重载调度器
-        if Modules.heartbeat_scheduler:
-            was_running = Modules.heartbeat_scheduler._running
-            Modules.heartbeat_scheduler = await replace_heartbeat_scheduler_async(new_config)
-            if new_config.enabled:
-                await Modules.heartbeat_scheduler.start()
-            logger.info(f"[Heartbeat] 配置已热重载 (was_running={was_running})")
+        # 重建执行器 + 重新注册职责
+        create_heartbeat_executor(new_config)
+        registry = get_dogtag_registry()
+        hb_tag, hb_exec = create_heartbeat_duty(new_config)
+        registry.register(hb_tag, hb_exec)
+        logger.info("[Heartbeat] 配置已更新，heartbeat 职责已重新注册")
 
         return {"success": True, "message": "配置已更新", "config": new_config.model_dump()}
     except HTTPException:
@@ -2296,19 +1798,24 @@ async def enable_heartbeat(payload: Dict[str, Any]):
     try:
         enabled = payload.get("enabled", True)
 
-        from agentserver.heartbeat import load_heartbeat_config, save_heartbeat_config
+        from agentserver.dogtag import load_heartbeat_config, save_heartbeat_config, get_dogtag_registry
+        from agentserver.dogtag.models import DutyStatus
 
         cfg = load_heartbeat_config()
         cfg.enabled = enabled
 
         if save_heartbeat_config(cfg):
-            if Modules.heartbeat_scheduler:
-                if enabled:
-                    Modules.heartbeat_scheduler.config = cfg
-                    await Modules.heartbeat_scheduler.start()
-                else:
-                    Modules.heartbeat_scheduler.config = cfg
-                    await Modules.heartbeat_scheduler.stop()
+            registry = get_dogtag_registry()
+            registry.update_status(
+                "heartbeat",
+                DutyStatus.ENABLED if enabled else DutyStatus.DISABLED,
+            )
+
+            # 同步执行器的配置
+            from agentserver.dogtag import get_heartbeat_executor
+            hb = get_heartbeat_executor()
+            if hb:
+                hb.config = cfg
 
             status = "已启用" if enabled else "已禁用"
             return {"success": True, "message": f"心跳系统{status}", "enabled": enabled}
@@ -2325,14 +1832,13 @@ async def enable_heartbeat(payload: Dict[str, Any]):
 async def trigger_heartbeat():
     """手动触发一次心跳检查"""
     try:
-        if not Modules.heartbeat_scheduler:
-            raise HTTPException(400, "心跳调度器未初始化")
+        if not Modules.dogtag_scheduler:
+            raise HTTPException(400, "军牌调度器未初始化")
 
-        await Modules.heartbeat_scheduler.trigger_once()
+        await Modules.dogtag_scheduler.trigger_once("heartbeat")
         return {
             "success": True,
             "message": "心跳已触发",
-            "status": Modules.heartbeat_scheduler.get_status(),
         }
     except HTTPException:
         raise
@@ -2345,18 +1851,36 @@ async def trigger_heartbeat():
 async def get_heartbeat_status():
     """获取心跳系统运行状态"""
     try:
-        if not Modules.heartbeat_scheduler:
+        from agentserver.dogtag import get_heartbeat_executor, get_dogtag_registry
+
+        hb = get_heartbeat_executor()
+        if not hb:
             return {
                 "success": True,
                 "running": False,
                 "enabled": False,
-                "message": "调度器未初始化",
+                "message": "执行器未初始化",
             }
 
-        return {
-            "success": True,
-            **Modules.heartbeat_scheduler.get_status(),
-        }
+        status = hb.get_status()
+
+        # 从军牌系统补充调度状态
+        if Modules.dogtag_scheduler:
+            registry = get_dogtag_registry()
+            tag = registry.get("heartbeat")
+            countdown_active = (
+                "heartbeat" in Modules.dogtag_scheduler._event_countdowns
+                and not Modules.dogtag_scheduler._event_countdowns["heartbeat"].done()
+            )
+            status["running"] = Modules.dogtag_scheduler._running
+            status["conversation_active"] = Modules.dogtag_scheduler._conversation_active
+            status["countdown_active"] = countdown_active
+            status["duty_status"] = tag.status.value if tag else "unregistered"
+            status["in_active_hours"] = Modules.dogtag_scheduler._is_in_active_hours(
+                hb.config.active_hours_start, hb.config.active_hours_end
+            )
+
+        return {"success": True, **status}
     except Exception as e:
         logger.error(f"获取 Heartbeat 状态失败: {e}")
         raise HTTPException(500, f"获取失败: {e}")
@@ -2371,7 +1895,7 @@ async def get_heartbeat_status():
 async def get_heartbeat_checklist(status: Optional[str] = None):
     """获取 checklist 条目列表，可选 ?status=pending 过滤"""
     try:
-        from agentserver.heartbeat import load_checklist
+        from agentserver.dogtag import load_checklist
 
         cl = load_checklist()
         items = cl.items
@@ -2391,7 +1915,7 @@ async def get_heartbeat_checklist(status: Optional[str] = None):
 async def create_checklist_item(payload: Dict[str, Any]):
     """新增 checklist 条目 {"content": "...", "priority": "normal"}"""
     try:
-        from agentserver.heartbeat import add_item
+        from agentserver.dogtag import add_item
 
         content = payload.get("content", "").strip()
         if not content:
@@ -2411,7 +1935,7 @@ async def create_checklist_item(payload: Dict[str, Any]):
 async def update_checklist_item(item_id: str, payload: Dict[str, Any]):
     """更新 checklist 条目 {"status": "done", "notes": "..."}"""
     try:
-        from agentserver.heartbeat import update_item
+        from agentserver.dogtag import update_item
 
         allowed_fields = {"status", "notes", "priority", "content"}
         updates = {k: v for k, v in payload.items() if k in allowed_fields}
@@ -2433,7 +1957,7 @@ async def update_checklist_item(item_id: str, payload: Dict[str, Any]):
 async def delete_checklist_item(item_id: str):
     """删除 checklist 条目"""
     try:
-        from agentserver.heartbeat import remove_item
+        from agentserver.dogtag import remove_item
 
         ok = remove_item(item_id)
         if not ok:
@@ -2444,6 +1968,122 @@ async def delete_checklist_item(item_id: str):
     except Exception as e:
         logger.error(f"删除 Checklist 条目失败: {e}")
         raise HTTPException(500, f"删除失败: {e}")
+
+
+# ======================================================================
+# 军牌系统 (DogTag) 统一端点
+# ======================================================================
+
+
+@app.get("/dogtag/status")
+async def get_dogtag_status():
+    """获取军牌调度器状态 + 全部任务状态"""
+    try:
+        if not Modules.dogtag_scheduler:
+            return {"success": True, "running": False, "message": "调度器未初始化"}
+        return {"success": True, **Modules.dogtag_scheduler.get_status()}
+    except Exception as e:
+        logger.error(f"获取 DogTag 状态失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+@app.get("/dogtag/duties")
+async def get_dogtag_duties():
+    """获取所有注册的职责列表"""
+    try:
+        from agentserver.dogtag import get_dogtag_registry
+
+        registry = get_dogtag_registry()
+        duties = {
+            duty_id: tag.model_dump()
+            for duty_id, tag in registry.get_all().items()
+        }
+        return {"success": True, "duties": duties, "count": len(duties)}
+    except Exception as e:
+        logger.error(f"获取 DogTag 职责列表失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+@app.post("/dogtag/duties/{duty_id}/enable")
+async def enable_dogtag_duty(duty_id: str):
+    """启用指定职责"""
+    try:
+        from agentserver.dogtag import get_dogtag_registry
+        from agentserver.dogtag.models import DutyStatus
+
+        registry = get_dogtag_registry()
+        if not registry.get(duty_id):
+            raise HTTPException(404, f"职责不存在: {duty_id}")
+        registry.update_status(duty_id, DutyStatus.ENABLED)
+        return {"success": True, "message": f"职责 '{duty_id}' 已启用"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"启用 DogTag 职责失败: {e}")
+        raise HTTPException(500, f"操作失败: {e}")
+
+
+@app.post("/dogtag/duties/{duty_id}/disable")
+async def disable_dogtag_duty(duty_id: str):
+    """禁用指定职责"""
+    try:
+        from agentserver.dogtag import get_dogtag_registry
+        from agentserver.dogtag.models import DutyStatus
+
+        registry = get_dogtag_registry()
+        if not registry.get(duty_id):
+            raise HTTPException(404, f"职责不存在: {duty_id}")
+        registry.update_status(duty_id, DutyStatus.DISABLED)
+        return {"success": True, "message": f"职责 '{duty_id}' 已禁用"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"禁用 DogTag 职责失败: {e}")
+        raise HTTPException(500, f"操作失败: {e}")
+
+
+@app.post("/dogtag/duties/{duty_id}/trigger")
+async def trigger_dogtag_duty(duty_id: str):
+    """手动触发指定职责"""
+    try:
+        if not Modules.dogtag_scheduler:
+            raise HTTPException(503, "军牌调度器未初始化")
+
+        from agentserver.dogtag import get_dogtag_registry
+
+        registry = get_dogtag_registry()
+        if not registry.get(duty_id):
+            raise HTTPException(404, f"职责不存在: {duty_id}")
+
+        await Modules.dogtag_scheduler.trigger_once(duty_id)
+        return {"success": True, "message": f"职责 '{duty_id}' 已触发"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"触发 DogTag 职责失败: {e}")
+        raise HTTPException(500, f"触发失败: {e}")
+
+
+@app.post("/dogtag/conversation_event")
+async def dogtag_conversation_event(payload: Dict[str, Any]):
+    """接收对话生命周期事件"""
+    event = payload.get("event", "")
+    try:
+        if not Modules.dogtag_scheduler:
+            return {"status": "no_scheduler"}
+
+        if event == "started":
+            Modules.dogtag_scheduler.on_conversation_started()
+        elif event == "ended":
+            Modules.dogtag_scheduler.on_conversation_ended()
+        else:
+            return {"status": "unknown_event", "event": event}
+
+        logger.info(f"[DogTag] 收到对话事件: {event}")
+        return {"status": "ok", "event": event}
+    except Exception as e:
+        logger.error(f"[DogTag] 处理对话事件失败: {e}")
+        return {"status": "error", "error": str(e)}
 
 
 if __name__ == "__main__":
