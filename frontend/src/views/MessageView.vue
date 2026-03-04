@@ -9,7 +9,7 @@ import { startToolPolling, stopToolPolling, toolMessage } from '@/composables/us
 import { CONFIG } from '@/utils/config'
 import { live2dState, setEmotion } from '@/utils/live2dController'
 import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurrentSession, MESSAGES, newSession, switchSession } from '@/utils/session'
-import { isPlaying, speak, stop as stopTTS } from '@/utils/tts'
+import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
 export function chatStream(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   // 新问答开始时，立即中止上一次的 TTS 播放
@@ -23,16 +23,18 @@ export function chatStream(content: string, options?: { skill?: string, images?:
   // 追踪纯LLM内容（不含工具状态标记），用于TTS朗读
   let spokenContent = ''
 
-  // 语音同步：语音开启时缓冲内容，等 TTS 就绪后一起释放
+  // 语音模式：开启时在流式输出中逐句送入 TTS 队列（文本始终实时显示）
   const voiceSync = CONFIG.value.system.voice_enabled
   let contentBuf = ''
   const pushContent = (text: string) => {
     contentBuf += text
-    if (!voiceSync) message.content = contentBuf
+    message.content = contentBuf
   }
 
   live2dState.value = 'thinking'
   let compressTimer: ReturnType<typeof setTimeout> | undefined
+  // 逐句 TTS：在流式输出中检测句子边界，逐句送入 TTS 队列
+  let ttsSentenceBuf = ''
 
   // 记录当前轮次 content 流的起始位置，content_clean 只替换当前轮的 LLM 输出
   let roundContentStart = 0
@@ -74,12 +76,29 @@ export function chatStream(content: string, options?: { skill?: string, images?:
         if (emotion !== 'normal') {
           void setEmotion(emotion)
         }
+        // 逐句 TTS：检测句子边界（。！？）并入队
+        if (voiceSync) {
+          ttsSentenceBuf += chunk.text || ''
+          const parts = ttsSentenceBuf.split(/(?<=[。！？])/)
+          if (parts.length > 1) {
+            for (let i = 0; i < parts.length - 1; i++) {
+              const s = parts[i]!.trim()
+              if (s) queueSpeak(s)
+            }
+            ttsSentenceBuf = parts[parts.length - 1]!
+          }
+        }
       }
       else if (chunk.type === 'content_clean') {
         // 仅替换当前轮次的 LLM 输出（从 roundContentStart 开始），保留之前轮次的工具通知
         contentBuf = contentBuf.substring(0, roundContentStart) + (chunk.text || '')
-        if (!voiceSync) message.content = contentBuf
+        message.content = contentBuf
         spokenContent = chunk.text || ''
+        // 内容被替换，清空待播放队列并重置句子缓冲
+        if (voiceSync) {
+          clearSpeakQueue()
+          ttsSentenceBuf = ''
+        }
       }
       else if (chunk.type === 'tool_calls') {
         // 显示工具调用状态
@@ -155,25 +174,17 @@ export function chatStream(content: string, options?: { skill?: string, images?:
       window.dispatchEvent(new CustomEvent('token', { detail: chunk.text || '' }))
     }
 
+    // 清理生成状态（文本已实时显示，无需等待 TTS）
+    delete message.generating
+    delete message.status
+    if (!message.reasoning) delete message.reasoning
+
     if (voiceSync && spokenContent) {
-      // 流式 TTS：文字立即显示，音频异步播放
-      message.content = contentBuf
-      delete message.generating
-      delete message.status
-      if (!message.reasoning) delete message.reasoning
-      speak(spokenContent).then(() => {
-        // speak() 内容被 stripCodeBlocks 清空时立即 resolve，不会触发 isPlaying watcher
-        if (!isPlaying.value) live2dState.value = 'idle'
-      }).catch(() => {
-        live2dState.value = 'idle'
-      })
+      // 将剩余未成句的文本送入 TTS 队列
+      if (ttsSentenceBuf.trim()) queueSpeak(ttsSentenceBuf.trim())
+      // Live2D 状态由 isPlaying watcher 自动驱动: talking ↔ idle
     }
-    else {
-      // 无语音 / 无朗读内容：直接显示
-      if (voiceSync) message.content = contentBuf
-      delete message.generating
-      delete message.status
-      if (!message.reasoning) delete message.reasoning
+    if (!isPlaying.value) {
       live2dState.value = 'idle'
     }
   }).catch((err) => {
