@@ -1,12 +1,13 @@
 export const decoder = new TextDecoder('utf-8')
 
 export interface StreamChunk {
-  type: 'content' | 'reasoning' | 'content_clean' | 'round_start' | 'tool_calls' | 'tool_results' | 'round_end' | 'auth_expired' | 'token_refreshed' | 'compress_start' | 'compress_progress' | 'compress_end' | 'compress_info' | 'status'
+  type: 'content' | 'reasoning' | 'content_clean' | 'round_start' | 'tool_calls' | 'tool_results' | 'round_end' | 'auth_expired' | 'token_refreshed' | 'compress_start' | 'compress_progress' | 'compress_end' | 'compress_info' | 'status' | 'intent_result' | 'pre_search_start' | 'pre_search_end'
   text?: string
   round?: number
   calls?: Array<{ agentType: string, service_name?: string, tool_name?: string, message?: string }>
   results?: Array<{ service_name: string, tool_name?: string, result: string, status: string }>
   has_more?: boolean
+  tools?: string[]
 }
 
 export function decodeStreamChunk(data: string): StreamChunk {

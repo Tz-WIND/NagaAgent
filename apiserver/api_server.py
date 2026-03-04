@@ -1217,10 +1217,9 @@ async def chat_stream(request: ChatRequest):
                 session_id=session_id, system_prompt=system_prompt, current_message=effective_message
             )
 
-            # ====== RAG 记忆召回 + 意图路由 并行执行 ======
+            # ====== RAG 记忆召回 ======
             yield 'data: {"type":"status","text":"回忆中..."}\n\n'
             rag_section = ""
-            route_result = None
 
             async def _query_rag_stream():
                 nonlocal rag_section
@@ -1247,26 +1246,21 @@ async def chat_stream(request: ChatRequest):
                 except Exception as e:
                     logger.debug(f"[RAG] 记忆召回失败（不影响对话）: {e}")
 
-            async def _classify_stream():
-                nonlocal route_result
-                try:
-                    from .intent_router import classify_intent
-                    route_result = await classify_intent(messages, request.message)
-                except Exception as e:
-                    logger.debug(f"[IntentRouter] 意图分类失败，回退全量: {e}")
+            await _query_rag_stream()
 
-            await asyncio.gather(_query_rag_stream(), _classify_stream())
-
-            # 构建附加知识并追加为 messages 末尾的 system 消息
+            # 构建附加知识（工具走 tools 参数，不再文本注入）
             yield 'data: {"type":"status","text":"组织上下文"}\n\n'
             supplement = build_context_supplement(
                 include_skills=True,
-                include_tool_instructions=True,
+                include_tool_instructions=False,
                 skill_name=request.skill,
                 rag_section=rag_section,
-                route_result=route_result,
             )
             messages.append({"role": "system", "content": supplement})
+
+            # 获取工具 schemas（原生 function calling）
+            from .tool_schemas import get_all_tool_schemas
+            tools = get_all_tool_schemas()
 
             # 如果携带截屏图片，将最后一条 user 消息改为多模态格式（OpenAI vision 兼容）
             if request.images:
@@ -1359,7 +1353,7 @@ async def chat_stream(request: ChatRequest):
             is_tool_event = False  # 标记当前是否在处理工具事件（不送TTS）
             was_compressed = False  # 运行时是否执行过上下文压缩（用于保存 info 标记）
 
-            async for chunk in run_agentic_loop(messages, session_id, model_override=model_override):
+            async for chunk in run_agentic_loop(messages, session_id, model_override=model_override, tools=tools):
                 if chunk.startswith("data: "):
                     try:
                         import json as json_module
@@ -1570,7 +1564,9 @@ async def get_memory_stats():
         remote = get_remote_memory_client()
         if remote is not None:
             stats = await remote.get_stats()
-            return {"status": "success", "memory_stats": stats}
+            if stats.get("success") is not False:
+                return {"status": "success", "memory_stats": stats}
+            logger.warning(f"[Memory] 远程 NagaMemory 请求失败，回退本地: {stats.get('error')}")
 
         # 回退到本地 summer_memory
         try:
@@ -1799,24 +1795,26 @@ async def get_quintuples():
         remote = get_remote_memory_client()
         if remote is not None:
             result = await remote.get_quintuples(limit=500)
-            quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
-            # 兼容 NagaMemory 返回格式：可能是 dict 列表或 tuple 列表
-            quintuples = []
-            for q in quintuples_raw:
-                if isinstance(q, dict):
-                    quintuples.append({
-                        "subject": q.get("subject", ""),
-                        "subject_type": q.get("subject_type", ""),
-                        "predicate": q.get("predicate", q.get("relation", "")),
-                        "object": q.get("object", ""),
-                        "object_type": q.get("object_type", ""),
-                    })
-                elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                    quintuples.append({
-                        "subject": q[0], "subject_type": q[1],
-                        "predicate": q[2], "object": q[3], "object_type": q[4],
-                    })
-            return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            if result.get("success") is not False:
+                quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
+                # 兼容 NagaMemory 返回格式：可能是 dict 列表或 tuple 列表
+                quintuples = []
+                for q in quintuples_raw:
+                    if isinstance(q, dict):
+                        quintuples.append({
+                            "subject": q.get("subject", ""),
+                            "subject_type": q.get("subject_type", ""),
+                            "predicate": q.get("predicate", q.get("relation", "")),
+                            "object": q.get("object", ""),
+                            "object_type": q.get("object_type", ""),
+                        })
+                    elif isinstance(q, (list, tuple)) and len(q) >= 5:
+                        quintuples.append({
+                            "subject": q[0], "subject_type": q[1],
+                            "predicate": q[2], "object": q[3], "object_type": q[4],
+                        })
+                return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            logger.warning(f"[Memory] 远程 NagaMemory 请求失败，回退本地: {result.get('error')}")
 
         # 回退到本地 summer_memory
         from summer_memory.quintuple_graph import get_all_quintuples
@@ -1852,23 +1850,25 @@ async def search_quintuples(keywords: str = ""):
         remote = get_remote_memory_client()
         if remote is not None:
             result = await remote.query_by_keywords(keyword_list)
-            quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
-            quintuples = []
-            for q in quintuples_raw:
-                if isinstance(q, dict):
-                    quintuples.append({
-                        "subject": q.get("subject", ""),
-                        "subject_type": q.get("subject_type", ""),
-                        "predicate": q.get("predicate", q.get("relation", "")),
-                        "object": q.get("object", ""),
-                        "object_type": q.get("object_type", ""),
-                    })
-                elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                    quintuples.append({
-                        "subject": q[0], "subject_type": q[1],
-                        "predicate": q[2], "object": q[3], "object_type": q[4],
-                    })
-            return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            if result.get("success") is not False:
+                quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
+                quintuples = []
+                for q in quintuples_raw:
+                    if isinstance(q, dict):
+                        quintuples.append({
+                            "subject": q.get("subject", ""),
+                            "subject_type": q.get("subject_type", ""),
+                            "predicate": q.get("predicate", q.get("relation", "")),
+                            "object": q.get("object", ""),
+                            "object_type": q.get("object_type", ""),
+                        })
+                    elif isinstance(q, (list, tuple)) and len(q) >= 5:
+                        quintuples.append({
+                            "subject": q[0], "subject_type": q[1],
+                            "predicate": q[2], "object": q[3], "object_type": q[4],
+                        })
+                return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            logger.warning(f"[Memory] 远程 NagaMemory 搜索失败，回退本地: {result.get('error')}")
 
         # 回退到本地 summer_memory
         from summer_memory.quintuple_graph import query_graph_by_keywords

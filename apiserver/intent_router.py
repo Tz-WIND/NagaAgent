@@ -34,10 +34,15 @@ class RouteResult:
     needed_builtins: List[str] = field(default_factory=list)  # ["openclaw"] or []
     needed_mcp: List[str] = field(default_factory=list)       # ["game_guide"] or []
     needed_skills: List[str] = field(default_factory=list)    # ["web-search"] or []
+    search_query: Optional[str] = None  # 搜索关键词（openclaw:关键词 格式提取）
 
     @property
     def needs_tools(self) -> bool:
         return bool(self.needed_builtins or self.needed_mcp or self.needed_skills)
+
+    @property
+    def needs_pre_search(self) -> bool:
+        return bool(self.search_query)
 
 
 # ── 工具列表缓存 ──
@@ -94,13 +99,14 @@ def _build_tool_list() -> str:
 # ── 路由 prompt ──
 
 ROUTER_SYSTEM_PROMPT = """根据用户最新消息，判断需要调用哪些工具。用 {{工具名}} 格式输出，多个工具用空格分隔。不需要工具时输出 {{none}}。
+如果需要联网搜索，使用 {{openclaw:搜索关键词}} 格式，附带精简的搜索关键词。
 
 {tool_list}"""
 
 # few-shot 示例（user/assistant 对）
 _FEW_SHOT_EXAMPLES = [
     {"role": "user", "content": "帮我搜一下今天黄金价格"},
-    {"role": "assistant", "content": "{{openclaw}}"},
+    {"role": "assistant", "content": "{{openclaw:今天黄金价格}}"},
     {"role": "user", "content": "你好呀"},
     {"role": "assistant", "content": "{{none}}"},
     {"role": "user", "content": "这关怎么打"},
@@ -114,7 +120,7 @@ _FEW_SHOT_EXAMPLES = [
     {"role": "user", "content": "帮我看看屏幕上有什么"},
     {"role": "assistant", "content": "{{screen_vision}}"},
     {"role": "user", "content": "搜一下最近的新闻然后写个总结"},
-    {"role": "assistant", "content": "{{openclaw}}"},
+    {"role": "assistant", "content": "{{openclaw:最近新闻}}"},
     {"role": "user", "content": "帮我关一下语音"},
     {"role": "assistant", "content": "{{naga_control}}"},
     {"role": "user", "content": "你现在用的什么模型"},
@@ -185,16 +191,23 @@ def _get_router_model_name() -> str:
 
 # ── 解析输出 ──
 
-# 从 {tool_name} 格式中提取工具名的正则
-_TOOL_TAG_RE = re.compile(r"\{(\w+)\}")
+# 从 {tool_name} 或 {tool_name:参数} 格式中提取工具名和可选参数
+_TOOL_TAG_RE = re.compile(r"\{(\w+)(?::([^}]+))?\}")
 
 
 def _parse_router_output(output: str) -> RouteResult:
-    """解析 nano 的输出，用正则从 {xxx} 中提取工具名"""
+    """解析 nano 的输出，用正则从 {xxx} 或 {xxx:参数} 中提取工具名"""
     result = RouteResult()
 
-    # 优先用正则提取 {xxx} 标签
-    names = [m.group(1).lower() for m in _TOOL_TAG_RE.finditer(output)]
+    # 优先用正则提取 {xxx} / {xxx:param} 标签
+    names = []
+    search_query = None
+    for m in _TOOL_TAG_RE.finditer(output):
+        name = m.group(1).lower()
+        param = m.group(2)  # 可能是 None
+        names.append(name)
+        if name == "openclaw" and param:
+            search_query = param.strip()
 
     # 兜底：如果没提取到任何标签，按行分割裸文本
     if not names:
@@ -247,6 +260,7 @@ def _parse_router_output(output: str) -> RouteResult:
             # 未知工具名，可能是 nano 幻觉，忽略
             logger.debug(f"[IntentRouter] 忽略未知工具名: {name}")
 
+    result.search_query = search_query
     return result
 
 
@@ -273,16 +287,17 @@ async def classify_intent(
             model=_get_router_model_name(),
             messages=router_messages,
             temperature=0,
-            max_tokens=50,
+            max_tokens=80,
             **_get_router_llm_params(),
         )
 
         output = response.choices[0].message.content or ""
         result = _parse_router_output(output)
 
+        tools_str = 'none' if not result.needs_tools else ', '.join(result.needed_builtins + result.needed_mcp + result.needed_skills)
+        search_str = f" | search_query=\"{result.search_query}\"" if result.search_query else ""
         logger.info(
-            f"[IntentRouter] 用户: \"{user_msg[:50]}\" → "
-            f"{'none' if not result.needs_tools else ', '.join(result.needed_builtins + result.needed_mcp + result.needed_skills)}"
+            f"[IntentRouter] 用户: \"{user_msg[:50]}\" → {tools_str}{search_str}"
         )
 
         return result

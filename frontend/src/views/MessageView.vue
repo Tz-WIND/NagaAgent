@@ -149,6 +149,18 @@ export function chatStream(content: string, options?: { skill?: string, images?:
       else if (chunk.type === 'status') {
         message.status = chunk.text || ''
       }
+      else if (chunk.type === 'intent_result') {
+        const tools = (chunk as any).tools || []
+        if (tools.length > 0) {
+          message.status = `调度: ${tools.join(', ')}`
+        }
+      }
+      else if (chunk.type === 'pre_search_start') {
+        message.status = `搜索: ${chunk.text || ''}`
+      }
+      else if (chunk.type === 'pre_search_end') {
+        message.status = chunk.text || '搜索完成'
+      }
       else if (chunk.type === 'compress_start' || chunk.type === 'compress_progress' || chunk.type === 'compress_end') {
         // 上下文压缩进度提示（覆盖式显示，直接写 message.content 不走缓冲）
         message.content = `> ${chunk.text}\n\n`

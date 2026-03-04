@@ -132,3 +132,19 @@ export function completeTask(taskId: string): Promise<{
 }> {
   return businessClient.post(`/api/affinity/tasks/${taskId}/complete`).then(r => r.data)
 }
+
+// ── 充值 ──
+
+export function getPurchaseLink(): Promise<{
+  token: string
+  username: string
+  products: Array<{
+    name: string
+    price: number
+    credits: number
+    url: string
+  }>
+  afdianPage: string
+}> {
+  return businessClient.get('/api/afdian/purchase-link').then(r => r.data)
+}

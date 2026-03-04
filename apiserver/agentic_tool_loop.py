@@ -524,6 +524,28 @@ async def _execute_brave_search(call: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+async def execute_pre_search(query: str, count: int = 8) -> Optional[str]:
+    """
+    前置搜索：在主 LLM 调用前执行搜索，返回格式化的搜索结果文本。
+    复用 3-tier 搜索回退链：NagaBusiness → Brave → None
+    """
+    # 构造虚拟 call dict 供搜索函数使用
+    call = {"args": {"query": query, "count": count}}
+
+    if naga_auth.is_authenticated():
+        result = await _execute_naga_search(call)
+        if result.get("status") == "success" and result.get("result"):
+            return result["result"]
+
+    cfg = get_config()
+    if cfg.online_search.search_api_key:
+        result = await _execute_brave_search(call)
+        if result.get("status") == "success" and result.get("result"):
+            return result["result"]
+
+    return None  # 无可用搜索源，跳过前置搜索
+
+
 async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
     """直接调用 OpenClaw 工具，跳过 Agent LLM（通过 /tools/invoke）"""
     tool_name = call.get("tool_name", "")
@@ -784,6 +806,62 @@ def _format_sse_event(event_type: str, data: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Native Function Calling → Dispatch 格式转换
+# ---------------------------------------------------------------------------
+
+
+def _convert_native_to_dispatch(native_calls: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """将 OpenAI function call 格式转换为现有 dispatch 格式
+
+    命名约定: {agentType}__{service_name}__{tool_name}
+    - openclaw_tool__web_search → agentType="openclaw_tool", tool_name="web_search"
+    - mcp__weather_time__today_weather → agentType="mcp", service_name="weather_time", tool_name="today_weather"
+    - openclaw__agent → agentType="openclaw", task_type="message"
+    - live2d__action → agentType="live2d"
+    - naga_control__command → agentType="naga_control"
+    """
+    result = []
+    for call in native_calls:
+        name = call.get("name", "")
+        raw_args = call.get("arguments", "{}")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, TypeError):
+            args = {}
+
+        parts = name.split("__", 2)
+        agent_type = parts[0]
+
+        dispatch: Dict[str, Any] = {"agentType": agent_type}
+
+        if agent_type == "openclaw_tool" and len(parts) >= 2:
+            dispatch["tool_name"] = parts[1]
+            dispatch["args"] = args
+        elif agent_type == "mcp" and len(parts) >= 3:
+            dispatch["service_name"] = parts[1]
+            dispatch["tool_name"] = parts[2]
+            # MCP 工具参数直接展开到 dispatch 顶层（与现有格式一致）
+            dispatch.update(args)
+        elif agent_type == "openclaw":
+            dispatch["task_type"] = "message"
+            dispatch.update(args)
+        elif agent_type == "live2d":
+            dispatch.update(args)
+        elif agent_type == "naga_control":
+            dispatch.update(args)
+        else:
+            dispatch.update(args)
+
+        # 保存原始信息用于 tool message 回注
+        dispatch["_tool_call_id"] = call.get("id", "")
+        dispatch["_original_name"] = name
+        dispatch["_original_args"] = raw_args if isinstance(raw_args, str) else json.dumps(args, ensure_ascii=False)
+
+        result.append(dispatch)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Agentic Loop 核心
 # ---------------------------------------------------------------------------
 
@@ -793,6 +871,7 @@ async def run_agentic_loop(
     session_id: str,
     max_rounds: int = 5,
     model_override: Optional[Dict[str, str]] = None,
+    tools: Optional[List[Dict[str, Any]]] = None,
 ) -> AsyncGenerator[str, None]:
     """Agentic tool loop 核心。
 
@@ -807,6 +886,7 @@ async def run_agentic_loop(
         session_id: 会话ID
         max_rounds: 最大循环轮数
         model_override: 临时模型覆盖参数（用于视觉模型等场景）
+        tools: OpenAI function calling schemas（可选，传入时启用原生工具调用）
 
     Yields:
         SSE格式的data chunks
@@ -840,10 +920,15 @@ async def run_agentic_loop(
         # 2. 流式调用LLM，累积完整输出
         complete_text = ""
         complete_reasoning = ""
+        native_calls = None  # 原生 function calling 结果
         t_llm_start = _time.monotonic()
 
+        # 总结轮不传 tools（禁止再次工具调用）
+        round_tools = tools if round_num <= max_rounds else None
+
         async for chunk in llm_service.stream_chat_with_context(messages, get_config().api.temperature,
-                                                                 model_override=model_override):
+                                                                 model_override=model_override,
+                                                                 tools=round_tools):
             if chunk.startswith("data: "):
                 try:
                     data_str = chunk[6:].strip()
@@ -856,6 +941,13 @@ async def run_agentic_loop(
                             complete_text += chunk_text
                         elif chunk_type == "reasoning":
                             complete_reasoning += chunk_text
+                        elif chunk_type == "tool_calls_native":
+                            # 原生 function calling：完整 tool_calls JSON
+                            try:
+                                native_calls = json.loads(chunk_text)
+                            except (json.JSONDecodeError, TypeError):
+                                logger.warning(f"[AgenticLoop] native tool_calls 解析失败: {chunk_text[:200]}")
+                            continue  # 不透传此内部事件给前端
                 except Exception:
                     pass
 
@@ -863,15 +955,25 @@ async def run_agentic_loop(
             yield chunk
 
         # 3. 从完整输出中解析工具调用
+        #    优先使用 native tool calls，回退到文本解析（兼容期）
         t_llm_elapsed = _time.monotonic() - t_llm_start
         logger.info(
             f"[AgenticLoop] Round {round_num} LLM流式输出完成: {t_llm_elapsed:.2f}s, "
-            f"content={len(complete_text)}字, reasoning={len(complete_reasoning)}字"
+            f"content={len(complete_text)}字, reasoning={len(complete_reasoning)}字, "
+            f"native_calls={'yes' if native_calls else 'no'}"
         )
         logger.debug(
             f"[AgenticLoop] Round {round_num} complete_text ({len(complete_text)} chars): {complete_text[:300]!r}"
         )
-        clean_text, tool_calls = parse_tool_calls_from_text(complete_text)
+
+        use_native = False
+        if native_calls:
+            tool_calls = _convert_native_to_dispatch(native_calls)
+            clean_text = complete_text  # native 模式下 content 就是纯文本
+            use_native = True
+            logger.info(f"[AgenticLoop] Round {round_num}: 使用原生 function calling, {len(tool_calls)} 个工具调用")
+        else:
+            clean_text, tool_calls = parse_tool_calls_from_text(complete_text)
 
         # 4. 分离live2d和可执行调用
         actionable_calls = [tc for tc in tool_calls if tc.get("agentType") != "live2d"]
@@ -943,11 +1045,36 @@ async def run_agentic_loop(
         yield _format_sse_event("tool_results", {"results": result_summaries})
 
         # 9. 将本轮LLM输出 + 工具结果注入消息历史
-        #    保留工具调用前的简短说明文字，如果没有则用占位符
-        assistant_content = clean_text if clean_text else "(工具调用中)"
-        messages.append({"role": "assistant", "content": assistant_content})
-        tool_result_text = format_tool_results_for_llm(results)
-        messages.append({"role": "user", "content": tool_result_text})
+        if use_native:
+            # 标准 function calling 格式：assistant message + tool messages
+            assistant_msg = {
+                "role": "assistant",
+                "content": clean_text or None,
+                "tool_calls": [
+                    {
+                        "id": c.get("_tool_call_id", f"call_{i}"),
+                        "type": "function",
+                        "function": {
+                            "name": c.get("_original_name", ""),
+                            "arguments": c.get("_original_args", "{}"),
+                        },
+                    }
+                    for i, c in enumerate(actionable_calls)
+                ],
+            }
+            messages.append(assistant_msg)
+            for call_item, result_item in zip(actionable_calls, results):
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": call_item.get("_tool_call_id", ""),
+                    "content": result_item.get("result", ""),
+                })
+        else:
+            # 兼容期：旧格式 user message
+            assistant_content = clean_text if clean_text else "(工具调用中)"
+            messages.append({"role": "assistant", "content": assistant_content})
+            tool_result_text = format_tool_results_for_llm(results)
+            messages.append({"role": "user", "content": tool_result_text})
 
         # ★ 消息队列注入：在工具执行完毕、下一轮 LLM 调用前，注入排队消息
         # 合并到最后一条 user 消息中，避免连续多条 user 破坏角色交替
@@ -1022,9 +1149,10 @@ async def run_agentic_loop(
             ),
         })
 
-        # 最终总结轮：流式输出
+        # 最终总结轮：流式输出（不传 tools，禁止再发起工具调用）
         async for chunk in llm_service.stream_chat_with_context(messages, get_config().api.temperature,
-                                                                 model_override=model_override):
+                                                                 model_override=model_override,
+                                                                 tools=None):
             yield chunk
 
         yield _format_sse_event("round_end", {"round": max_rounds + 1, "has_more": False})

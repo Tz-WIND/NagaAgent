@@ -1,0 +1,531 @@
+#!/usr/bin/env python3
+"""
+工具 Schema 生成模块
+将 MCP manifests + OpenClaw 工具表 + Live2D + naga_control 转换为 OpenAI function calling 格式。
+
+命名约定：{agentType}__{service_name}__{tool_name}
+  - openclaw_tool__web_search
+  - mcp__weather_time__today_weather
+  - openclaw__agent
+  - live2d__action
+  - naga_control__command
+"""
+
+import json
+import logging
+from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# 缓存
+# ---------------------------------------------------------------------------
+
+_schema_cache: Optional[List[Dict[str, Any]]] = None
+
+
+def invalidate_schema_cache():
+    """MCP 注册变更时调用，清除缓存"""
+    global _schema_cache
+    _schema_cache = None
+
+
+def get_all_tool_schemas() -> List[Dict[str, Any]]:
+    """返回所有可用工具的 OpenAI function calling schemas"""
+    global _schema_cache
+    if _schema_cache is not None:
+        return _schema_cache
+
+    schemas: List[Dict[str, Any]] = []
+    schemas.extend(_build_openclaw_tool_schemas())
+    schemas.extend(_build_openclaw_agent_schema())
+    schemas.extend(_build_mcp_schemas())
+    schemas.extend(_build_live2d_schema())
+    schemas.extend(_build_naga_control_schema())
+
+    _schema_cache = schemas
+    logger.info(f"[ToolSchemas] 生成 {len(schemas)} 个工具 schema")
+    return schemas
+
+
+# ---------------------------------------------------------------------------
+# OpenClaw 直接工具（~30 个，从 agentic_tool_prompt.txt 的参数表硬编码）
+# ---------------------------------------------------------------------------
+
+_OPENCLAW_TOOLS = [
+    {
+        "name": "web_search",
+        "description": "联网搜索。搜索实时信息、新闻、价格、天气等。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "count": {"type": "integer", "description": "结果数量(1-10)", "default": 10},
+                "freshness": {"type": "string", "description": "时效过滤: pd(24h)/pw(周)/pm(月)/py(年)"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": "获取网页内容。抓取指定URL的页面内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "目标URL"},
+                "extractMode": {"type": "string", "description": "提取模式: markdown/text"},
+                "maxChars": {"type": "integer", "description": "最大字符数"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "browser",
+        "description": "浏览器自动化操作。启动、导航、截图、交互等。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: status/start/stop/open/snapshot/screenshot/navigate/act等"},
+                "targetUrl": {"type": "string", "description": "目标URL"},
+                "ref": {"type": "string", "description": "元素引用"},
+                "selector": {"type": "string", "description": "CSS选择器"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "exec",
+        "description": "执行shell命令。运行系统命令并返回输出。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "要执行的命令"},
+                "workdir": {"type": "string", "description": "工作目录"},
+                "timeout": {"type": "integer", "description": "超时秒数"},
+                "background": {"type": "boolean", "description": "是否后台运行"},
+                "pty": {"type": "boolean", "description": "是否使用伪终端"},
+            },
+            "required": ["command"],
+        },
+    },
+    {
+        "name": "process",
+        "description": "管理exec进程。查看、轮询、终止进程。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: list/poll/log/write/kill等"},
+                "sessionId": {"type": "string", "description": "会话ID"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "read",
+        "description": "读取文件内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "文件路径"},
+            },
+            "required": ["file_path"],
+        },
+    },
+    {
+        "name": "write",
+        "description": "写入文件内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "文件路径"},
+                "content": {"type": "string", "description": "文件内容"},
+            },
+            "required": ["file_path", "content"],
+        },
+    },
+    {
+        "name": "edit",
+        "description": "编辑文件（查找替换）。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "file_path": {"type": "string", "description": "文件路径"},
+                "old_string": {"type": "string", "description": "要替换的文本"},
+                "new_string": {"type": "string", "description": "替换后的文本"},
+            },
+            "required": ["file_path", "old_string", "new_string"],
+        },
+    },
+    {
+        "name": "grep",
+        "description": "搜索文件内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "搜索模式"},
+                "path": {"type": "string", "description": "搜索路径"},
+                "include": {"type": "string", "description": "文件类型过滤"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "find",
+        "description": "查找文件。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "文件名模式"},
+                "path": {"type": "string", "description": "搜索路径"},
+            },
+            "required": ["pattern"],
+        },
+    },
+    {
+        "name": "ls",
+        "description": "列出目录内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "目录路径"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "image",
+        "description": "分析图片内容。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "图片路径或URL"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "memory_search",
+        "description": "语义搜索记忆。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "maxResults": {"type": "integer", "description": "最大结果数"},
+                "minScore": {"type": "number", "description": "最低相关度分数"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "memory_get",
+        "description": "读取记忆片段。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "记忆路径"},
+                "from": {"type": "integer", "description": "起始行号"},
+                "lines": {"type": "integer", "description": "行数"},
+            },
+            "required": ["path"],
+        },
+    },
+    {
+        "name": "cron",
+        "description": "定时任务管理。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: status/list/add/update/remove/run/wake等"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "message",
+        "description": "发消息到渠道。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "消息内容"},
+                "channel": {"type": "string", "description": "目标渠道"},
+                "target": {"type": "string", "description": "目标用户"},
+                "media": {"type": "string", "description": "媒体附件"},
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "tts",
+        "description": "文字转语音。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要转换的文本"},
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "sessions_spawn",
+        "description": "启动子Agent会话。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "任务描述"},
+                "label": {"type": "string", "description": "会话标签"},
+                "model": {"type": "string", "description": "使用的模型"},
+                "agentId": {"type": "string", "description": "Agent ID"},
+            },
+            "required": ["task"],
+        },
+    },
+    {
+        "name": "sessions_list",
+        "description": "列出所有会话。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "kinds": {"type": "string", "description": "会话类型过滤"},
+                "limit": {"type": "integer", "description": "数量限制"},
+                "messageLimit": {"type": "integer", "description": "消息数量限制"},
+            },
+        },
+    },
+    {
+        "name": "sessions_history",
+        "description": "获取会话历史。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sessionKey": {"type": "string", "description": "会话Key"},
+                "limit": {"type": "integer", "description": "数量限制"},
+            },
+            "required": ["sessionKey"],
+        },
+    },
+    {
+        "name": "sessions_send",
+        "description": "向会话发送消息。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "消息内容"},
+                "sessionKey": {"type": "string", "description": "会话Key"},
+                "label": {"type": "string", "description": "标签"},
+            },
+            "required": ["message"],
+        },
+    },
+    {
+        "name": "session_status",
+        "description": "获取会话状态。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "sessionKey": {"type": "string", "description": "会话Key"},
+            },
+        },
+    },
+    {
+        "name": "agents_list",
+        "description": "列出可用Agent。",
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "canvas",
+        "description": "节点画布控制。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: present/hide/navigate/eval/snapshot等"},
+                "node": {"type": "string", "description": "节点标识"},
+            },
+            "required": ["action", "node"],
+        },
+    },
+    {
+        "name": "nodes",
+        "description": "节点发现与控制。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: status/describe/notify/camera_snap/run等"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "gateway",
+        "description": "网关管理。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "description": "操作: restart/config.get/config.patch等"},
+            },
+            "required": ["action"],
+        },
+    },
+]
+
+
+def _build_openclaw_tool_schemas() -> List[Dict[str, Any]]:
+    """构建 OpenClaw 直接工具的 function calling schemas"""
+    schemas = []
+    for tool in _OPENCLAW_TOOLS:
+        schemas.append({
+            "type": "function",
+            "function": {
+                "name": f"openclaw_tool__{tool['name']}",
+                "description": tool["description"],
+                "parameters": tool["parameters"],
+            },
+        })
+    return schemas
+
+
+# ---------------------------------------------------------------------------
+# OpenClaw Agent 模式（单个 message 参数）
+# ---------------------------------------------------------------------------
+
+
+def _build_openclaw_agent_schema() -> List[Dict[str, Any]]:
+    """构建 OpenClaw Agent 模式 schema（复杂多步任务）"""
+    return [{
+        "type": "function",
+        "function": {
+            "name": "openclaw__agent",
+            "description": "Agent模式：启动独立AI推理执行复杂多步任务（如研究、写报告、多工具协作）。简单任务请用具体工具。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "完整的任务描述"},
+                },
+                "required": ["message"],
+            },
+        },
+    }]
+
+
+# ---------------------------------------------------------------------------
+# MCP 本地工具（从 MANIFEST_CACHE 动态生成）
+# ---------------------------------------------------------------------------
+
+
+def _build_mcp_schemas() -> List[Dict[str, Any]]:
+    """从 MCP 注册表动态生成 function calling schemas"""
+    schemas = []
+    try:
+        from mcpserver.mcp_registry import MANIFEST_CACHE, auto_register_mcp
+        auto_register_mcp()
+
+        for service_name, manifest in MANIFEST_CACHE.items():
+            tools = manifest.get("capabilities", {}).get("invocationCommands", [])
+            for tool in tools:
+                command = tool.get("command", "")
+                if not command:
+                    continue
+
+                description = tool.get("description", "").split("\n")[0]  # 首行
+                example = tool.get("example", "")
+
+                # 从 example JSON 推断参数
+                params_properties = {}
+                params_required = []
+                if example:
+                    try:
+                        example_obj = json.loads(example)
+                        for key, val in example_obj.items():
+                            if key in ("tool_name", "service_name", "agentType"):
+                                continue  # 跳过元字段
+                            param_type = "string"
+                            if isinstance(val, bool):
+                                param_type = "boolean"
+                            elif isinstance(val, int):
+                                param_type = "integer"
+                            elif isinstance(val, float):
+                                param_type = "number"
+                            params_properties[key] = {"type": param_type}
+                            # example 中出现的参数都视为可选；有值的视为必填
+                            if val and val != "...":
+                                params_required.append(key)
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+
+                func_name = f"mcp__{service_name}__{command}"
+                schema = {
+                    "type": "function",
+                    "function": {
+                        "name": func_name,
+                        "description": f"[MCP/{service_name}] {description}",
+                        "parameters": {
+                            "type": "object",
+                            "properties": params_properties,
+                        },
+                    },
+                }
+                if params_required:
+                    schema["function"]["parameters"]["required"] = params_required
+
+                schemas.append(schema)
+    except Exception as e:
+        logger.warning(f"[ToolSchemas] MCP schema 生成失败: {e}")
+
+    return schemas
+
+
+# ---------------------------------------------------------------------------
+# Live2D 动作
+# ---------------------------------------------------------------------------
+
+
+def _build_live2d_schema() -> List[Dict[str, Any]]:
+    """构建 Live2D 动作 schema"""
+    return [{
+        "type": "function",
+        "function": {
+            "name": "live2d__action",
+            "description": "Live2D虚拟形象动作。根据对话情感选择合适的表情动作。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "动作名称",
+                        "enum": ["normal", "happy", "enjoy", "sad", "surprise"],
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    }]
+
+
+# ---------------------------------------------------------------------------
+# Naga 自身控制
+# ---------------------------------------------------------------------------
+
+
+def _build_naga_control_schema() -> List[Dict[str, Any]]:
+    """构建 naga_control schema"""
+    return [{
+        "type": "function",
+        "function": {
+            "name": "naga_control__command",
+            "description": "控制Naga自身功能：语音开关、模型切换、角色切换、音乐播放、记忆管理等。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "description": "操作名称: get_config/update_config/get_status/toggle_voice/toggle_live2d/set_model/list_characters/switch_character/list_sessions/clear_session/list_skills/toggle_skill/list_mcp_services/start_travel/stop_travel/get_memory_stats/play_music/send_notification",
+                    },
+                    "params": {
+                        "type": "object",
+                        "description": "操作参数（不同操作所需参数不同）",
+                        "additionalProperties": True,
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    }]

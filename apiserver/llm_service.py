@@ -215,18 +215,20 @@ class LLMService:
         )
 
     async def stream_chat_with_context(self, messages: List[Dict], temperature: float = 0.7,
-                                       model_override: Optional[Dict[str, str]] = None):
-        """带上下文的流式聊天调用，支持 reasoning_content 交织输出
+                                       model_override: Optional[Dict[str, str]] = None,
+                                       tools: Optional[List[Dict]] = None):
+        """带上下文的流式聊天调用，支持 reasoning_content 交织输出 + 原生 function calling
 
         Args:
             messages: 对话消息列表
             temperature: 生成温度
             model_override: 临时模型覆盖参数，用于切换到视觉模型等场景
                 格式: {"model": "glm-4.5v", "api_base": "https://...", "api_key": "..."}
+            tools: OpenAI function calling schemas（可选）
 
         Yields:
             格式为 "data: <json>\n\n" 的 SSE 事件
-            JSON 结构: {"type": "content"|"reasoning", "text": "..."}
+            JSON 结构: {"type": "content"|"reasoning"|"tool_calls_native", "text": "..."}
         """
         if not self._initialized:
             self._initialize_client()
@@ -279,17 +281,25 @@ class LLMService:
                              f"api_key_prefix={str(llm_params.get('api_key', ''))[:20]}... "
                              f"api_base={llm_params.get('api_base')}")
 
-                response = await acompletion(
-                    model=model_name,
-                    messages=messages,
-                    temperature=temperature,
-                    max_tokens=get_config().api.max_tokens if hasattr(get_config().api, "max_tokens") else None,
-                    stream=True,
-                    timeout=120,           # 连接+首字节超时 120s
-                    stream_timeout=120,    # 流式传输 chunk 间超时 120s
-                    num_retries=0,         # 禁用 litellm 内部重试/fallback，避免 MidStreamFallbackError
+                call_params = {
+                    "model": model_name,
+                    "messages": messages,
+                    "temperature": temperature,
+                    "max_tokens": get_config().api.max_tokens if hasattr(get_config().api, "max_tokens") else None,
+                    "stream": True,
+                    "timeout": 120,
+                    "stream_timeout": 120,
+                    "num_retries": 0,
                     **llm_params
-                )
+                }
+                if tools:
+                    call_params["tools"] = tools
+                    call_params["parallel_tool_calls"] = True
+
+                response = await acompletion(**call_params)
+
+                # 累积器：tool_calls 增量拼接
+                pending_tool_calls = {}  # {index: {id, name, arguments}}
 
                 async for chunk in response:
                     if not chunk.choices:
@@ -306,6 +316,27 @@ class LLMService:
                     content = getattr(delta, "content", None)
                     if content:
                         yield self._format_sse_chunk("content", content)
+
+                    # 处理 tool_calls delta（原生 function calling）
+                    tc_deltas = getattr(delta, "tool_calls", None)
+                    if tc_deltas:
+                        for tc in tc_deltas:
+                            idx = tc.index
+                            if idx not in pending_tool_calls:
+                                pending_tool_calls[idx] = {"id": "", "name": "", "arguments": ""}
+                            if tc.id:
+                                pending_tool_calls[idx]["id"] = tc.id
+                            if tc.function:
+                                if tc.function.name:
+                                    pending_tool_calls[idx]["name"] = tc.function.name
+                                if tc.function.arguments:
+                                    pending_tool_calls[idx]["arguments"] += tc.function.arguments
+
+                # 流结束后，如果有 tool_calls，yield 一个完整事件
+                if pending_tool_calls:
+                    import json
+                    calls = [pending_tool_calls[i] for i in sorted(pending_tool_calls)]
+                    yield self._format_sse_chunk("tool_calls_native", json.dumps(calls, ensure_ascii=False))
 
                 # 流式响应正常完成，跳出重试循环
                 return
