@@ -132,7 +132,8 @@ export function createWindow(): BrowserWindow {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
   }
   else {
-    mainWindow.loadFile(join(__dirname, '../dist/index.html'))
+    // 打包模式：通过 naga-app:// 协议加载，支持热补丁覆盖
+    mainWindow.loadURL('naga-app://dist/index.html')
   }
 
   return mainWindow
