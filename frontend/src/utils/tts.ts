@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { ACCESS_TOKEN } from '@/api'
 import API from '@/api/core'
 
@@ -8,6 +8,10 @@ let maxDurationTimer: number | null = null
 let abortController: AbortController | null = null
 
 const MAX_PLAYBACK_DURATION = 30000 // 30秒最大播放时长
+
+// ── Progressive TTS Queue ──
+const _queue: string[] = []
+let _processingQueue = false
 
 /** 移除 markdown 代码块（```...```）和行内代码（`...`），只保留自然语言文本 */
 function stripCodeBlocks(text: string): string {
@@ -19,7 +23,7 @@ function stripCodeBlocks(text: string): string {
 }
 
 export function speak(text: string): Promise<void> {
-  stop()
+  _stopCurrent()
 
   // 移除代码块，只朗读自然语言
   const cleanText = stripCodeBlocks(text)
@@ -77,10 +81,10 @@ export function speak(text: string): Promise<void> {
       cleanup(objectUrl)
     }
 
-    // 设置30秒最大播放时长定时器
+    // 设置30秒最大播放时长定时器（仅跳过当前句，不清空队列）
     maxDurationTimer = window.setTimeout(() => {
       if (audio.value) {
-        stop()
+        _stopCurrent()
       }
     }, MAX_PLAYBACK_DURATION)
 
@@ -106,23 +110,59 @@ function cleanup(objectUrl?: string) {
   audio.value = null
 }
 
-export function stop() {
-  // 取消正在进行的 fetch 请求
+/** 停止当前播放（不清理队列，内部使用） */
+function _stopCurrent() {
   if (abortController) {
     abortController.abort()
     abortController = null
   }
-
-  // 清除定时器
   if (maxDurationTimer) {
     clearTimeout(maxDurationTimer)
     maxDurationTimer = null
   }
-
   if (audio.value) {
     audio.value.pause()
     audio.value = null
   }
-  // 立即闭嘴
   isPlaying.value = false
+}
+
+/** 停止所有 TTS（当前播放 + 清空队列） */
+export function stop() {
+  _queue.length = 0
+  _processingQueue = false
+  _stopCurrent()
+}
+
+/** 逐句入队，按顺序播放（流式 TTS 用） */
+export function queueSpeak(text: string): void {
+  const clean = stripCodeBlocks(text).trim()
+  if (!clean) return
+  _queue.push(clean)
+  if (!_processingQueue) _drainQueue()
+}
+
+/** 清空待播放队列（不中断当前播放） */
+export function clearSpeakQueue(): void {
+  _queue.length = 0
+}
+
+async function _drainQueue(): Promise<void> {
+  if (_queue.length === 0) { _processingQueue = false; return }
+  _processingQueue = true
+  const text = _queue.shift()!
+  try {
+    await speak(text)
+    // 等待当前音频播放完毕
+    if (isPlaying.value) {
+      await new Promise<void>((resolve) => {
+        const unwatch = watch(isPlaying, (val) => {
+          if (!val) { unwatch(); resolve() }
+        })
+        setTimeout(() => { unwatch(); resolve() }, 35000)
+      })
+    }
+  }
+  catch { /* 当前句失败，继续下一句 */ }
+  _drainQueue()
 }
