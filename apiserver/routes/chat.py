@@ -135,9 +135,8 @@ async def chat(request: ChatRequest):
             session_id=session_id, system_prompt=system_prompt, current_message=effective_message
         )
 
-        # RAG 记忆召回 + 意图路由 并行执行
+        # RAG 记忆召回
         rag_section = ""
-        route_result = None
 
         async def _query_rag():
             nonlocal rag_section
@@ -164,23 +163,14 @@ async def chat(request: ChatRequest):
             except Exception as e:
                 logger.debug(f"[RAG] 记忆召回失败（不影响对话）: {e}")
 
-        async def _classify():
-            nonlocal route_result
-            try:
-                from apiserver.intent_router import classify_intent
-                route_result = await classify_intent(messages, request.message)
-            except Exception as e:
-                logger.debug(f"[IntentRouter] 意图分类失败，回退全量: {e}")
+        await _query_rag()
 
-        await asyncio.gather(_query_rag(), _classify())
-
-        # 构建附加知识并追加为 messages 末尾的 system 消息
+        # 构建附加知识（工具走原生 function calling，不再文本注入）
         supplement = build_context_supplement(
             include_skills=True,
-            include_tool_instructions=True,
+            include_tool_instructions=False,
             skill_name=request.skill,
             rag_section=rag_section,
-            route_result=route_result,
         )
         messages.append({"role": "system", "content": supplement})
 
@@ -254,10 +244,9 @@ async def chat_stream(request: ChatRequest):
                 session_id=session_id, system_prompt=system_prompt, current_message=effective_message
             )
 
-            # ====== RAG 记忆召回 + 意图路由 并行执行 ======
+            # ====== RAG 记忆召回 ======
             yield 'data: {"type":"status","text":"回忆中..."}\n\n'
             rag_section = ""
-            route_result = None
 
             async def _query_rag_stream():
                 nonlocal rag_section
@@ -284,26 +273,21 @@ async def chat_stream(request: ChatRequest):
                 except Exception as e:
                     logger.debug(f"[RAG] 记忆召回失败（不影响对话）: {e}")
 
-            async def _classify_stream():
-                nonlocal route_result
-                try:
-                    from apiserver.intent_router import classify_intent
-                    route_result = await classify_intent(messages, request.message)
-                except Exception as e:
-                    logger.debug(f"[IntentRouter] 意图分类失败，回退全量: {e}")
+            await _query_rag_stream()
 
-            await asyncio.gather(_query_rag_stream(), _classify_stream())
-
-            # 构建附加知识并追加为 messages 末尾的 system 消息
+            # 构建附加知识（工具走原生 function calling，不再文本注入）
             yield 'data: {"type":"status","text":"组织上下文"}\n\n'
             supplement = build_context_supplement(
                 include_skills=True,
-                include_tool_instructions=True,
+                include_tool_instructions=False,
                 skill_name=request.skill,
                 rag_section=rag_section,
-                route_result=route_result,
             )
             messages.append({"role": "system", "content": supplement})
+
+            # 获取工具 schemas（原生 function calling）
+            from apiserver.tool_schemas import get_all_tool_schemas
+            tools = get_all_tool_schemas()
 
             # 如果携带截屏图片，将最后一条 user 消息改为多模态格式（OpenAI vision 兼容）
             if request.images:
@@ -396,7 +380,7 @@ async def chat_stream(request: ChatRequest):
             is_tool_event = False  # 标记当前是否在处理工具事件（不送TTS）
             was_compressed = False  # 运行时是否执行过上下文压缩（用于保存 info 标记）
 
-            async for chunk in run_agentic_loop(messages, session_id, model_override=model_override):
+            async for chunk in run_agentic_loop(messages, session_id, model_override=model_override, tools=tools):
                 if chunk.startswith("data: "):
                     try:
                         import json as json_module

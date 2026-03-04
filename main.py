@@ -21,6 +21,39 @@ if os.path.exists("_internal"):
 # PyInstaller打包后的程序会设置sys.frozen属性
 IS_PACKAGED = getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')
 
+# ── 热补丁加载 ──
+# 打包环境下，优先从补丁目录加载 .pyc/.py 模块，实现不重装的代码热更新
+# 补丁目录由 Electron 通过环境变量 NAGA_PATCH_DIR 传入
+_patch_dir = os.environ.get("NAGA_PATCH_DIR", "")
+if _patch_dir and os.path.isdir(_patch_dir):
+    sys.path.insert(0, _patch_dir)
+    print(f"[HotPatch] 补丁目录已加载: {_patch_dir}", flush=True)
+elif IS_PACKAGED:
+    # 打包环境下的默认补丁路径（与 Electron userData 对齐）
+    # Electron productName 是 "Naga Agent"，userData 目录名因平台而异
+    _candidate_dirs = []
+    if sys.platform == "win32":
+        _appdata = os.environ.get("APPDATA", "")
+        _candidate_dirs = [
+            os.path.join(_appdata, "Naga Agent", "patches", "backend"),
+            os.path.join(_appdata, "naga-agent", "patches", "backend"),
+        ]
+    elif sys.platform == "darwin":
+        _candidate_dirs = [
+            os.path.expanduser("~/Library/Application Support/Naga Agent/patches/backend"),
+            os.path.expanduser("~/Library/Application Support/naga-agent/patches/backend"),
+        ]
+    else:
+        _candidate_dirs = [
+            os.path.expanduser("~/.config/Naga Agent/patches/backend"),
+            os.path.expanduser("~/.config/naga-agent/patches/backend"),
+        ]
+    for _default_patch in _candidate_dirs:
+        if os.path.isdir(_default_patch):
+            sys.path.insert(0, _default_patch)
+            print(f"[HotPatch] 补丁目录已加载: {_default_patch}", flush=True)
+            break
+
 # 标准库导入
 import asyncio
 import json as _json

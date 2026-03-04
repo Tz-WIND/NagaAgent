@@ -573,7 +573,7 @@ class OpenClawConfig(BaseModel):
 class NagaBusinessConfig(BaseModel):
     """NagaBusiness 服务配置（娜迦网络）"""
 
-    forum_api_url: str = Field(default="https://business.naga.ac", description="NagaBusiness API 地址")
+    forum_api_url: str = Field(default="http://62.234.131.204:30031", description="NagaBusiness API 地址")
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 
@@ -757,6 +757,7 @@ def build_context_supplement(
     skill_name: Optional[str] = None,
     rag_section: str = "",
     route_result=None,
+    search_section: str = "",
 ) -> str:
     """
     构建附加知识内容（追加在 messages 末尾的独立 system 消息）
@@ -770,13 +771,11 @@ def build_context_supplement(
 
     Args:
         include_skills: 是否包含技能列表
-        include_tool_instructions: 是否注入工具调用指令（agentic loop 模式）
+        include_tool_instructions: 是否注入工具调用指令（原生 function calling 模式下为 False）
         skill_name: 用户主动选择的技能名称
         rag_section: RAG 记忆召回内容（由 api_server 传入）
-        route_result: IntentRouter 路由结果（RouteResult 或 None）
-            - None → 回退到当前行为（全量注入，向后兼容）
-            - needs_tools == False → 跳过工具指令和技能列表
-            - 有值 → 只注入路由指定的工具/服务文档
+        route_result: IntentRouter 路由结果（已废弃，保留参数签名向后兼容）
+        search_section: 前置搜索结果内容（由 api_server 传入）
 
     Returns:
         渲染后的附加知识内容
@@ -790,67 +789,33 @@ def build_context_supplement(
         f"当前星期：{current_time.strftime('%A')}"
     )
 
-    # ── 根据 route_result 决定是否跳过工具/技能 ──
-    # route_result is None → 全量（向后兼容）
-    # route_result.needs_tools == False → 闲聊，跳过工具和技能
-    skip_tools = False
-    if route_result is not None and not route_result.needs_tools:
-        skip_tools = True
-
     # 技能元数据列表（仅在未主动选择技能时注入）
     skills_section = ""
-    if not skip_tools and not skill_name and include_skills:
-        if route_result is not None and route_result.needed_skills:
-            # 路由指定的技能 → 注入完整技能指令（而非仅元数据）
-            try:
-                from system.skill_manager import get_skill_manager, load_skill
-                mgr = get_skill_manager()
-                parts = []
-                for sname in route_result.needed_skills:
-                    instructions = load_skill(sname)
-                    if instructions:
-                        parts.append(instructions)
-                if parts:
-                    skills_section = "\n\n" + "\n\n".join(parts)
-            except ImportError:
-                pass
-        else:
-            # route_result is None → 全量注入技能列表
-            try:
-                from system.skill_manager import get_skills_prompt
+    if not skill_name and include_skills:
+        try:
+            from system.skill_manager import get_skills_prompt
 
-                skills_prompt = get_skills_prompt()
-                if skills_prompt:
-                    skills_section = "\n\n" + skills_prompt
-            except ImportError:
-                pass
+            skills_prompt = get_skills_prompt()
+            if skills_prompt:
+                skills_section = "\n\n" + skills_prompt
+        except ImportError:
+            pass
 
-    # 工具调用指令（始终注入工具表，路由只控制 MCP 服务文档的详略）
+    # 工具调用指令（include_tool_instructions=False 时跳过，原生 function calling 不需要）
     tool_instructions = ""
     if include_tool_instructions:
         _sys_prompts = Path(__file__).parent / "prompts"
         tool_prompt_file = _sys_prompts / "agentic_tool_prompt.txt"
         raw_template = tool_prompt_file.read_text(encoding="utf-8") if tool_prompt_file.exists() else ""
 
-        # 获取 MCP 服务文档（skip_tools 时不注入 MCP 详情，但保留工具表）
         available_mcp_tools = ""
-        if not skip_tools:
-            if route_result is not None and route_result.needed_mcp:
-                try:
-                    from mcpserver.mcp_registry import auto_register_mcp
-                    auto_register_mcp()
-                    from mcpserver.mcp_manager import get_mcp_manager
-                    available_mcp_tools = get_mcp_manager().format_services_by_names(route_result.needed_mcp) or ""
-                except Exception:
-                    pass
-            elif route_result is None:
-                try:
-                    from mcpserver.mcp_registry import auto_register_mcp
-                    auto_register_mcp()
-                    from mcpserver.mcp_manager import get_mcp_manager
-                    available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
-                except Exception:
-                    available_mcp_tools = "（MCP服务未启动）"
+        try:
+            from mcpserver.mcp_registry import auto_register_mcp
+            auto_register_mcp()
+            from mcpserver.mcp_manager import get_mcp_manager
+            available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
+        except Exception:
+            available_mcp_tools = "（MCP服务未启动）"
 
         tool_instructions = "\n\n" + raw_template.replace("{available_mcp_tools}", available_mcp_tools)
 
@@ -878,6 +843,7 @@ def build_context_supplement(
     result = raw_template.replace("{time_info}", time_info)
     result = result.replace("{skills_section}", skills_section)
     result = result.replace("{tool_instructions}", tool_instructions)
+    result = result.replace("{search_section}", search_section)
     result = result.replace("{rag_section}", rag_section)
     result = result.replace("{skill_active_section}", skill_active_section)
 
