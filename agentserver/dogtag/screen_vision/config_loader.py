@@ -1,5 +1,5 @@
 """
-Proactive Vision 配置文件加载和保存
+屏幕感知配置文件加载和保存
 """
 
 import json
@@ -67,7 +67,7 @@ def get_default_config() -> ProactiveVisionConfig:
         inactive_threshold_minutes=10,
         notification_sound=True,
         notification_duration=5,
-        # 差异检测配置（新增）
+        # 差异检测配置
         diff_detection_enabled=True,
         diff_detection_algorithm="phash",
         diff_threshold=8,
@@ -79,7 +79,7 @@ def load_proactive_config() -> ProactiveVisionConfig:
     config_path = get_config_path()
 
     if not config_path.exists():
-        logger.info(f"[ProactiveVision] 配置文件不存在，创建默认配置: {config_path}")
+        logger.info(f"[ScreenVision] 配置文件不存在，创建默认配置: {config_path}")
         default_config = get_default_config()
         save_proactive_config(default_config)
         return default_config
@@ -88,10 +88,10 @@ def load_proactive_config() -> ProactiveVisionConfig:
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
         config = ProactiveVisionConfig(**config_data)
-        logger.info(f"[ProactiveVision] 配置加载成功: enabled={config.enabled}")
+        logger.info(f"[ScreenVision] 配置加载成功: enabled={config.enabled}")
         return config
     except Exception as e:
-        logger.error(f"[ProactiveVision] 配置加载失败: {e}，使用默认配置")
+        logger.error(f"[ScreenVision] 配置加载失败: {e}，使用默认配置")
         return get_default_config()
 
 
@@ -107,10 +107,10 @@ def save_proactive_config(config: ProactiveVisionConfig) -> bool:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config.model_dump(), f, ensure_ascii=False, indent=2)
 
-        logger.info(f"[ProactiveVision] 配置保存成功: {config_path}")
+        logger.info(f"[ScreenVision] 配置保存成功: {config_path}")
         return True
     except Exception as e:
-        logger.error(f"[ProactiveVision] 配置保存失败: {e}")
+        logger.error(f"[ScreenVision] 配置保存失败: {e}")
         return False
 
 
@@ -123,7 +123,7 @@ def update_proactive_config(**kwargs) -> Optional[ProactiveVisionConfig]:
         if hasattr(config, key):
             setattr(config, key, value)
         else:
-            logger.warning(f"[ProactiveVision] 未知配置项: {key}")
+            logger.warning(f"[ScreenVision] 未知配置项: {key}")
 
     # 保存
     if save_proactive_config(config):

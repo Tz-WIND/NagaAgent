@@ -1,5 +1,5 @@
 """
-Proactive Vision 配置模型
+屏幕感知配置模型
 """
 
 from pydantic import BaseModel, Field

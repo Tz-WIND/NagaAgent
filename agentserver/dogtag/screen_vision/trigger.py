@@ -1,5 +1,5 @@
 """
-Proactive Vision 触发器
+屏幕感知触发器
 负责管理冷却时间和发送主动消息
 """
 
@@ -18,6 +18,21 @@ class ProactiveVisionTrigger:
 
     def __init__(self):
         self._rule_last_triggered: Dict[str, float] = {}
+        self._http_client: Optional["httpx.AsyncClient"] = None
+
+    def _get_http_client(self) -> "httpx.AsyncClient":
+        """获取或创建共享 httpx 客户端"""
+        import httpx
+
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=5.0, proxy=None)
+        return self._http_client
+
+    async def close(self):
+        """关闭共享 httpx 客户端"""
+        if self._http_client and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     async def send_proactive_message(self, rule: TriggerRule, context: str) -> bool:
         """发送主动消息到前端，返回是否成功"""
@@ -27,7 +42,7 @@ class ProactiveVisionTrigger:
 
         # 检查冷却时间
         if not self._can_trigger(rule):
-            logger.debug(f"[ProactiveVision] 规则 {rule.name} 处于冷却中")
+            logger.debug(f"[ScreenVision] 规则 {rule.name} 处于冷却中")
             return False
 
         # 渲染消息模板
@@ -47,10 +62,10 @@ class ProactiveVisionTrigger:
         if success:
             # 更新触发时间
             self._rule_last_triggered[rule.rule_id] = time.time()
-            logger.info(f"[ProactiveVision] 触发规则: {rule.name}")
+            logger.info(f"[ScreenVision] 触发规则: {rule.name}")
             return True
         else:
-            logger.warning(f"[ProactiveVision] 规则 {rule.name} 消息发送失败")
+            logger.warning(f"[ScreenVision] 规则 {rule.name} 消息发送失败")
             return False
 
     def _can_trigger(self, rule: TriggerRule) -> bool:
@@ -63,32 +78,30 @@ class ProactiveVisionTrigger:
 
     async def _route_via_queue(self, message: str, source: str) -> bool:
         """通过 api_server 的消息队列路由（设置临时屏幕槽 + 对话中入队）"""
-        import httpx
         from system.config import get_server_port
 
         api_port = get_server_port("api_server")
         try:
-            async with httpx.AsyncClient(timeout=5.0, proxy=None) as client:
-                resp = await client.post(
-                    f"http://localhost:{api_port}/queue/push",
-                    json={
-                        "content": message,
-                        "source": "screen_monitor",
-                        "metadata": {"rule": source},
-                    },
-                )
-                if resp.status_code == 200:
-                    result = resp.json()
-                    logger.debug(f"[ProactiveVision] 消息队列路由: {result.get('status')}")
-                    return True
-                return False
+            client = self._get_http_client()
+            resp = await client.post(
+                f"http://localhost:{api_port}/queue/push",
+                json={
+                    "content": message,
+                    "source": "screen_monitor",
+                    "metadata": {"rule": source},
+                },
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                logger.debug(f"[ScreenVision] 消息队列路由: {result.get('status')}")
+                return True
+            return False
         except Exception as e:
-            logger.warning(f"[ProactiveVision] 消息队列路由失败: {e}")
+            logger.warning(f"[ScreenVision] 消息队列路由失败: {e}")
             return False
 
     async def _notify_frontend(self, message: str, source: str) -> bool:
         """通知前端显示主动消息（优先使用WebSocket，降级HTTP）"""
-        import httpx
         from system.config import get_server_port
 
         api_port = get_server_port("api_server")
@@ -99,36 +112,34 @@ class ProactiveVisionTrigger:
             return True
 
         # WebSocket失败，降级到HTTP POST
-        logger.debug("[ProactiveVision] WebSocket推送失败，降级到HTTP")
+        logger.debug("[ScreenVision] WebSocket推送失败，降级到HTTP")
         return await self._try_http_push(message, source, api_port)
 
     async def _try_websocket_push(self, message: str, source: str, api_port: int) -> bool:
         """尝试通过WebSocket推送消息"""
         try:
-            import httpx
-
             # 调用API Server的内部接口触发WebSocket广播
             url = f"http://127.0.0.1:{api_port}/ws/broadcast"
             payload = {
                 "type": "proactive_message",
                 "content": message,
-                "source": f"ProactiveVision:{source}",
+                "source": f"ScreenVision:{source}",
                 "timestamp": time.time()
             }
 
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    result = resp.json()
-                    sent_count = result.get("sent_count", 0)
-                    if sent_count > 0:
-                        logger.debug(f"[ProactiveVision] WebSocket推送成功: {sent_count}个连接")
-                        return True
-                    else:
-                        logger.debug("[ProactiveVision] 无活跃WebSocket连接")
-                        return False
+            client = self._get_http_client()
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                result = resp.json()
+                sent_count = result.get("sent_count", 0)
+                if sent_count > 0:
+                    logger.debug(f"[ScreenVision] WebSocket推送成功: {sent_count}个连接")
+                    return True
+                else:
+                    logger.debug("[ScreenVision] 无活跃WebSocket连接")
+                    return False
         except Exception as e:
-            logger.debug(f"[ProactiveVision] WebSocket推送失败: {e}")
+            logger.debug(f"[ScreenVision] WebSocket推送失败: {e}")
             return False
 
     async def _try_http_push(self, message: str, source: str, api_port: int) -> bool:
@@ -138,34 +149,34 @@ class ProactiveVisionTrigger:
         url = f"http://127.0.0.1:{api_port}/proactive_message"
         payload = {
             "message": message,
-            "source": f"ProactiveVision:{source}",
+            "source": f"ScreenVision:{source}",
             "timestamp": time.time()
         }
 
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    logger.debug(f"[ProactiveVision] HTTP推送成功: {message[:50]}...")
-                    return True
-                else:
-                    logger.warning(f"[ProactiveVision] HTTP响应异常: {resp.status_code}")
-                    return False
+            client = self._get_http_client()
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                logger.debug(f"[ScreenVision] HTTP推送成功: {message[:50]}...")
+                return True
+            else:
+                logger.warning(f"[ScreenVision] HTTP响应异常: {resp.status_code}")
+                return False
         except httpx.ConnectError:
-            logger.warning("[ProactiveVision] 无法连接到API服务器，请检查服务是否启动")
+            logger.warning("[ScreenVision] 无法连接到API服务器，请检查服务是否启动")
             return False
         except httpx.TimeoutException:
-            logger.warning("[ProactiveVision] HTTP推送超时")
+            logger.warning("[ScreenVision] HTTP推送超时")
             return False
         except Exception as e:
-            logger.error(f"[ProactiveVision] HTTP推送失败: {e}")
+            logger.error(f"[ScreenVision] HTTP推送失败: {e}")
             return False
 
     def reset_cooldown(self, rule_id: str):
         """重置指定规则的冷却时间（用于测试或手动重置）"""
         if rule_id in self._rule_last_triggered:
             del self._rule_last_triggered[rule_id]
-            logger.info(f"[ProactiveVision] 已重置规则 {rule_id} 的冷却时间")
+            logger.info(f"[ScreenVision] 已重置规则 {rule_id} 的冷却时间")
 
     def get_cooldown_remaining(self, rule: TriggerRule) -> float:
         """获取规则剩余冷却时间（秒）"""
@@ -190,7 +201,7 @@ def create_proactive_trigger() -> ProactiveVisionTrigger:
     """创建并注册触发器单例"""
     global _trigger
     if _trigger is not None:
-        logger.warning("[ProactiveVision] 触发器已存在，将被替换")
+        logger.warning("[ScreenVision] 触发器已存在，将被替换")
 
     _trigger = ProactiveVisionTrigger()
     return _trigger

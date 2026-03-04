@@ -1,5 +1,5 @@
 """
-Heartbeat prompt 模板
+军牌系统 — 心跳 prompt 模板
 """
 
 HEARTBEAT_SYSTEM_PROMPT = """\
