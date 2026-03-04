@@ -190,7 +190,7 @@ async function sendCode() {
 }
 
 function handleSkip() {
-  emit('skip')
+  window.open('https://github.com/RTGS2017/NagaAgent.git', '_blank')
 }
 
 function openForgotPassword() {
@@ -277,7 +277,7 @@ const stopWatch = watch(backendConnected, (connected) => {
             <span class="login-link" @click="openForgotPassword">忘记密码</span>
           </div>
           <div class="login-skip" @click="handleSkip">
-            不登录，直接进入
+            不登录，使用开源版本
           </div>
         </template>
 
@@ -357,7 +357,7 @@ const stopWatch = watch(backendConnected, (connected) => {
             <span class="login-link" @click="openForgotPassword">忘记密码</span>
           </div>
           <div class="login-skip" @click="handleSkip">
-            不登录，直接进入
+            不登录，使用开源版本
           </div>
         </template>
       </div>
