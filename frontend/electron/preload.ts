@@ -92,6 +92,53 @@ const electronAPI = {
     set: (enabled: boolean) => ipcRenderer.invoke('autoLaunch:set', enabled) as Promise<void>,
   },
 
+  // 热补丁系统
+  patcher: {
+    getStatus: () => ipcRenderer.invoke('patcher:getStatus') as Promise<{
+      patchVersion: string | null
+      appliedAt: string | null
+      source: string | null
+      official: boolean
+      patchDir: string
+      fileCount: number
+    }>,
+    checkUpdate: (serverUrl: string) => ipcRenderer.invoke('patcher:checkUpdate', serverUrl) as Promise<{
+      updated: boolean
+      version?: string
+      frontendChanged: boolean
+      backendChanged: boolean
+      source?: string
+    }>,
+    reset: () => ipcRenderer.invoke('patcher:reset') as Promise<{ success: boolean, error?: string }>,
+    isOfficial: (url: string) => ipcRenderer.invoke('patcher:isOfficial', url) as Promise<boolean>,
+    revokeTrust: (url: string) => ipcRenderer.invoke('patcher:revokeTrust', url) as Promise<{ success: boolean }>,
+    getTrustedSources: () => ipcRenderer.invoke('patcher:getTrustedSources') as Promise<string[]>,
+    /** 补丁应用完成 */
+    onApplied: (callback: (info: { version: string, frontendChanged: boolean, backendChanged: boolean, official: boolean, source: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, info: any) => callback(info)
+      ipcRenderer.on('patcher:applied', handler)
+      return () => ipcRenderer.removeListener('patcher:applied', handler)
+    },
+    /** 非官方来源警告 */
+    onUnofficialSource: (callback: (info: { url: string, status: string, message: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, info: any) => callback(info)
+      ipcRenderer.on('patcher:unofficial-source', handler)
+      return () => ipcRenderer.removeListener('patcher:unofficial-source', handler)
+    },
+    /** 下载进度 */
+    onProgress: (callback: (info: { percent: number, file: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, info: any) => callback(info)
+      ipcRenderer.on('patcher:progress', handler)
+      return () => ipcRenderer.removeListener('patcher:progress', handler)
+    },
+    /** 错误通知 */
+    onError: (callback: (message: string) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, msg: string) => callback(msg)
+      ipcRenderer.on('patcher:error', handler)
+      return () => ipcRenderer.removeListener('patcher:error', handler)
+    },
+  },
+
   // Platform info
   platform: process.platform,
 }

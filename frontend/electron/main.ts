@@ -6,6 +6,7 @@ import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, p
 import { startBackend, stopBackend } from './modules/backend'
 import { registerHotkeys, unregisterHotkeys } from './modules/hotkeys'
 import { createMenu } from './modules/menu'
+import { initPatchDirs, registerPatcherIPC, resolveFrontendPatch } from './modules/patcher'
 import { createTray, destroyTray } from './modules/tray'
 import { downloadUpdate, installUpdate, setupAutoUpdater } from './modules/updater'
 import {
@@ -41,6 +42,7 @@ const BACKGROUNDS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '
 protocol.registerSchemesAsPrivileged([
   { scheme: 'naga-char', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
   { scheme: 'naga-bg', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  { scheme: 'naga-app', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true } },
 ])
 
 app.on('second-instance', () => {
@@ -54,6 +56,34 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(() => {
+  // ── 热补丁系统初始化 ──
+  initPatchDirs()
+  registerPatcherIPC()
+
+  // naga-app://路径 → 优先从补丁目录加载，回退到 dist/ 基线
+  // 仅打包模式生效，开发模式走 Vite dev server
+  const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+  protocol.handle('naga-app', (request) => {
+    // standard: true 时 naga-app://dist/index.html 解析为 host="dist", path="/index.html"
+    // pathname 已是相对于 dist 的路径，直接去掉前导斜杠即可
+    const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
+    // 兼容性保护：万一 pathname 中出现 "dist/" 前缀也能正确处理
+    const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
+
+    // 1. 补丁目录优先
+    const patchFile = resolveFrontendPatch(relativePath)
+    if (patchFile) {
+      return net.fetch(pathToFileURL(patchFile).toString())
+    }
+
+    // 2. 回退到基线 dist/
+    const basePath = resolve(appDistDir, relativePath)
+    if (!basePath.startsWith(appDistDir)) {
+      return new Response('Forbidden', { status: 403 })
+    }
+    return net.fetch(pathToFileURL(basePath).toString())
+  })
+
   // naga-char://角色名/文件名 → characters/角色名/文件名
   protocol.handle('naga-char', (request) => {
     const relativePath = decodeURIComponent(request.url.slice('naga-char://'.length))
