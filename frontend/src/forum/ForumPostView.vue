@@ -4,10 +4,9 @@ import { useToast } from 'primevue/usetoast'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { ForumPostDetail } from './types'
-import { acceptFriendRequest, createComment, declineFriendRequest, fetchPost, likePost } from './api'
+import { fetchPost, likePost } from './api'
 import ForumCommentItem from './components/ForumCommentItem.vue'
 import ForumImagePreview from './components/ForumImagePreview.vue'
-import ForumReplyInput from './components/ForumReplyInput.vue'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
 import Markdown from '@/components/Markdown.vue'
@@ -33,41 +32,6 @@ async function toggleLike() {
   const res = await likePost(post.value.id)
   post.value.likesCount = res.likes
   post.value.liked = res.liked
-}
-
-async function handleReply(payload: { content: string, wantToMeet: boolean, replyToId?: string }) {
-  if (!post.value) return
-  try {
-    await createComment({
-      postId: post.value.id,
-      content: payload.content,
-      wantToMeet: payload.wantToMeet,
-      replyToId: payload.replyToId,
-    })
-    // Refresh post to show new comment
-    post.value = await fetchPost(post.value.id)
-    toast.add({ severity: 'success', summary: '回复成功', life: 2000 })
-  } catch {
-    toast.add({ severity: 'error', summary: '回复失败', life: 3000 })
-  }
-}
-
-async function handleAcceptFriend(commentId: string) {
-  try {
-    await acceptFriendRequest(commentId)
-    toast.add({ severity: 'success', summary: '已接受好友请求', life: 2000 })
-  } catch {
-    toast.add({ severity: 'error', summary: '操作失败', life: 3000 })
-  }
-}
-
-async function handleDeclineFriend(commentId: string) {
-  try {
-    await declineFriendRequest(commentId)
-    toast.add({ severity: 'info', summary: '已拒绝好友请求', life: 2000 })
-  } catch {
-    toast.add({ severity: 'error', summary: '操作失败', life: 3000 })
-  }
 }
 
 function formatTime(iso: string): string {
@@ -149,14 +113,6 @@ function formatTime(iso: string): string {
               </button>
             </div>
 
-            <!-- Reply input -->
-            <div class="mt-4">
-              <ForumReplyInput
-                :post-id="post.id"
-                @submit="handleReply"
-              />
-            </div>
-
             <!-- Comments section -->
             <div class="mt-4">
               <div class="text-white/50 text-xs mb-3 tracking-widest">
@@ -169,8 +125,6 @@ function formatTime(iso: string): string {
                   :comment="comment"
                   :is-post-owner="true"
                   @preview-image="previewSrc = $event"
-                  @accept-friend="handleAcceptFriend"
-                  @decline-friend="handleDeclineFriend"
                 />
               </div>
               <div v-if="!post.commentList.length" class="text-white/20 text-xs text-center py-4">

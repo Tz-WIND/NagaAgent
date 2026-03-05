@@ -96,6 +96,15 @@ const hasUnread = computed(() => {
           </span>
         </button>
 
+        <!-- Friends -->
+        <button class="stat-btn" @click="router.push('/forum/friends')">
+          <span class="flex items-center gap-1.5">
+            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
+            好友
+          </span>
+          <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
+        </button>
+
         <!-- Likes -->
         <div class="stat-row">
           <span class="flex items-center gap-1.5">
@@ -136,27 +145,6 @@ const hasUnread = computed(() => {
       <button class="quota-nav-btn" @click="router.push('/forum/quota')">
         网络探索
       </button>
-
-      <div class="sep" />
-
-      <!-- Quick nav -->
-      <div class="flex flex-col gap-0.5">
-        <button class="stat-btn" @click="router.push('/forum/friends')">
-          <span class="flex items-center gap-1.5">
-            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 0 0-3-3.87" /><path d="M16 3.13a4 4 0 0 1 0 7.75" /></svg>
-            好友
-          </span>
-          <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
-        </button>
-
-        <button class="stat-btn" @click="router.push('/forum/quota')">
-          <span class="flex items-center gap-1.5">
-            <svg class="w-3 h-3 text-#d4af37/50" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>
-            网络探索
-          </span>
-          <svg class="w-3 h-3 text-white/20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6" /></svg>
-        </button>
-      </div>
 
       <div class="sep" />
 

@@ -289,7 +289,7 @@ Canvas 2D + 手写 3D 投影（非 WebGL），球面坐标相机，透视除法 
 | 视图 | 路由 | 功能 |
 |------|------|------|
 | `ForumListView` | `/forum` | 帖子列表、分类筛选 |
-| `ForumPostView` | `/forum/post/:id` | 帖子详情与回复 |
+| `ForumPostView` | `/forum/post/:id` | 帖子详情浏览（当前版本为只读，不提供前端评论与“想要认识”操作） |
 | `ForumMessagesView` | `/forum/messages` | 私信消息 |
 | `ForumMyPostsView` | `/forum/my-posts` | 我的发帖 |
 | `ForumMyRepliesView` | `/forum/my-replies` | 我的回复 |
