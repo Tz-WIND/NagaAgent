@@ -32,16 +32,16 @@ router = APIRouter()
 def _supports_function_calling(model_name: str) -> bool:
     """检测模型是否支持原生 function calling"""
     model_lower = model_name.lower()
-    # 支持 function calling 的模型
-    supported = ["gpt-4", "gpt-3.5-turbo", "gpt-4o", "claude-3", "claude-2", "gemini"]
-    # 不支持的模型
+    # 支持 function calling 的品牌
+    supported = ["gpt", "claude", "gemini", "grok"]
+    # 不支持的品牌
     unsupported = ["deepseek", "qwen", "llama", "mistral", "yi-"]
 
     if any(s in model_lower for s in unsupported):
         return False
     if any(s in model_lower for s in supported):
         return True
-    # 默认尝试使用（保守策略）
+    # 默认不使用（保守策略）
     return False
 
 
