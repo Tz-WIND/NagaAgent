@@ -292,24 +292,6 @@ export async function checkAndApplyPatches(
     const local = getLocalManifest()
     if (local && local.version === remoteManifest.version) return noUpdate
 
-    // 2.5. 清理旧补丁中不在新manifest中的文件
-    if (local?.files) {
-      const newFilePaths = new Set(remoteManifest.files.map(f => f.path))
-      for (const oldFile of local.files) {
-        if (!newFilePaths.has(oldFile.path)) {
-          const oldPath = resolve(PATCHES_DIR, oldFile.path)
-          if (existsSync(oldPath)) {
-            try {
-              rmSync(oldPath, { force: true })
-              console.log(`[Patcher] 清理旧文件: ${oldFile.path}`)
-            } catch (err) {
-              console.warn(`[Patcher] 清理失败: ${oldFile.path}`, err)
-            }
-          }
-        }
-      }
-    }
-
     // 3. 签名验证
     if (!verifyManifestSignature(remoteManifest, signSecret)) {
       console.error('[Patcher] 补丁签名验证失败，拒绝应用')
