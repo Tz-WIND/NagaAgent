@@ -3,6 +3,7 @@ import API from '@/api/core'
 import { triggerAction } from '@/utils/live2dController'
 import { MESSAGES } from '@/utils/session'
 import { handleMusicCommand } from '@/composables/useMusicPlayer'
+import { isNagaLoggedIn, refreshUserStats } from '@/composables/useAuth'
 
 export const toolMessage = ref('')
 export const openclawTasks = ref<Array<Record<string, any>>>([])
@@ -17,6 +18,11 @@ async function poll() {
       API.getLive2dActions(),
       API.getMusicCommands(),
     ])
+
+    // 轮询时刷新积分
+    if (isNagaLoggedIn.value) {
+      refreshUserStats().catch(() => {})
+    }
 
     if (status.status === 'fulfilled') {
       toolMessage.value = status.value.visible ? status.value.message : ''

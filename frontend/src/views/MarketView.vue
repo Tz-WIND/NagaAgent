@@ -671,7 +671,7 @@ async function handleRedeem() {
             <div class="card-credits">{{ product.credits }}</div>
             <div class="card-unit">积分</div>
             <div class="card-name">{{ product.name }}</div>
-            <div class="card-price">¥{{ product.price }}</div>
+            <div class="card-price">{{ product.price }}</div>
           </div>
         </div>
 
@@ -686,6 +686,7 @@ async function handleRedeem() {
         </div>
 
         <div class="recharge-tip">点击商品卡片跳转爱发电支付，支付完成后积分自动到账</div>
+        <div class="recharge-notice">充值会在一个工作日内到账</div>
       </section>
 
       <!-- 其他标签占位 -->
@@ -1777,4 +1778,5 @@ async function handleRedeem() {
 .recharge-placeholder { text-align: center; color: rgba(255,255,255,0.4); padding: 2rem; }
 .recharge-error { color: rgba(255,100,100,0.7); }
 .recharge-tip { text-align: center; color: rgba(255,255,255,0.3); font-size: 0.75rem; }
+.recharge-notice { text-align: center; color: rgba(255,255,255,0.2); font-size: 0.7rem; margin-top: 6px; }
 </style>

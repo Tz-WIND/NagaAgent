@@ -183,6 +183,20 @@ const displayName = computed(() => {
         <span class="stat-tooltip">积分</span>
       </button>
 
+      <!-- 刷新积分 -->
+      <button class="icon-btn" title="刷新积分" @click="refreshUserStats">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
+        </svg>
+      </button>
+
+      <!-- 充值按钮 -->
+      <button class="icon-btn" title="充值" @click="router.push('/market?tab=recharge')">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </button>
+
       <!-- 熟悉度 -->
       <button class="stat-item" @click="openStatPopup('affinity')">
         <img :src="affinityIcon" class="stat-icon" alt="熟悉度">
@@ -347,6 +361,26 @@ const displayName = computed(() => {
 .stat-item:hover {
   color: rgba(255, 255, 255, 0.9);
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* ── 图标按钮（刷新/充值） ── */
+.icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.icon-btn:hover {
+  color: rgba(212, 175, 55, 0.9);
+  background: rgba(212, 175, 55, 0.1);
 }
 
 .stat-icon {
