@@ -50,15 +50,35 @@ def _parse_memory_result(mem_result: dict) -> str:
     if not mem_result.get("success"):
         return ""
 
+    # 调试：打印返回的数据结构
+    logger.debug(f"[RAG] mem_result keys: {list(mem_result.keys())}")
+    if "memories" in mem_result:
+        logger.debug(f"[RAG] memories count: {len(mem_result.get('memories', []))}")
+    if "quintuples" in mem_result:
+        logger.debug(f"[RAG] quintuples count: {len(mem_result.get('quintuples', []))}")
+    if "answer" in mem_result:
+        logger.debug(f"[RAG] answer length: {len(mem_result.get('answer', ''))}")
+
     # 格式1: quintuples 列表（旧版本 / 本地 GRAG）
     quints = mem_result.get("quintuples") or []
 
-    # 格式2: memories 列表（远程 NagaMemory，每条含 quintuples 子字段）
+    # 格式2: memories 列表（远程 NagaMemory，每条含五元组字段）
     memories = mem_result.get("memories") or []
     if memories and not quints:
         for m in memories:
-            mq = m.get("quintuples") or []
-            quints.extend(mq)
+            # 新格式：直接包含 subject/relation/object 字段
+            if isinstance(m, dict) and "subject" in m:
+                quints.append((
+                    m.get("subject", ""),
+                    m.get("subject_type", ""),
+                    m.get("relation", ""),
+                    m.get("object", ""),
+                    m.get("object_type", "")
+                ))
+            # 旧格式：包含 quintuples 子字段
+            elif isinstance(m, dict):
+                mq = m.get("quintuples") or []
+                quints.extend(mq)
 
     if quints:
         mem_lines = []
@@ -303,9 +323,33 @@ async def chat_stream(request: ChatRequest):
                     from summer_memory.memory_client import get_remote_memory_client
 
                     remote_mem = get_remote_memory_client()
-                    if remote_mem:
-                        mem_result = await remote_mem.query_memory(question=request.message, limit=5)
-                        rag_section = _parse_memory_result(mem_result)
+                    if not remote_mem:
+                        logger.info("[RAG] 未登录或无可用 token，跳过远程记忆召回")
+                        return
+
+                    # 构建包含历史对话的查询上下文（前2轮 + 当前消息）
+                    context_parts = []
+                    recent_messages = [m for m in messages if m.get("role") in ("user", "assistant")][-4:]
+                    if recent_messages:
+                        context_parts.append("近期对话：")
+                        for msg in recent_messages:
+                            role_label = "用户" if msg["role"] == "user" else "助手"
+                            content = msg.get("content", "")
+                            if isinstance(content, str):
+                                context_parts.append(f"- {role_label}: {content[:100]}")
+                        context_parts.append(f"\n当前问题: {request.message}")
+                        query_text = "\n".join(context_parts)
+                    else:
+                        query_text = request.message
+
+                    logger.info(f"[RAG] 开始查询记忆: question='{request.message[:50]}...'")
+                    mem_result = await remote_mem.query_memory(question=query_text, limit=5)
+                    logger.debug(f"[RAG] 记忆服务器响应: success={mem_result.get('success')}")
+                    logger.debug(f"[RAG] 完整响应: {mem_result}")
+
+                    rag_section = _parse_memory_result(mem_result)
+                    if not rag_section:
+                        logger.info("[RAG] 未召回到相关记忆（结果为空）")
                 except Exception as e:
                     logger.warning(f"[RAG] 记忆召回失败: {e}")
 

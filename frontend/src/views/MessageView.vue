@@ -13,22 +13,21 @@ import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils
 
 const isSending = ref(false)
 const messageQueue: Array<{ content: string, options?: any }> = []
+const ttsEnabled = ref(localStorage.getItem('ttsEnabled') !== 'false')
 
 async function processQueue() {
   if (messageQueue.length === 0 || isSending.value) return
 
   const { content, options } = messageQueue.shift()!
   await chatStreamInternal(content, options)
-
-  // 处理完成后继续处理队列
-  if (messageQueue.length > 0) {
-    processQueue()
-  }
 }
 
 export function chatStream(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   // 用户发送新消息时，立即中止上一次的 TTS 播放
   stopTTS()
+
+  // 立即显示用户消息
+  MESSAGES.value.push({ role: 'user', content: options?.images?.length ? `[截图x${options.images.length}] ${content}` : content })
 
   // 将消息加入队列
   messageQueue.push({ content, options })
@@ -37,8 +36,6 @@ export function chatStream(content: string, options?: { skill?: string, images?:
 
 async function chatStreamInternal(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   isSending.value = true
-
-  MESSAGES.value.push({ role: 'user', content: options?.images?.length ? `[截图x${options.images.length}] ${content}` : content })
 
   // 预先推入 assistant 消息（立即显示，不等 API 响应）
   MESSAGES.value.push({ role: 'assistant', content: '', reasoning: '', generating: true, status: options?.voiceInput ? '理解话语中' : undefined })
@@ -106,7 +103,7 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
           if (parts.length > 1) {
             for (let i = 0; i < parts.length - 1; i++) {
               const s = parts[i]!.trim()
-              if (s)
+              if (s && ttsEnabled.value)
                 queueSpeak(s)
             }
             ttsSentenceBuf = parts[parts.length - 1]!
@@ -218,7 +215,7 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
 
     if (voiceSync && spokenContent) {
       // 将剩余未成句的文本送入 TTS 队列
-      if (ttsSentenceBuf.trim())
+      if (ttsSentenceBuf.trim() && ttsEnabled.value)
         queueSpeak(ttsSentenceBuf.trim())
       // Live2D 状态由 isPlaying watcher 自动驱动: talking ↔ idle
     }
@@ -234,6 +231,7 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
       delete message.reasoning
   }).finally(() => {
     isSending.value = false
+    processQueue()
   })
 }
 </script>
@@ -242,6 +240,14 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
 const input = defineModel<string>()
 const containerRef = useTemplateRef('containerRef')
 const fileInput = ref<HTMLInputElement | null>(null)
+
+function toggleTTS() {
+  ttsEnabled.value = !ttsEnabled.value
+  localStorage.setItem('ttsEnabled', String(ttsEnabled.value))
+  if (!ttsEnabled.value) {
+    stopTTS() // 关闭时停止当前播放
+  }
+}
 
 // TTS 播放状态驱动嘴部动画：开始播放→talking，结束→idle
 watch(isPlaying, (playing) => {
@@ -553,6 +559,15 @@ function getSupportedMimeType(): string {
         >
           <svg v-if="!isRecording" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" /><path d="M19 10v2a7 7 0 0 1-14 0v-2" /><line x1="12" x2="12" y1="19" y2="22" /></svg>
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
+        </button>
+        <button
+          v-if="CONFIG.system.voice_enabled"
+          class="input-icon-btn shrink-0"
+          :title="ttsEnabled ? '关闭语音播报' : '开启语音播报'"
+          @click="toggleTTS"
+        >
+          <svg v-if="ttsEnabled" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M15.54 8.46a5 5 0 0 1 0 7.07" /></svg>
+          <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" y1="9" x2="16" y2="15" /><line x1="16" y1="9" x2="22" y2="15" /></svg>
         </button>
         <button
           class="input-icon-btn shrink-0"
