@@ -33,7 +33,7 @@ def _supports_function_calling(model_name: str) -> bool:
     """检测模型是否支持原生 function calling"""
     model_lower = model_name.lower()
     # 支持 function calling 的模型
-    supported = ["gpt-4", "gpt-3.5-turbo", "gpt-4o", "claude-3", "claude-2"]
+    supported = ["gpt-4", "gpt-3.5-turbo", "gpt-4o", "claude-3", "claude-2", "gemini"]
     # 不支持的模型
     unsupported = ["deepseek", "qwen", "llama", "mistral", "yi-"]
 
