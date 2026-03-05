@@ -33,11 +33,13 @@ QuintupleType = Tuple[str, str, str, str, str]
 class RemoteMemoryClient:
     """异步 NagaMemory 远程客户端"""
 
-    def __init__(self, base_url: str, token: Optional[str] = None, timeout: float = 30.0):
+    def __init__(self, base_url: str, token: Optional[str] = None, space_id: Optional[str] = None, timeout: float = 30.0):
         self.base_url = base_url.rstrip("/")
         headers: Dict[str, str] = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        if space_id:
+            headers["X-Space-Id"] = space_id
         self._client = httpx.AsyncClient(timeout=timeout, headers=headers)
 
     async def close(self):
@@ -72,6 +74,12 @@ class RemoteMemoryClient:
                 logger.warning(f"NagaMemory 返回空响应 [{method} {path}] status={resp.status_code}")
                 return {"success": False, "error": "服务返回空响应，请检查网络或代理设置"}
             return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"NagaMemory HTTP {e.response.status_code} [{method} {path}]: {e}")
+            # 401/403 认证失败 → 抛出异常，让上层回退到本地记忆
+            if e.response.status_code in (401, 403):
+                raise
+            return {"success": False, "error": str(e)}
         except httpx.HTTPError as e:
             logger.error(f"NagaMemory 请求失败 [{method} {path}]: {e}")
             return {"success": False, "error": str(e)}
@@ -170,12 +178,14 @@ def get_remote_memory_client() -> Optional[RemoteMemoryClient]:
             _client_token = None
         return None
 
-    # 获取服务地址
+    # 获取服务地址和空间ID
     try:
         from system.config import config
         base_url = config.memory_server.url
+        space_id = getattr(config.memory_server, 'space_id', None)
     except Exception:
         base_url = "http://localhost:8004"
+        space_id = None
 
     # Token 变更时重新创建客户端
     if _client is not None and token != _client_token:
@@ -186,9 +196,9 @@ def get_remote_memory_client() -> Optional[RemoteMemoryClient]:
         return _client
 
     try:
-        _client = RemoteMemoryClient(base_url=base_url, token=token)
+        _client = RemoteMemoryClient(base_url=base_url, token=token, space_id=space_id)
         _client_token = token
-        logger.info(f"NagaMemory 远程客户端已创建: {base_url}")
+        logger.info(f"NagaMemory 远程客户端已创建: {base_url}" + (f" (space_id={space_id})" if space_id else ""))
         return _client
     except Exception as e:
         logger.warning(f"创建 NagaMemory 客户端失败: {e}")

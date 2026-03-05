@@ -2,10 +2,10 @@
 import { useToast } from 'primevue/usetoast'
 import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { getCredits, getPurchaseLink, redeemCode } from '@/api/business'
 import { isNagaLoggedIn, nagaUser, refreshUserStats } from '@/composables/useAuth'
 import { useBackground } from '@/composables/useBackground'
 import { CONFIG } from '@/utils/config'
-import { getPurchaseLink, getCredits, redeemCode } from '@/api/business'
 
 const router = useRouter()
 const route = useRoute()
@@ -52,8 +52,8 @@ const DRAG_THRESHOLD = 4
 
 function initDragScroll(container: HTMLElement) {
   container.addEventListener('mousedown', (e: MouseEvent) => {
-    let startX = e.clientX
-    let startScrollLeft = container.scrollLeft
+    const startX = e.clientX
+    const startScrollLeft = container.scrollLeft
     let moved = false
 
     container.style.cursor = 'grabbing'
@@ -61,7 +61,8 @@ function initDragScroll(container: HTMLElement) {
 
     function onMove(ev: MouseEvent) {
       const dx = ev.clientX - startX
-      if (Math.abs(dx) > DRAG_THRESHOLD) moved = true
+      if (Math.abs(dx) > DRAG_THRESHOLD)
+        moved = true
       container.scrollLeft = startScrollLeft - dx
     }
 
@@ -72,7 +73,9 @@ function initDragScroll(container: HTMLElement) {
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
       // 在 click 事件触发后再重置标记
-      setTimeout(() => { wasDragging = false }, 0)
+      setTimeout(() => {
+        wasDragging = false
+      }, 0)
     }
 
     document.addEventListener('mousemove', onMove)
@@ -85,14 +88,26 @@ function initDragScroll(container: HTMLElement) {
   }, { passive: false })
 }
 
+// ── 界面背景（声明提前，供 onMounted 使用） ──
+const toast = useToast()
+const { backgroundList, activeBackground, isOwned, isActive, purchase, apply, resetToDefault, getBackgroundUrl, loadBackgrounds } = useBackground()
+
+const skinGridRef = ref<HTMLElement | null>(null)
+const bgConfirmTarget = ref<string | null>(null)
+const bgPurchasing = ref(false)
+
 onMounted(() => {
-  if (albumSection.value) initDragScroll(albumSection.value)
-  if (characterSectionRef.value) initDragScroll(characterSectionRef.value)
+  if (albumSection.value)
+    initDragScroll(albumSection.value)
+  if (characterSectionRef.value)
+    initDragScroll(characterSectionRef.value)
   loadBackgrounds()
   nextTick(() => {
-    if (skinGridRef.value) initVerticalDragScroll(skinGridRef.value)
+    if (skinGridRef.value)
+      initVerticalDragScroll(skinGridRef.value)
   })
-  if (activeTab.value === 'recharge') loadRechargeData()
+  if (activeTab.value === 'recharge')
+    loadRechargeData()
 })
 
 // ── 角色注册 ──
@@ -121,14 +136,16 @@ const characters: CharacterCard[] = [
 function computeAllCardWidths() {
   for (const char of characters) {
     const el = charCardRefs[char.id]
-    if (!el) continue
+    if (!el)
+      continue
     const h = el.offsetHeight
-    if (h <= 0) continue
+    if (h <= 0)
+      continue
     el.style.setProperty('--collapsed-w', `${Math.round(h * 2 / 5)}px`)
     el.style.setProperty('--expanded-w', `${Math.round(h * 3 / 4)}px`)
   }
   // custom card
-  const customEl = charCardRefs['custom']
+  const customEl = charCardRefs.custom
   if (customEl) {
     const ch = customEl.offsetHeight
     if (ch > 0) {
@@ -139,16 +156,19 @@ function computeAllCardWidths() {
 }
 
 function setCardRef(charId: string, el: any) {
-  if (el) charCardRefs[charId] = el as HTMLElement
+  if (el)
+    charCardRefs[charId] = el as HTMLElement
 }
 
 function toggleCard(id: string) {
-  if (wasDragging) return
+  if (wasDragging)
+    return
   expandedCard.value = expandedCard.value === id ? null : id
 }
 
 function onSectionClick() {
-  if (!wasDragging) expandedCard.value = null
+  if (!wasDragging)
+    expandedCard.value = null
 }
 
 function applyCharacter(name: string) {
@@ -185,22 +205,17 @@ watch(activeTab, (tab) => {
   }
   if (tab === 'skin') {
     nextTick(() => {
-      if (skinGridRef.value) initVerticalDragScroll(skinGridRef.value)
+      if (skinGridRef.value)
+        initVerticalDragScroll(skinGridRef.value)
     })
   }
-  if (tab === 'recharge') loadRechargeData()
+  if (tab === 'recharge')
+    loadRechargeData()
 })
 
-// ── 界面背景 ──
-const toast = useToast()
-const { backgroundList, activeBackground, isOwned, isActive, purchase, apply, resetToDefault, getBackgroundUrl, loadBackgrounds } = useBackground()
-
-const skinGridRef = ref<HTMLElement | null>(null)
-const bgConfirmTarget = ref<string | null>(null)
-const bgPurchasing = ref(false)
-
 function handleBgAction(bgId: string) {
-  if (isActive(bgId)) return
+  if (isActive(bgId))
+    return
   if (isOwned(bgId)) {
     apply(bgId)
     toast.add({ severity: 'success', summary: '已应用', detail: '背景已切换', life: 2000 })
@@ -211,9 +226,11 @@ function handleBgAction(bgId: string) {
 
 async function confirmPurchase() {
   const bgId = bgConfirmTarget.value
-  if (!bgId || bgPurchasing.value) return
+  if (!bgId || bgPurchasing.value)
+    return
   const bg = backgroundList.value.find(b => b.id === bgId)
-  if (!bg) return
+  if (!bg)
+    return
 
   if (!isNagaLoggedIn.value) {
     toast.add({ severity: 'warn', summary: '请先登录', detail: '登录后才能兑换背景', life: 3000 })
@@ -254,7 +271,8 @@ function handleResetBg() {
 }
 
 const confirmBgItem = computed(() => {
-  if (!bgConfirmTarget.value) return null
+  if (!bgConfirmTarget.value)
+    return null
   return backgroundList.value.find(b => b.id === bgConfirmTarget.value) ?? null
 })
 
@@ -263,8 +281,8 @@ function initVerticalDragScroll(container: HTMLElement) {
   let wasSkinDragging = false
 
   container.addEventListener('mousedown', (e: MouseEvent) => {
-    let startY = e.clientY
-    let startScrollTop = container.scrollTop
+    const startY = e.clientY
+    const startScrollTop = container.scrollTop
     let moved = false
 
     container.style.cursor = 'grabbing'
@@ -272,7 +290,8 @@ function initVerticalDragScroll(container: HTMLElement) {
 
     function onMove(ev: MouseEvent) {
       const dy = ev.clientY - startY
-      if (Math.abs(dy) > DRAG_THRESHOLD) moved = true
+      if (Math.abs(dy) > DRAG_THRESHOLD)
+        moved = true
       container.scrollTop = startScrollTop - dy
     }
 
@@ -282,7 +301,9 @@ function initVerticalDragScroll(container: HTMLElement) {
       document.body.style.cursor = ''
       document.removeEventListener('mousemove', onMove)
       document.removeEventListener('mouseup', onUp)
-      setTimeout(() => { wasSkinDragging = false }, 0)
+      setTimeout(() => {
+        wasSkinDragging = false
+      }, 0)
     }
 
     document.addEventListener('mousemove', onMove)
@@ -299,7 +320,7 @@ function initVerticalDragScroll(container: HTMLElement) {
 }
 
 // ── 模型充值 ──
-interface Product { name: string; price: number; credits: number; url: string }
+interface Product { name: string, price: number, credits: number, url: string }
 const rechargeProducts = ref<Product[]>([])
 const rechargeLoading = ref(false)
 const rechargeError = ref('')
@@ -309,7 +330,8 @@ const redeemInput = ref('')
 const redeemLoading = ref(false)
 
 async function loadRechargeData() {
-  if (rechargeLoaded.value) return
+  if (rechargeLoaded.value)
+    return
   rechargeLoading.value = true
   rechargeError.value = ''
   try {
@@ -318,9 +340,11 @@ async function loadRechargeData() {
       getCredits().catch(() => null),
     ])
     rechargeProducts.value = purchaseData.products || []
-    if (creditsData) currentCredits.value = creditsData.creditsAvailable
+    if (creditsData)
+      currentCredits.value = creditsData.creditsAvailable
     rechargeLoaded.value = true
-  } catch (e: any) {
+  }
+  catch (e: any) {
     rechargeError.value = e?.response?.status === 401
       ? '请先登录后使用充值功能'
       : `加载失败: ${e?.response?.data?.detail || e.message}`
@@ -334,7 +358,8 @@ function openPurchaseUrl(url: string) {
 
 async function handleRedeem() {
   const code = redeemInput.value.trim()
-  if (!code) return
+  if (!code)
+    return
   redeemLoading.value = true
   try {
     const result = await redeemCode(code)
@@ -342,7 +367,8 @@ async function handleRedeem() {
     currentCredits.value = result.creditsAvailable
     redeemInput.value = ''
     refreshUserStats()
-  } catch (e: any) {
+  }
+  catch (e: any) {
     toast.add({ severity: 'error', summary: '兑换失败', detail: e?.response?.data?.detail || e.message, life: 4000 })
   }
   redeemLoading.value = false
@@ -549,7 +575,7 @@ async function handleRedeem() {
             @click="handleBgAction(bg.id)"
           >
             <div class="skin-thumb">
-              <img :src="getBackgroundUrl(bg.id)" :alt="bg.name" class="skin-thumb-img" @error="($event.target as HTMLImageElement).style.display='none'">
+              <img :src="getBackgroundUrl(bg.id)" :alt="bg.name" class="skin-thumb-img" @error="($event.target as HTMLImageElement).style.display = 'none'">
               <div class="skin-thumb-placeholder">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                   <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
@@ -644,6 +670,7 @@ async function handleRedeem() {
           >
             <div class="card-credits">{{ product.credits }}</div>
             <div class="card-unit">积分</div>
+            <div class="card-name">{{ product.name }}</div>
             <div class="card-price">{{ product.price }}</div>
           </div>
         </div>
@@ -659,6 +686,7 @@ async function handleRedeem() {
         </div>
 
         <div class="recharge-tip">点击商品卡片跳转爱发电支付，支付完成后积分自动到账</div>
+        <div class="recharge-notice">充值会在一个工作日内到账</div>
       </section>
 
       <!-- 其他标签占位 -->
@@ -1729,6 +1757,7 @@ async function handleRedeem() {
 }
 .recharge-card .card-credits { font-size: 1.8rem; font-weight: bold; color: #d4af37; }
 .recharge-card .card-unit { font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-top: -0.2rem; }
+.recharge-card .card-name { font-size: 0.85rem; color: rgba(255,255,255,0.8); margin-top: 0.3rem; }
 .recharge-card .card-price { font-size: 1rem; font-weight: 600; color: rgba(255,255,255,0.9); margin-top: 0.2rem; }
 
 .recharge-redeem { display: flex; gap: 0.5rem; max-width: 360px; margin: 0 auto; }
@@ -1749,4 +1778,5 @@ async function handleRedeem() {
 .recharge-placeholder { text-align: center; color: rgba(255,255,255,0.4); padding: 2rem; }
 .recharge-error { color: rgba(255,100,100,0.7); }
 .recharge-tip { text-align: center; color: rgba(255,255,255,0.3); font-size: 0.75rem; }
+.recharge-notice { text-align: center; color: rgba(255,255,255,0.2); font-size: 0.7rem; margin-top: 6px; }
 </style>
