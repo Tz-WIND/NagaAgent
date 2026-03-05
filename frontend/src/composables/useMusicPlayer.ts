@@ -96,6 +96,9 @@ function initAudio() {
 function setupAudioForTrack() {
   if (!audio || !currentTrack.value)
     return
+  // 如果已经在播放同一首曲目，不重置进度（避免切换到音律坊时进度归零）
+  if (audio.src && audio.src.endsWith(currentTrack.value.src))
+    return
   audio.src = currentTrack.value.src
   audio.currentTime = 0
   duration.value = 0
