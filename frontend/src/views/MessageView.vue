@@ -12,13 +12,27 @@ import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurre
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
 const isSending = ref(false)
+const messageQueue: Array<{ content: string, options?: any }> = []
+
+async function processQueue() {
+  if (messageQueue.length === 0 || isSending.value) return
+
+  const { content, options } = messageQueue.shift()!
+  await chatStreamInternal(content, options)
+
+  // 处理完成后继续处理队列
+  if (messageQueue.length > 0) {
+    processQueue()
+  }
+}
 
 export function chatStream(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
-  // 并发控制：如果正在发送，忽略新请求
-  if (isSending.value) {
-    console.warn('[ChatStream] 上一条消息正在处理中，忽略新请求')
-    return
-  }
+  // 将消息加入队列
+  messageQueue.push({ content, options })
+  processQueue()
+}
+
+async function chatStreamInternal(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   isSending.value = true
 
   // 新问答开始时，立即中止上一次的 TTS 播放
