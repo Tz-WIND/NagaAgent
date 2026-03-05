@@ -11,7 +11,16 @@ import { live2dState, setEmotion } from '@/utils/live2dController'
 import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurrentSession, MESSAGES, newSession, switchSession } from '@/utils/session'
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
+const isSending = ref(false)
+
 export function chatStream(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
+  // 并发控制：如果正在发送，忽略新请求
+  if (isSending.value) {
+    console.warn('[ChatStream] 上一条消息正在处理中，忽略新请求')
+    return
+  }
+  isSending.value = true
+
   // 新问答开始时，立即中止上一次的 TTS 播放
   stopTTS()
 
@@ -209,6 +218,8 @@ export function chatStream(content: string, options?: { skill?: string, images?:
     delete message.status
     if (message.reasoning === '')
       delete message.reasoning
+  }).finally(() => {
+    isSending.value = false
   })
 }
 </script>
