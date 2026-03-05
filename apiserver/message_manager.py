@@ -693,20 +693,40 @@ class MessageManager:
                 remote = get_remote_memory_client()
                 if remote is not None:
                     import asyncio
-                    asyncio.create_task(remote.add_memory(user_message, assistant_response))
+                    asyncio.create_task(self._add_memory_with_fallback(remote, user_message, assistant_response))
                     logger.info(f"已提交远程记忆提取任务: {user_message[:50]}...")
                 else:
-                    # 回退到本地 summer_memory
-                    from summer_memory.memory_manager import memory_manager
-                    if memory_manager and memory_manager.enabled and memory_manager.auto_extract:
-                        import asyncio
-                        asyncio.create_task(memory_manager.add_conversation_memory(user_message, assistant_response))
-                        logger.info(f"已提交五元组提取任务: {user_message[:50]}...")
+                    # 无远程客户端（未登录），走本地 summer_memory
+                    self._try_local_memory(user_message, assistant_response)
             except ImportError as e:
                 logger.warning(f"记忆系统未启用或导入失败: {e}")
         except Exception as e:
             logger.error(f"保存对话与日志失败: {e}")
-    
+
+
+    async def _add_memory_with_fallback(self, remote, user_message: str, assistant_response: str):
+        """远程记忆存储，失败时回退到本地"""
+        try:
+            result = await remote.add_memory(user_message, assistant_response)
+            if result.get("success"):
+                logger.info(f"远程记忆存储成功: {user_message[:50]}...")
+            else:
+                logger.warning(f"远程记忆存储返回失败: {result.get('error', '未知错误')}，回退本地")
+                self._try_local_memory(user_message, assistant_response)
+        except Exception as e:
+            logger.warning(f"远程记忆存储异常: {e}，回退本地")
+            self._try_local_memory(user_message, assistant_response)
+
+    def _try_local_memory(self, user_message: str, assistant_response: str):
+        """回退到本地 summer_memory 五元组提取"""
+        try:
+            from summer_memory.memory_manager import memory_manager
+            if memory_manager and memory_manager.enabled and memory_manager.auto_extract:
+                import asyncio
+                asyncio.create_task(memory_manager.add_conversation_memory(user_message, assistant_response))
+                logger.info(f"已提交本地五元组提取任务: {user_message[:50]}...")
+        except Exception as e:
+            logger.debug(f"本地记忆系统不可用: {e}")
 
     def get_all_sessions_api(self):
         """获取所有会话信息 - API接口"""

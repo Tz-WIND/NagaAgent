@@ -52,6 +52,12 @@ class RemoteMemoryClient:
                 logger.warning(f"NagaMemory 返回空响应 [{method} {path}] status={resp.status_code}")
                 return {"success": False, "error": "服务返回空响应，请检查网络或代理设置"}
             return resp.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"NagaMemory HTTP {e.response.status_code} [{method} {path}]: {e}")
+            # 401/403 认证失败 → 抛出异常，让上层回退到本地记忆
+            if e.response.status_code in (401, 403):
+                raise
+            return {"success": False, "error": str(e)}
         except httpx.HTTPError as e:
             logger.error(f"NagaMemory 请求失败 [{method} {path}]: {e}")
             return {"success": False, "error": str(e)}

@@ -29,6 +29,48 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _parse_memory_result(mem_result: dict) -> str:
+    """解析 NagaMemory 返回结果，兼容 quintuples / memories / answer 三种格式"""
+    if not mem_result.get("success"):
+        return ""
+
+    # 格式1: quintuples 列表（旧版本 / 本地 GRAG）
+    quints = mem_result.get("quintuples") or []
+
+    # 格式2: memories 列表（远程 NagaMemory，每条含 quintuples 子字段）
+    memories = mem_result.get("memories") or []
+    if memories and not quints:
+        for m in memories:
+            mq = m.get("quintuples") or []
+            quints.extend(mq)
+
+    if quints:
+        mem_lines = []
+        for q in quints:
+            if isinstance(q, (list, tuple)) and len(q) >= 5:
+                mem_lines.append(f"- {q[0]}({q[1]}) —[{q[2]}]→ {q[3]}({q[4]})")
+            elif isinstance(q, dict):
+                mem_lines.append(
+                    f"- {q.get('subject', '')}({q.get('subject_type', '')}) "
+                    f"—[{q.get('predicate', '')}]→ "
+                    f"{q.get('object', '')}({q.get('object_type', '')})"
+                )
+        if mem_lines:
+            logger.info(f"[RAG] 召回 {len(mem_lines)} 条记忆注入上下文")
+            return (
+                "\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆，"
+                "请参考这些信息回答：\n" + "\n".join(mem_lines)
+            )
+
+    # 格式3: answer 文本（语义搜索直接返回）
+    answer = mem_result.get("answer")
+    if answer:
+        logger.info("[RAG] 召回记忆（answer 模式）注入上下文")
+        return f"\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆：\n{answer}"
+
+    return ""
+
+
 # ============ 内部辅助函数 ============
 
 
@@ -146,22 +188,9 @@ async def chat(request: ChatRequest):
                 remote_mem = get_remote_memory_client()
                 if remote_mem:
                     mem_result = await remote_mem.query_memory(question=request.message, limit=5)
-                    if mem_result.get("success") and mem_result.get("quintuples"):
-                        quints = mem_result["quintuples"]
-                        mem_lines = []
-                        for q in quints:
-                            if isinstance(q, (list, tuple)) and len(q) >= 5:
-                                mem_lines.append(f"- {q[0]}({q[1]}) —[{q[2]}]→ {q[3]}({q[4]})")
-                            elif isinstance(q, dict):
-                                mem_lines.append(f"- {q.get('subject','')}({q.get('subject_type','')}) —[{q.get('predicate','')}]→ {q.get('object','')}({q.get('object_type','')})")
-                        if mem_lines:
-                            rag_section = "\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆，请参考这些信息回答：\n" + "\n".join(mem_lines)
-                            logger.info(f"[RAG] 召回 {len(mem_lines)} 条记忆注入上下文")
-                    elif mem_result.get("success") and mem_result.get("answer"):
-                        rag_section = f"\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆：\n{mem_result['answer']}"
-                        logger.info(f"[RAG] 召回记忆（answer 模式）注入上下文")
+                    rag_section = _parse_memory_result(mem_result)
             except Exception as e:
-                logger.debug(f"[RAG] 记忆召回失败（不影响对话）: {e}")
+                logger.warning(f"[RAG] 记忆召回失败: {e}")
 
         await _query_rag()
 
@@ -256,22 +285,9 @@ async def chat_stream(request: ChatRequest):
                     remote_mem = get_remote_memory_client()
                     if remote_mem:
                         mem_result = await remote_mem.query_memory(question=request.message, limit=5)
-                        if mem_result.get("success") and mem_result.get("quintuples"):
-                            quints = mem_result["quintuples"]
-                            mem_lines = []
-                            for q in quints:
-                                if isinstance(q, (list, tuple)) and len(q) >= 5:
-                                    mem_lines.append(f"- {q[0]}({q[1]}) —[{q[2]}]→ {q[3]}({q[4]})")
-                                elif isinstance(q, dict):
-                                    mem_lines.append(f"- {q.get('subject','')}({q.get('subject_type','')}) —[{q.get('predicate','')}]→ {q.get('object','')}({q.get('object_type','')})")
-                            if mem_lines:
-                                rag_section = "\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆，请参考这些信息回答：\n" + "\n".join(mem_lines)
-                                logger.info(f"[RAG] 召回 {len(mem_lines)} 条记忆注入上下文")
-                        elif mem_result.get("success") and mem_result.get("answer"):
-                            rag_section = f"\n\n## 相关记忆\n\n以下是从知识图谱中检索到的与用户问题相关的记忆：\n{mem_result['answer']}"
-                            logger.info(f"[RAG] 召回记忆（answer 模式）注入上下文")
+                        rag_section = _parse_memory_result(mem_result)
                 except Exception as e:
-                    logger.debug(f"[RAG] 记忆召回失败（不影响对话）: {e}")
+                    logger.warning(f"[RAG] 记忆召回失败: {e}")
 
             await _query_rag_stream()
 

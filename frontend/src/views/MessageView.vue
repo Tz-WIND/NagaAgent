@@ -83,7 +83,8 @@ export function chatStream(content: string, options?: { skill?: string, images?:
           if (parts.length > 1) {
             for (let i = 0; i < parts.length - 1; i++) {
               const s = parts[i]!.trim()
-              if (s) queueSpeak(s)
+              if (s)
+                queueSpeak(s)
             }
             ttsSentenceBuf = parts[parts.length - 1]!
           }
@@ -189,11 +190,13 @@ export function chatStream(content: string, options?: { skill?: string, images?:
     // 清理生成状态（文本已实时显示，无需等待 TTS）
     delete message.generating
     delete message.status
-    if (!message.reasoning) delete message.reasoning
+    if (!message.reasoning)
+      delete message.reasoning
 
     if (voiceSync && spokenContent) {
       // 将剩余未成句的文本送入 TTS 队列
-      if (ttsSentenceBuf.trim()) queueSpeak(ttsSentenceBuf.trim())
+      if (ttsSentenceBuf.trim())
+        queueSpeak(ttsSentenceBuf.trim())
       // Live2D 状态由 isPlaying watcher 自动驱动: talking ↔ idle
     }
     if (!isPlaying.value) {
@@ -204,7 +207,8 @@ export function chatStream(content: string, options?: { skill?: string, images?:
     message.content = `Error: ${err.message}`
     delete message.generating
     delete message.status
-    if (message.reasoning === '') delete message.reasoning
+    if (message.reasoning === '')
+      delete message.reasoning
   })
 }
 </script>
@@ -366,13 +370,15 @@ async function toggleVoiceInput() {
     mediaRecorder = new MediaRecorder(stream, { mimeType: getSupportedMimeType() })
 
     mediaRecorder.ondataavailable = (e) => {
-      if (e.data.size > 0) audioChunks.push(e.data)
+      if (e.data.size > 0)
+        audioChunks.push(e.data)
     }
 
     mediaRecorder.onstop = async () => {
       // 停止所有音轨，释放麦克风
       stream.getTracks().forEach(t => t.stop())
-      if (audioChunks.length === 0) return
+      if (audioChunks.length === 0)
+        return
 
       const audioBlob = new Blob(audioChunks, { type: mediaRecorder?.mimeType || 'audio/webm' })
       try {
@@ -421,7 +427,8 @@ function stopVoiceInput() {
 function getSupportedMimeType(): string {
   const types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
   for (const t of types) {
-    if (MediaRecorder.isTypeSupported(t)) return t
+    if (MediaRecorder.isTypeSupported(t))
+      return t
   }
   return ''
 }
