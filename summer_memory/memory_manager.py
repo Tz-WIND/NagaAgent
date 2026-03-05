@@ -89,16 +89,29 @@ class GRAGMemoryManager:
     def _on_task_completed_wrapper(self, task_id: str, quintuples: List):
         """包装回调方法，处理实例可能被销毁的情况"""
         instance = self._weak_ref()
-        if instance:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        if not instance:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            # 已有运行中的事件循环（在 async worker 中调用时），直接提交
             asyncio.run_coroutine_threadsafe(
                 instance._on_task_completed(task_id, quintuples),
                 loop=loop
             )
+        except RuntimeError:
+            # 没有运行中的事件循环（被非 async 上下文调用时），同步执行存储
+            logger.warning(f"任务回调无运行中事件循环，同步执行存储: {task_id}")
+            try:
+                if quintuples:
+                    from .quintuple_graph import store_quintuples
+                    store_success = store_quintuples(quintuples)
+                    if store_success:
+                        logger.info(f"任务 {task_id} 的五元组同步存储成功")
+                    else:
+                        logger.error(f"任务 {task_id} 的五元组同步存储失败")
+                instance.active_tasks.discard(task_id)
+            except Exception as e:
+                logger.error(f"同步存储五元组失败: {e}")
 
     async def _on_task_completed(self, task_id: str, quintuples: List) -> None:
         try:
