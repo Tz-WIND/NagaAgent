@@ -728,8 +728,13 @@ async def get_memory_stats():
 
         remote = get_remote_memory_client()
         if remote is not None:
-            stats = await remote.get_stats()
-            return {"status": "success", "memory_stats": stats}
+            try:
+                stats = await remote.get_stats()
+                if stats.get("success") is not False:
+                    return {"status": "success", "memory_stats": stats}
+                logger.warning(f"远程记忆统计获取失败: {stats.get('error')}，降级到本地")
+            except Exception as e:
+                logger.warning(f"远程记忆统计异常: {e}，降级到本地")
 
         # 回退到本地 summer_memory
         try:
@@ -756,38 +761,57 @@ async def get_quintuples():
         from summer_memory.memory_client import get_remote_memory_client
 
         remote = get_remote_memory_client()
+        remote_quintuples = []
         if remote is not None:
-            result = await remote.get_quintuples(limit=500)
-            quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
-            # 兼容 NagaMemory 返回格式：可能是 dict 列表或 tuple 列表
-            quintuples = []
-            for q in quintuples_raw:
-                if isinstance(q, dict):
-                    quintuples.append({
-                        "subject": q.get("subject", ""),
-                        "subject_type": q.get("subject_type", ""),
-                        "predicate": q.get("predicate", q.get("relation", "")),
-                        "object": q.get("object", ""),
-                        "object_type": q.get("object_type", ""),
-                    })
-                elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                    quintuples.append({
-                        "subject": q[0], "subject_type": q[1],
-                        "predicate": q[2], "object": q[3], "object_type": q[4],
-                    })
-            return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            try:
+                result = await remote.get_quintuples(limit=500)
+                if result.get("success") is not False:
+                    quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
+                    # 兼容 NagaMemory 返回格式：可能是 dict 列表或 tuple 列表
+                    for q in quintuples_raw:
+                        if isinstance(q, dict):
+                            remote_quintuples.append({
+                                "subject": q.get("subject", ""),
+                                "subject_type": q.get("subject_type", ""),
+                                "predicate": q.get("predicate", q.get("relation", "")),
+                                "object": q.get("object", ""),
+                                "object_type": q.get("object_type", ""),
+                            })
+                        elif isinstance(q, (list, tuple)) and len(q) >= 5:
+                            remote_quintuples.append({
+                                "subject": q[0], "subject_type": q[1],
+                                "predicate": q[2], "object": q[3], "object_type": q[4],
+                            })
+                else:
+                    logger.warning(f"远程五元组获取失败: {result.get('error')}，降级到本地")
+            except Exception as e:
+                logger.warning(f"远程五元组获取异常: {e}，降级到本地")
 
-        # 回退到本地 summer_memory
-        from summer_memory.quintuple_graph import get_all_quintuples
+        # 合并本地 summer_memory 数据（远程为空或失败时补充本地数据）
+        local_quintuples = []
+        try:
+            from summer_memory.quintuple_graph import get_all_quintuples
+            local_data = get_all_quintuples()  # returns set[tuple]
+            local_quintuples = [
+                {"subject": q[0], "subject_type": q[1], "predicate": q[2], "object": q[3], "object_type": q[4]}
+                for q in local_data
+            ]
+        except ImportError:
+            pass
 
-        quintuples = get_all_quintuples()  # returns set[tuple]
+        # 合并去重：以 (subject, predicate, object) 为唯一键
+        seen = set()
+        merged = []
+        for q in remote_quintuples + local_quintuples:
+            key = (q["subject"], q["predicate"], q["object"])
+            if key not in seen:
+                seen.add(key)
+                merged.append(q)
+
         return {
             "status": "success",
-            "quintuples": [
-                {"subject": q[0], "subject_type": q[1], "predicate": q[2], "object": q[3], "object_type": q[4]}
-                for q in quintuples
-            ],
-            "count": len(quintuples),
+            "quintuples": merged,
+            "count": len(merged),
         }
     except ImportError:
         return {"status": "success", "quintuples": [], "count": 0, "message": "记忆系统模块未找到"}
@@ -810,24 +834,30 @@ async def search_quintuples(keywords: str = ""):
 
         remote = get_remote_memory_client()
         if remote is not None:
-            result = await remote.query_by_keywords(keyword_list)
-            quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
-            quintuples = []
-            for q in quintuples_raw:
-                if isinstance(q, dict):
-                    quintuples.append({
-                        "subject": q.get("subject", ""),
-                        "subject_type": q.get("subject_type", ""),
-                        "predicate": q.get("predicate", q.get("relation", "")),
-                        "object": q.get("object", ""),
-                        "object_type": q.get("object_type", ""),
-                    })
-                elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                    quintuples.append({
-                        "subject": q[0], "subject_type": q[1],
-                        "predicate": q[2], "object": q[3], "object_type": q[4],
-                    })
-            return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+            try:
+                result = await remote.query_by_keywords(keyword_list)
+                if result.get("success") is not False:
+                    quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
+                    quintuples = []
+                    for q in quintuples_raw:
+                        if isinstance(q, dict):
+                            quintuples.append({
+                                "subject": q.get("subject", ""),
+                                "subject_type": q.get("subject_type", ""),
+                                "predicate": q.get("predicate", q.get("relation", "")),
+                                "object": q.get("object", ""),
+                                "object_type": q.get("object_type", ""),
+                            })
+                        elif isinstance(q, (list, tuple)) and len(q) >= 5:
+                            quintuples.append({
+                                "subject": q[0], "subject_type": q[1],
+                                "predicate": q[2], "object": q[3], "object_type": q[4],
+                            })
+                    return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
+                else:
+                    logger.warning(f"远程五元组搜索失败: {result.get('error')}，降级到本地")
+            except Exception as e:
+                logger.warning(f"远程五元组搜索异常: {e}，降级到本地")
 
         # 回退到本地 summer_memory
         from summer_memory.quintuple_graph import query_graph_by_keywords

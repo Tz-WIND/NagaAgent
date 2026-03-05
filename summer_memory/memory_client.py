@@ -49,6 +49,26 @@ class RemoteMemoryClient:
         url = f"{self.base_url}{path}"
         try:
             resp = await self._client.request(method, url, **kwargs)
+
+            # 401 自动刷新 token 并重试一次
+            if resp.status_code == 401:
+                logger.warning(f"NagaMemory 返回 401 [{method} {path}]，尝试刷新 token...")
+                try:
+                    from apiserver.naga_auth import refresh as naga_refresh, get_access_token
+                    await naga_refresh()
+                    new_token = get_access_token()
+                    if new_token:
+                        self._client.headers["Authorization"] = f"Bearer {new_token}"
+                        # 重置全局单例，使下次 get_remote_memory_client() 用新 token 重建
+                        global _client
+                        _client = None
+                        logger.info("token 刷新成功，正在重试请求...")
+                        resp = await self._client.request(method, url, **kwargs)
+                    else:
+                        logger.error("token 刷新后仍无 access_token")
+                except Exception as refresh_err:
+                    logger.error(f"token 刷新失败: {refresh_err}")
+
             resp.raise_for_status()
             if not resp.content:
                 logger.warning(f"NagaMemory 返回空响应 [{method} {path}] status={resp.status_code}")

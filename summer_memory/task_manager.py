@@ -250,7 +250,7 @@ class QuintupleTaskManager:
         logger.info(f"工作协程启动: {worker_id}")
 
         # === 添加启动确认日志 ===
-        logger.info(f"✅ {worker_id} 已进入工作循环，状态: running={self.is_running}")
+        logger.info(f"{worker_id} 已进入工作循环，状态: running={self.is_running}")
 
         while self.is_running:
             try:

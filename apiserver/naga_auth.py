@@ -176,7 +176,11 @@ async def refresh(refresh_token_override: Optional[str] = None) -> dict:
 
         logger.info(f"尝试刷新 token (source={source}, token_prefix={token[:20]}...)")
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(f"{BUSINESS_URL}/api/auth/refresh", json={"refresh_token": token})
+            # 优先用 Cookie 传递 refresh_token（服务端已不接受 JSON body）
+            resp = await client.post(
+                f"{BUSINESS_URL}/api/auth/refresh",
+                cookies={"refresh_token": token},
+            )
             resp.raise_for_status()
             data = resp.json()
 
@@ -227,6 +231,30 @@ def restore_token(token: str):
 
 def get_access_token() -> Optional[str]:
     return _access_token
+
+
+async def ensure_access_token():
+    """启动时确保有可用的 access_token
+
+    如果已有 _access_token 则直接返回；
+    如果只有 _refresh_token（从文件恢复）但没有 _access_token，
+    则主动调用 refresh() 获取新 token。
+    供服务启动阶段调用，避免 Windows 端记忆客户端拿不到动态 token
+    而回退到过期的静态 JWT。
+    """
+    global _access_token
+    if _access_token:
+        logger.info("ensure_access_token: 已有 access_token，无需刷新")
+        return
+    if _refresh_token:
+        logger.info("ensure_access_token: 有 refresh_token 但无 access_token，尝试自动刷新...")
+        try:
+            result = await refresh()
+            logger.info(f"ensure_access_token: 自动刷新成功, token_prefix={_access_token[:20] if _access_token else 'None'}...")
+        except Exception as e:
+            logger.error(f"ensure_access_token: 自动刷新失败: {e}")
+    else:
+        logger.info("ensure_access_token: 无 refresh_token，跳过（用户未登录）")
 
 
 def get_user_info() -> Optional[dict]:

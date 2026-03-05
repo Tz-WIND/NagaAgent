@@ -448,6 +448,20 @@ class ServiceManager:
     def _init_memory_system(self):
         """初始化记忆系统"""
         try:
+            # 启动时确保有有效 access_token（Windows 端 refresh_token 恢复后需主动刷新）
+            try:
+                from apiserver.naga_auth import ensure_access_token
+                import asyncio as _asyncio
+                try:
+                    loop = _asyncio.get_running_loop()
+                    # 已在事件循环中，创建 task（不阻塞当前线程）
+                    loop.create_task(ensure_access_token())
+                except RuntimeError:
+                    # 没有运行中的事件循环，同步执行
+                    _asyncio.run(ensure_access_token())
+            except Exception as e:
+                logger.warning(f"启动时刷新 token 失败: {e}")
+
             # 优先检查远程 NagaMemory 服务
             from summer_memory.memory_client import get_remote_memory_client
             remote = get_remote_memory_client()
