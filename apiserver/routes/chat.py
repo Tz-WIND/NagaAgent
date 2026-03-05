@@ -29,6 +29,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _supports_function_calling(model_name: str) -> bool:
+    """检测模型是否支持原生 function calling"""
+    model_lower = model_name.lower()
+    # 支持 function calling 的模型
+    supported = ["gpt-4", "gpt-3.5-turbo", "gpt-4o", "claude-3", "claude-2"]
+    # 不支持的模型
+    unsupported = ["deepseek", "qwen", "llama", "mistral", "yi-"]
+
+    if any(s in model_lower for s in unsupported):
+        return False
+    if any(s in model_lower for s in supported):
+        return True
+    # 默认尝试使用（保守策略）
+    return False
+
+
 def _parse_memory_result(mem_result: dict) -> str:
     """解析 NagaMemory 返回结果，兼容 quintuples / memories / answer 三种格式"""
     if not mem_result.get("success"):
@@ -194,10 +210,14 @@ async def chat(request: ChatRequest):
 
         await _query_rag()
 
-        # 构建附加知识（工具走原生 function calling，不再文本注入）
+        # 检测模型是否支持原生 function calling
+        current_model = get_config().api.model
+        supports_fc = _supports_function_calling(current_model)
+
+        # 构建附加知识
         supplement = build_context_supplement(
             include_skills=True,
-            include_tool_instructions=False,
+            include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
             skill_name=request.skill,
             rag_section=rag_section,
         )
@@ -291,19 +311,29 @@ async def chat_stream(request: ChatRequest):
 
             await _query_rag_stream()
 
-            # 构建附加知识（工具走原生 function calling，不再文本注入）
+            # 检测模型是否支持原生 function calling
+            current_model = get_config().api.model
+            supports_fc = _supports_function_calling(current_model)
+            logger.info(f"[ChatStream] 模型 {current_model} function calling 支持: {supports_fc}")
+
+            # 构建附加知识
             yield 'data: {"type":"status","text":"组织上下文"}\n\n'
             supplement = build_context_supplement(
                 include_skills=True,
-                include_tool_instructions=False,
+                include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
                 skill_name=request.skill,
                 rag_section=rag_section,
             )
             messages.append({"role": "system", "content": supplement})
 
-            # 获取工具 schemas（原生 function calling）
-            from apiserver.tool_schemas import get_all_tool_schemas
-            tools = get_all_tool_schemas()
+            # 获取工具 schemas（仅在支持原生 function calling 时传递）
+            tools = None
+            if supports_fc:
+                from apiserver.tool_schemas import get_all_tool_schemas
+                tools = get_all_tool_schemas()
+                logger.info(f"[ChatStream] 使用原生 function calling，工具数: {len(tools) if tools else 0}")
+            else:
+                logger.info("[ChatStream] 使用文本解析模式（模型不支持原生 function calling）")
 
             # 如果携带截屏图片，将最后一条 user 消息改为多模态格式（OpenAI vision 兼容）
             if request.images:
