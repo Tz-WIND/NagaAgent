@@ -6,7 +6,7 @@ import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, p
 import { startBackend, stopBackend } from './modules/backend'
 import { registerHotkeys, unregisterHotkeys } from './modules/hotkeys'
 import { createMenu } from './modules/menu'
-import { initPatchDirs, registerPatcherIPC, resolveFrontendPatch } from './modules/patcher'
+import { checkAndApplyPatches, initPatchDirs, registerPatcherIPC, resolveFrontendPatch } from './modules/patcher'
 import { createTray, destroyTray } from './modules/tray'
 import { downloadUpdate, installUpdate, setupAutoUpdater } from './modules/updater'
 import {
@@ -55,7 +55,7 @@ app.on('second-instance', () => {
   }
 })
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // ── 热补丁系统初始化 ──
   initPatchDirs()
   registerPatcherIPC()
@@ -106,9 +106,6 @@ app.whenReady().then(() => {
 
   // 强制暗色主题（确保原生菜单等 UI 为深色）
   nativeTheme.themeSource = 'dark'
-
-  // Start backend services
-  startBackend()
 
   // Create menu
   createMenu()
@@ -340,6 +337,42 @@ app.whenReady().then(() => {
       getMainWindow()?.show()
     }
   })
+
+  // ── 启动时补丁检查（仅打包模式，5秒超时） ──
+  if (app.isPackaged) {
+    try {
+      // 等待页面加载完成，确保渲染进程能接收进度事件
+      if (win.webContents.isLoading()) {
+        await new Promise<void>(resolve => win.webContents.once('did-finish-load', resolve))
+      }
+
+      win.webContents.send('backend:progress', { percent: 2, phase: '检测更新...' })
+
+      const patchResult = await Promise.race([
+        checkAndApplyPatches('https://update.nagaagent.com', app.getVersion()),
+        new Promise<null>((resolve) => {
+          setTimeout(() => {
+            console.log('[Startup] 补丁检查超时 (5s)，跳过')
+            resolve(null)
+          }, 5000)
+        }),
+      ])
+
+      if (patchResult?.updated) {
+        console.log(`[Startup] 补丁已更新至 ${patchResult.version}`)
+        if (patchResult.frontendChanged) {
+          // 前端补丁已下载，重新加载页面以应用
+          win.webContents.reloadIgnoringCache()
+        }
+      }
+    }
+    catch (err) {
+      console.warn(`[Startup] 补丁检查失败，跳过: ${err instanceof Error ? err.message : err}`)
+    }
+  }
+
+  // Start backend services（补丁检查之后启动，确保后端补丁已就位）
+  startBackend()
 })
 
 app.on('before-quit', () => {
