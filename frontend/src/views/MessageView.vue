@@ -27,6 +27,9 @@ async function processQueue() {
 }
 
 export function chatStream(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
+  // 用户发送新消息时，立即中止上一次的 TTS 播放
+  stopTTS()
+
   // 将消息加入队列
   messageQueue.push({ content, options })
   processQueue()
@@ -34,9 +37,6 @@ export function chatStream(content: string, options?: { skill?: string, images?:
 
 async function chatStreamInternal(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   isSending.value = true
-
-  // 新问答开始时，立即中止上一次的 TTS 播放
-  stopTTS()
 
   MESSAGES.value.push({ role: 'user', content: options?.images?.length ? `[截图x${options.images.length}] ${content}` : content })
 
