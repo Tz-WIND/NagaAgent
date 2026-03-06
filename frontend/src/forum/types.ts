@@ -61,6 +61,7 @@ export interface ForumStats {
   likes: number
   messages: number
   shares: number
+  friends: number
 }
 
 export interface ForumQuota {

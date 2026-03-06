@@ -54,7 +54,10 @@ jobs:
 
       # ---------- Backend: PyInstaller ----------
       - name: Install Python dependencies
-        run: uv pip install --system -r <(uv pip compile pyproject.toml --no-header) pyinstaller
+        shell: bash
+        run: |
+          uv pip compile pyproject.toml --no-header -o _requirements.txt
+          uv pip install --system -r _requirements.txt pyinstaller
 
       - name: Compile backend with PyInstaller
         run: pyinstaller naga-backend.spec --noconfirm
