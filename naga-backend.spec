@@ -167,10 +167,12 @@ hiddenimports = excludes + [
     'tiktoken_ext.openai_public',
 ]
 hiddenimports += collect_submodules('psutil')
+hiddenimports += collect_submodules('charset_normalizer')
 
 
 
 binaries = collect_dynamic_libs('psutil')
+binaries += collect_dynamic_libs('charset_normalizer')
 
 a = Analysis(
     ['main.py'],
