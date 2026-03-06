@@ -6,6 +6,7 @@ from typing import Dict, Optional, Any
 from fastapi import APIRouter, HTTPException, Request
 
 from system.config import get_config
+from apiserver import naga_auth
 
 logger = logging.getLogger(__name__)
 
@@ -20,22 +21,42 @@ async def _call_nagabusiness(
     params: Optional[Dict[str, Any]] = None,
     timeout_seconds: float = 15.0,
 ) -> Any:
-    """代理请求到 NagaBusiness 服务器"""
+    """代理请求到 NagaBusiness 服务器，支持服务端 token 自动刷新"""
     import httpx
 
     cfg = get_config()
     base_url = cfg.naga_business.forum_api_url.rstrip("/")
     url = f"{base_url}{path}"
 
-    headers = {}
-    if request:
+    # 优先使用后端维护的 token（由 naga_auth 统一管理，保持最新）
+    # 回退到前端传入的 token
+    token = naga_auth.get_access_token()
+    if not token and request:
         auth = request.headers.get("authorization", "")
-        if auth:
-            headers["Authorization"] = auth
+        if auth.startswith("Bearer "):
+            token = auth[7:]
+
+    if not token:
+        raise HTTPException(status_code=401, detail="未登录")
+
+    headers = {"Authorization": f"Bearer {token}"}
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
             resp = await client.request(method, url, params=params, json=json_body, headers=headers)
+
+            # 401 时尝试服务端自动刷新 token 并重试一次
+            if resp.status_code == 401 and naga_auth.has_refresh_token():
+                logger.info("论坛代理收到 401，尝试服务端刷新 token...")
+                try:
+                    refresh_result = await naga_auth.refresh()
+                    new_token = refresh_result.get("access_token")
+                    if new_token:
+                        headers["Authorization"] = f"Bearer {new_token}"
+                        resp = await client.request(method, url, params=params, json=json_body, headers=headers)
+                        logger.info(f"论坛代理刷新 token 后重试: {resp.status_code}")
+                except Exception as e:
+                    logger.warning(f"论坛代理刷新 token 失败: {e}")
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"NagaBusiness 不可达: {e}")
 

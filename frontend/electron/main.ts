@@ -35,13 +35,18 @@ if (!gotTheLock) {
 }
 
 // ── 自定义协议：naga-char:// 用于加载 characters 目录下的角色资源 ──
-const CHARACTERS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'characters')
+// 打包模式：extraResources/characters；开发模式：项目根/characters
+const CHARACTERS_DIR = app.isPackaged
+  ? resolve(process.resourcesPath, 'characters')
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'characters')
 // ── 自定义协议：naga-bg:// 用于加载 premium-assets/backgrounds 目录下的背景图片 ──
-const BACKGROUNDS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'premium-assets', 'backgrounds')
+const BACKGROUNDS_DIR = app.isPackaged
+  ? resolve(process.resourcesPath, 'premium-assets', 'backgrounds')
+  : resolve(dirname(fileURLToPath(import.meta.url)), '..', 'premium-assets', 'backgrounds')
 protocol.registerSchemesAsPrivileged([
   { scheme: 'naga-char', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
   { scheme: 'naga-bg', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
-  { scheme: 'naga-app', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true } },
+  { scheme: 'naga-app', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true, stream: true } },
 ])
 
 app.on('second-instance', () => {

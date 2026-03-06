@@ -139,7 +139,9 @@ export class ApiClient {
   }
 
   private clearAuthDataAndRedirect(): void {
-    // 重新登录期间不触发（避免清空 token 后在途请求的 401 再次弹窗）
+    // 立即清空 token，阻止后续请求继续携带过期 token 导致 401 风暴
+    ACCESS_TOKEN.value = ''
+    // 重新登录期间不触发（避免在途请求再次弹窗）
     if (!authExpired.value && !suppressAuthExpired) {
       authExpired.value = true
     }
