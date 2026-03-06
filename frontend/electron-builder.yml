@@ -13,6 +13,13 @@ files:
   - "!dist/models/重音テト/**"
 
 extraResources:
+  - from: build/icon.png
+    to: build/icon.png
+  - from: ../characters
+    to: characters
+    filter:
+      - '**/*'
+      - '!.DS_Store'
   - from: backend-dist/naga-backend
     to: backend
     filter:
@@ -38,7 +45,7 @@ nsis:
   shortcutName: Naga Agent
   include: build/uninstaller.nsh
 
-compression: store
+compression: normal
 
 mac:
   target:
@@ -67,4 +74,5 @@ linux:
 
 publish:
   provider: generic
-  url: ''
+  url: http://62.234.131.204:30031/api/app/releases
+  channel: latest

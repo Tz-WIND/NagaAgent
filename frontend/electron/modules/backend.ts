@@ -6,7 +6,6 @@ import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 import { app } from 'electron'
-import { getBackendPatchDir, hasBackendPatches } from './patcher'
 import { getMainWindow } from './window'
 
 const __filename = fileURLToPath(import.meta.url)
@@ -78,12 +77,6 @@ export function startBackend(): void {
   console.log(`[Backend] Command: ${cmd} ${args.join(' ')}`)
 
   const env: Record<string, string | undefined> = { ...process.env, PYTHONUNBUFFERED: '1' }
-
-  // 传递后端补丁目录（热更新系统）
-  if (app.isPackaged && hasBackendPatches()) {
-    env.NAGA_PATCH_DIR = getBackendPatchDir()
-    console.log(`[Backend] 后端补丁目录: ${env.NAGA_PATCH_DIR}`)
-  }
 
   const useDebugConsole = process.platform === 'win32' && shouldOpenDebugConsole()
 
