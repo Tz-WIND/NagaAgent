@@ -422,7 +422,7 @@ export class CoreApiClient extends ApiClient {
     return this.instance.post('/auth/login', { username, password, captcha_id: captchaId, captcha_answer: captchaAnswer })
   }
 
-  authMe(): Promise<{ user: { username: string, sub?: string }, memoryUrl?: string }> {
+  authMe(): Promise<{ user: { username: string, sub?: string }, memoryUrl?: string, accessToken?: string }> {
     return this.instance.get('/auth/me')
   }
 

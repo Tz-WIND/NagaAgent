@@ -99,6 +99,11 @@ export function useAuth() {
     try {
       const res = await coreApi.authMe()
       if (res.user) {
+        // 同步后端实际使用的 token（后端启动时 ensure_access_token 可能已刷新，
+        // 前端持有的旧 token 未触发 401 刷新流程，导致 businessClient 直连时失败）
+        if (res.accessToken && res.accessToken !== ACCESS_TOKEN.value) {
+          ACCESS_TOKEN.value = res.accessToken
+        }
         nagaUser.value = res.user
         sessionRestored.value = true
         syncMemoryServer(true, res.memoryUrl)

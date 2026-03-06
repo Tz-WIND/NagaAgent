@@ -1,9 +1,12 @@
+import type { AxiosError } from 'axios'
 import axios from 'axios'
 import camelcaseKeys from 'camelcase-keys'
 import { ACCESS_TOKEN } from './index'
 
+const BUSINESS_BASE = 'http://62.234.131.204:30031'
+
 const businessClient = axios.create({
-  baseURL: 'http://62.234.131.204:30031',
+  baseURL: BUSINESS_BASE,
   timeout: 15_000,
   headers: { 'Content-Type': 'application/json' },
   transformResponse: [(data: string) => {
@@ -20,6 +23,48 @@ businessClient.interceptors.request.use((config) => {
   }
   return config
 })
+
+// 401 时通过本地后端刷新 token 并重试（businessClient 直连 NagaBusiness，不经过本地后端的刷新逻辑）
+let _bizRefreshing = false
+let _bizRefreshQueue: Array<(token: string) => void> = []
+
+businessClient.interceptors.response.use(
+  response => response,
+  async (error: AxiosError & { config: { _retry?: boolean } }) => {
+    if (error.response?.status !== 401 || !error.config || error.config._retry || !ACCESS_TOKEN.value) {
+      return Promise.reject(error)
+    }
+    if (_bizRefreshing) {
+      return new Promise((resolve) => {
+        _bizRefreshQueue.push((token: string) => {
+          error.config.headers.Authorization = `Bearer ${token}`
+          resolve(businessClient(error.config))
+        })
+      })
+    }
+    error.config._retry = true
+    _bizRefreshing = true
+    try {
+      // 调用本地后端刷新（后端管理 refresh_token）
+      const port = 8000
+      const resp = await axios.post<{ access_token: string }>(`http://localhost:${port}/auth/refresh`, {})
+      const newToken = resp.data.access_token
+      if (newToken) {
+        ACCESS_TOKEN.value = newToken
+        _bizRefreshQueue.forEach(cb => cb(newToken))
+        _bizRefreshQueue = []
+        _bizRefreshing = false
+        error.config.headers.Authorization = `Bearer ${newToken}`
+        return businessClient(error.config)
+      }
+    }
+    catch { /* refresh failed */ }
+    _bizRefreshing = false
+    _bizRefreshQueue.forEach(cb => cb(''))
+    _bizRefreshQueue = []
+    return Promise.reject(error)
+  },
+)
 
 // ── 积分 ──
 

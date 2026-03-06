@@ -59,7 +59,9 @@ async def auth_me(request: Request):
         raise HTTPException(status_code=401, detail="token 已失效")
     # 恢复服务端认证状态
     naga_auth.restore_token(token)
-    return {"user": user, "memory_url": naga_auth.NAGA_MEMORY_URL}
+    # 返回后端实际使用的 token，供前端同步
+    # （后端 ensure_access_token 启动时可能已刷新，前端持有的旧 token 已过期但请求走了后端 token 未触发 401）
+    return {"user": user, "memory_url": naga_auth.NAGA_MEMORY_URL, "access_token": token}
 
 
 @router.post("/auth/logout")
