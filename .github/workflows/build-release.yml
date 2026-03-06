@@ -125,21 +125,6 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      # Upload to server COS for electron-updater (domestic users)
-      - name: Setup SSH key
-        run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H 62.234.131.204 >> ~/.ssh/known_hosts 2>/dev/null
-
-      - name: Deploy to update server
-        run: |
-          REMOTE_DIR="/lhcos-data/apps/NagaAgent/releases"
-          ssh -i ~/.ssh/id_rsa root@62.234.131.204 "mkdir -p ${REMOTE_DIR}"
-          scp -i ~/.ssh/id_rsa artifacts/* root@62.234.131.204:${REMOTE_DIR}/
-
-      # Also create GitHub Release as backup
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
