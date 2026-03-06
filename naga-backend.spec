@@ -169,10 +169,25 @@ hiddenimports = excludes + [
 hiddenimports += collect_submodules('psutil')
 hiddenimports += collect_submodules('charset_normalizer')
 
-
+# charset_normalizer 3.x 的 mypyc 编译模块（如 81d243bd2c585b0f4821__mypyc.pyd）
+# 位于 site-packages 根目录，collect_dynamic_libs 找不到，需手动扫描
+import charset_normalizer as _cn
+_cn_parent = os.path.dirname(os.path.dirname(_cn.__file__))  # site-packages
+_mypyc_binaries = []
+for _f in os.listdir(_cn_parent):
+    if '__mypyc' in _f and (_f.endswith('.pyd') or _f.endswith('.so')):
+        _mypyc_binaries.append((os.path.join(_cn_parent, _f), '.'))
+        print(f"[spec] Found mypyc binary: {_f}")
+if not _mypyc_binaries:
+    # fallback: 也检查包目录内部
+    for _f in os.listdir(os.path.dirname(_cn.__file__)):
+        if '__mypyc' in _f and (_f.endswith('.pyd') or _f.endswith('.so')):
+            _mypyc_binaries.append((os.path.join(os.path.dirname(_cn.__file__), _f), '.'))
+            print(f"[spec] Found mypyc binary (in pkg): {_f}")
 
 binaries = collect_dynamic_libs('psutil')
 binaries += collect_dynamic_libs('charset_normalizer')
+binaries += _mypyc_binaries
 
 a = Analysis(
     ['main.py'],
