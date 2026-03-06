@@ -1,11 +1,11 @@
 <script lang="ts">
 import { onKeyStroke, useEventListener } from '@vueuse/core'
-import { nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
+import { nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ACCESS_TOKEN, authExpired } from '@/api'
 import API from '@/api/core'
 import BoxContainer from '@/components/BoxContainer.vue'
 import MessageItem from '@/components/MessageItem.vue'
-import { startToolPolling, stopToolPolling, toolMessage } from '@/composables/useToolStatus'
+import { toolMessage } from '@/composables/useToolStatus'
 import { CONFIG } from '@/utils/config'
 import { live2dState, setEmotion } from '@/utils/live2dController'
 import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurrentSession, MESSAGES, newSession, switchSession } from '@/utils/session'
@@ -268,11 +268,7 @@ function sendMessage() {
 
 onMounted(() => {
   loadCurrentSession()
-  startToolPolling()
   scrollToBottom()
-})
-onUnmounted(() => {
-  stopToolPolling()
 })
 useEventListener('token', scrollToBottom)
 onKeyStroke('Enter', (e) => {

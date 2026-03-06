@@ -1,5 +1,6 @@
 import { ref } from 'vue'
 import API from '@/api/core'
+import { authExpired } from '@/api'
 import { triggerAction } from '@/utils/live2dController'
 import { MESSAGES } from '@/utils/session'
 import { handleMusicCommand } from '@/composables/useMusicPlayer'
@@ -8,6 +9,7 @@ import { isNagaLoggedIn, refreshUserStats } from '@/composables/useAuth'
 export const toolMessage = ref('')
 export const openclawTasks = ref<Array<Record<string, any>>>([])
 let timer: ReturnType<typeof setInterval> | null = null
+let consecutiveFailures = 0
 
 async function poll() {
   try {
@@ -18,6 +20,9 @@ async function poll() {
       API.getLive2dActions(),
       API.getMusicCommands(),
     ])
+
+    // 轮询成功，重置失败计数
+    consecutiveFailures = 0
 
     // 轮询时刷新积分
     if (isNagaLoggedIn.value) {
@@ -59,7 +64,12 @@ async function poll() {
     }
   }
   catch {
-    // ignore polling errors
+    consecutiveFailures++
+    // 连续 3 次轮询失败且已登录 → 触发重新登录弹窗
+    if (consecutiveFailures >= 3 && isNagaLoggedIn.value) {
+      authExpired.value = true
+      consecutiveFailures = 0 // 重置，避免反复触发
+    }
   }
 }
 
