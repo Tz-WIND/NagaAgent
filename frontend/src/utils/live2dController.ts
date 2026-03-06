@@ -311,7 +311,7 @@ function computeMouth(now: number, dt: number): Record<string, number> {
     let roll = Math.random() * _visemeWeightSum
     let idx = 0
     for (let i = 0; i < VISEMES.length; i++) {
-      roll -= VISEMES[i].w
+      roll -= VISEMES[i]!.w
       if (roll <= 0) { idx = i; break }
     }
 
@@ -322,7 +322,7 @@ function computeMouth(now: number, dt: number): Record<string, number> {
       ? 40 + Math.random() * 80 // 闭合过渡 40-120ms
       : 120 + Math.random() * 160) // 正常音节 120-280ms
 
-    const viseme = VISEMES[idx].p
+    const viseme = VISEMES[idx]!.p
     for (const p of MOUTH_PARAMS) {
       const base = viseme[p] ?? 0
       const jitter = (Math.random() - 0.5) * 0.08

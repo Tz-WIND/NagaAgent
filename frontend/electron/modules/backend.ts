@@ -77,7 +77,7 @@ export function startBackend(): void {
   console.log(`[Backend] Starting from ${cwd}`)
   console.log(`[Backend] Command: ${cmd} ${args.join(' ')}`)
 
-  const env = { ...process.env, PYTHONUNBUFFERED: '1' }
+  const env: Record<string, string | undefined> = { ...process.env, PYTHONUNBUFFERED: '1' }
 
   // 传递后端补丁目录（热更新系统）
   if (app.isPackaged && hasBackendPatches()) {
