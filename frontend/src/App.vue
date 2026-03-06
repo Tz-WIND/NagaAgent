@@ -24,6 +24,7 @@ import { useElectron } from '@/composables/useElectron'
 import { useMusicPlayer } from '@/composables/useMusicPlayer'
 import { useParallax } from '@/composables/useParallax'
 import { useStartupProgress } from '@/composables/useStartupProgress'
+import { startToolPolling, stopToolPolling } from '@/composables/useToolStatus'
 import { checkForUpdate, showUpdateDialog, updateInfo } from '@/composables/useVersionCheck'
 import { backendConnected, CONFIG } from '@/utils/config'
 import { clearExpression, setExpression } from '@/utils/live2dController'
@@ -238,6 +239,22 @@ watch(sessionRestored, (restored) => {
   }
 })
 
+// ─── 全局轮询：登录后启动，登出后停止（积分刷新 + 心跳检测）───
+watch(isNagaLoggedIn, (loggedIn) => {
+  if (loggedIn && backendConnected.value) {
+    startToolPolling()
+  }
+  else {
+    stopToolPolling()
+  }
+}, { immediate: true })
+
+watch(backendConnected, (connected) => {
+  if (connected && isNagaLoggedIn.value) {
+    startToolPolling()
+  }
+})
+
 onMounted(() => {
   initParallax()
   startProgress()
@@ -295,6 +312,7 @@ onMounted(() => {
 onUnmounted(() => {
   destroyParallax()
   cleanup()
+  stopToolPolling()
   unsubStateChange?.()
 })
 </script>

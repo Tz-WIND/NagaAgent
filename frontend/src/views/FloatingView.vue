@@ -5,7 +5,7 @@ import ScrollPanel from 'primevue/scrollpanel'
 import { computed, nextTick, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 import API from '@/api/core'
 import MessageItem from '@/components/MessageItem.vue'
-import { startToolPolling, stopToolPolling, toolMessage } from '@/composables/useToolStatus'
+import { toolMessage } from '@/composables/useToolStatus'
 import { CONFIG } from '@/utils/config'
 import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurrentSession, MESSAGES, newSession, newTemporarySession, switchSession } from '@/utils/session'
 import { chatStream } from '@/views/MessageView.vue'
@@ -178,9 +178,8 @@ onMounted(() => {
   // 启动序列帧动画
   startFrameAnimation()
 
-  // 加载会话和工具状态
+  // 加载会话
   loadCurrentSession()
-  startToolPolling()
 
   // 获取初始状态
   api.floating.getState().then((state) => {
@@ -234,7 +233,6 @@ onUnmounted(() => {
   document.documentElement.style.backgroundColor = '#110901'
   unsubStateChange?.()
   unsubBlur?.()
-  stopToolPolling()
   stopFrameAnimation()
   stopNotification()
   resizeObserver?.disconnect()

@@ -97,7 +97,8 @@ function setupAudioForTrack() {
   if (!audio || !currentTrack.value)
     return
   // 如果已经在播放同一首曲目，不重置进度（避免切换到音律坊时进度归零）
-  if (audio.src && audio.src.endsWith(currentTrack.value.src))
+  // 注意：浏览器会将 audio.src 中的中文做 URL 编码，需要 decode 后再比较
+  if (audio.src && decodeURIComponent(audio.src).endsWith(currentTrack.value.src))
     return
   audio.src = currentTrack.value.src
   audio.currentTime = 0

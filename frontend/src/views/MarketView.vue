@@ -670,7 +670,6 @@ async function handleRedeem() {
           >
             <div class="card-credits">{{ product.credits }}</div>
             <div class="card-unit">积分</div>
-            <div class="card-name">{{ product.name }}</div>
             <div class="card-price">{{ product.price }}</div>
           </div>
         </div>
@@ -1757,7 +1756,6 @@ async function handleRedeem() {
 }
 .recharge-card .card-credits { font-size: 1.8rem; font-weight: bold; color: #d4af37; }
 .recharge-card .card-unit { font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-top: -0.2rem; }
-.recharge-card .card-name { font-size: 0.85rem; color: rgba(255,255,255,0.8); margin-top: 0.3rem; }
 .recharge-card .card-price { font-size: 1rem; font-weight: 600; color: rgba(255,255,255,0.9); margin-top: 0.2rem; }
 
 .recharge-redeem { display: flex; gap: 0.5rem; max-width: 360px; margin: 0 auto; }
