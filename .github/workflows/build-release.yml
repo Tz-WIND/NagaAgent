@@ -22,15 +22,12 @@ jobs:
           - os: windows-latest
             platform: win
             dist_cmd: dist:win
-            artifact_glob: '*.exe'
           - os: macos-14
             platform: mac
             dist_cmd: dist:mac
-            artifact_glob: '*.dmg'
           - os: ubuntu-latest
             platform: linux
             dist_cmd: dist:linux
-            artifact_glob: '*.AppImage'
 
     runs-on: ${{ matrix.os }}
 
@@ -74,21 +71,19 @@ jobs:
         shell: bash
         run: |
           mkdir -p frontend/backend-dist/openclaw-runtime
-          # Download portable Node.js for OpenClaw
           curl -L -o node.zip "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip"
           unzip -q node.zip -d _node_tmp
           mv _node_tmp/node-v22.14.0-win-x64 frontend/backend-dist/openclaw-runtime/node
-          # Install OpenClaw globally in portable node
           frontend/backend-dist/openclaw-runtime/node/npm.cmd install -g @anthropic-ai/claude-code
 
-      # ---------- Frontend: electron-builder ----------
+      # ---------- Frontend: electron-builder (build only, no publish) ----------
       - name: Install frontend dependencies
         working-directory: frontend
         run: npm ci
 
       - name: Build & package
         working-directory: frontend
-        run: npm run ${{ matrix.dist_cmd }}
+        run: npm run ${{ matrix.dist_cmd }} -- --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -96,7 +91,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: NagaAgent-${{ matrix.platform }}
-          path: frontend/release/${{ matrix.artifact_glob }}
+          path: |
+            frontend/release/*.exe
+            frontend/release/*.dmg
+            frontend/release/*.AppImage
+            frontend/release/*.blockmap
+            frontend/release/latest*.yml
           if-no-files-found: error
 
   release:
@@ -123,13 +123,29 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: true
 
-      - name: Create Release
+      # Upload to server COS for electron-updater (domestic users)
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H 62.234.131.204 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Deploy to update server
+        run: |
+          REMOTE_DIR="/lhcos-data/apps/NagaAgent/releases"
+          ssh -i ~/.ssh/id_rsa root@62.234.131.204 "mkdir -p ${REMOTE_DIR}"
+          scp -i ~/.ssh/id_rsa artifacts/* root@62.234.131.204:${REMOTE_DIR}/
+
+      # Also create GitHub Release as backup
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           name: NagaAgent ${{ steps.ver.outputs.version }}
           draft: false
           prerelease: false
-          files: artifacts/**/*
+          files: artifacts/*
           generate_release_notes: true

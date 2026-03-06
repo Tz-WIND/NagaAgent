@@ -6,7 +6,6 @@ import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, p
 import { startBackend, stopBackend } from './modules/backend'
 import { registerHotkeys, unregisterHotkeys } from './modules/hotkeys'
 import { createMenu } from './modules/menu'
-import { checkAndApplyPatches, initPatchDirs, registerPatcherIPC, resolveFrontendPatch } from './modules/patcher'
 import { createTray, destroyTray } from './modules/tray'
 import { downloadUpdate, installUpdate, setupAutoUpdater } from './modules/updater'
 import {
@@ -56,27 +55,13 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
-  // ── 热补丁系统初始化 ──
-  initPatchDirs()
-  registerPatcherIPC()
-
-  // naga-app://路径 → 优先从补丁目录加载，回退到 dist/ 基线
+  // naga-app://路径 → 加载 dist/ 目录文件
   // 仅打包模式生效，开发模式走 Vite dev server
   const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
   protocol.handle('naga-app', (request) => {
-    // standard: true 时 naga-app://dist/index.html 解析为 host="dist", path="/index.html"
-    // pathname 已是相对于 dist 的路径，直接去掉前导斜杠即可
     const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
-    // 兼容性保护：万一 pathname 中出现 "dist/" 前缀也能正确处理
     const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
 
-    // 1. 补丁目录优先
-    const patchFile = resolveFrontendPatch(relativePath)
-    if (patchFile) {
-      return net.fetch(pathToFileURL(patchFile).toString())
-    }
-
-    // 2. 回退到基线 dist/
     const basePath = resolve(appDistDir, relativePath)
     if (!basePath.startsWith(appDistDir)) {
       return new Response('Forbidden', { status: 403 })
@@ -122,7 +107,7 @@ app.whenReady().then(async () => {
   // Register global hotkeys
   registerHotkeys()
 
-  // Setup auto-updater
+  // Setup auto-updater (checks GitHub Releases for new versions)
   setupAutoUpdater(win)
 
   // --- IPC Handlers ---
@@ -338,40 +323,7 @@ app.whenReady().then(async () => {
     }
   })
 
-  // ── 启动时补丁检查（仅打包模式，5秒超时） ──
-  if (app.isPackaged) {
-    try {
-      // 等待页面加载完成，确保渲染进程能接收进度事件
-      if (win.webContents.isLoading()) {
-        await new Promise<void>(resolve => win.webContents.once('did-finish-load', resolve))
-      }
-
-      win.webContents.send('backend:progress', { percent: 2, phase: '检测更新...' })
-
-      const patchResult = await Promise.race([
-        checkAndApplyPatches('https://update.nagaagent.com', app.getVersion()),
-        new Promise<null>((resolve) => {
-          setTimeout(() => {
-            console.log('[Startup] 补丁检查超时 (5s)，跳过')
-            resolve(null)
-          }, 5000)
-        }),
-      ])
-
-      if (patchResult?.updated) {
-        console.log(`[Startup] 补丁已更新至 ${patchResult.version}`)
-        if (patchResult.frontendChanged) {
-          // 前端补丁已下载，重新加载页面以应用
-          win.webContents.reloadIgnoringCache()
-        }
-      }
-    }
-    catch (err) {
-      console.warn(`[Startup] 补丁检查失败，跳过: ${err instanceof Error ? err.message : err}`)
-    }
-  }
-
-  // Start backend services（补丁检查之后启动，确保后端补丁已就位）
+  // Start backend services
   startBackend()
 })
 

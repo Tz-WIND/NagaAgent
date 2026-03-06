@@ -67,4 +67,5 @@ linux:
 
 publish:
   provider: generic
-  url: ''
+  url: http://62.234.131.204:30031/api/app/releases
+  channel: latest
