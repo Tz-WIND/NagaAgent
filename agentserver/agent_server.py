@@ -162,8 +162,25 @@ async def lifespan(app: FastAPI):
             has_embedded_openclaw: bool = False
 
             if embedded_runtime.is_packaged:
+                # ── 诊断日志：打印内嵌运行时路径状态 ──
+                logger.info(f"  runtime_root: {embedded_runtime.runtime_root}")
+                logger.info(f"  node_path: {embedded_runtime.node_path}")
+                logger.info(f"  npm_path: {embedded_runtime.npm_path}")
+                logger.info(f"  openclaw_path: {embedded_runtime.openclaw_path}")
+                if embedded_runtime.runtime_root:
+                    import os as _os
+                    try:
+                        _contents = _os.listdir(str(embedded_runtime.runtime_root))
+                        logger.info(f"  runtime_root 内容: {_contents}")
+                        _node_dir = embedded_runtime.runtime_root / "node"
+                        if _node_dir.exists():
+                            logger.info(f"  node/ 内容: {_os.listdir(str(_node_dir))[:20]}")
+                    except Exception as _e:
+                        logger.warning(f"  列出 runtime_root 内容失败: {_e}")
+
                 has_global_openclaw = shutil.which("openclaw") is not None
                 has_embedded_openclaw = embedded_runtime.openclaw_installed
+                logger.info(f"  has_global_openclaw={has_global_openclaw}, has_embedded_openclaw={has_embedded_openclaw}")
 
                 if has_global_openclaw:
                     logger.info("打包环境：检测到全局安装 OpenClaw，跳过内嵌 OpenClaw 初始化/启动")
@@ -184,6 +201,8 @@ async def lifespan(app: FastAPI):
                             logger.info("内嵌 OpenClaw 自动安装成功")
                         else:
                             logger.error("内嵌 OpenClaw 自动安装失败")
+                    elif not has_embedded_openclaw:
+                        logger.warning(f"内嵌 OpenClaw 未安装且 node 不可用 (node_path={embedded_runtime.node_path})，跳过自动安装")
 
                     # 检测端口是否已被占用
                     if _is_port_in_use(18789):
