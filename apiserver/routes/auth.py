@@ -59,7 +59,9 @@ async def auth_me(request: Request):
         raise HTTPException(status_code=401, detail="token 已失效")
     # 恢复服务端认证状态
     naga_auth.restore_token(token)
-    return {"user": user, "memory_url": naga_auth.NAGA_MEMORY_URL}
+    # 返回后端实际使用的 token，供前端同步
+    # （后端 ensure_access_token 启动时可能已刷新，前端持有的旧 token 已过期但请求走了后端 token 未触发 401）
+    return {"user": user, "memory_url": naga_auth.NAGA_MEMORY_URL, "access_token": token}
 
 
 @router.post("/auth/logout")
@@ -207,10 +209,13 @@ async def tts_speech_proxy(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # 从前端请求头获取 token，或使用后端认证状态
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header and naga_auth.is_authenticated():
+    # 优先使用后端自身维护的认证状态（token 总是最新的），
+    # 其次使用前端请求头携带的 token（可能过期，导致打包模式下 TTS 失败）
+    auth_header = ""
+    if naga_auth.is_authenticated():
         auth_header = f"Bearer {naga_auth.get_access_token()}"
+    elif request.headers.get("Authorization", ""):
+        auth_header = request.headers.get("Authorization", "")
 
     if auth_header:
         # 已登录 → 代理到 NagaBusiness

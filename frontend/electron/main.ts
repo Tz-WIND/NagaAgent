@@ -1,4 +1,5 @@
 import { readdir } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -60,10 +61,17 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
+  // MIME 映射（音频/视频等二进制媒体文件需要通过 fs.readFile 读取以兼容 asar）
+  const MEDIA_MIME: Record<string, string> = {
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
+    flac: 'audio/flac', aac: 'audio/aac', webm: 'audio/webm',
+    mp4: 'video/mp4', mkv: 'video/x-matroska',
+  }
+
   // naga-app://路径 → 加载 dist/ 目录文件
   // 仅打包模式生效，开发模式走 Vite dev server
   const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
-  protocol.handle('naga-app', (request) => {
+  protocol.handle('naga-app', async (request) => {
     const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
     const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
 
@@ -71,6 +79,23 @@ app.whenReady().then(async () => {
     if (!basePath.startsWith(appDistDir)) {
       return new Response('Forbidden', { status: 403 })
     }
+
+    // 音频/视频文件通过 fs.readFile 读取（Node fs 天然兼容 asar），
+    // 避免 net.fetch(file://) 在 asar 内对媒体文件不兼容的问题
+    const ext = basePath.split('.').pop()?.toLowerCase() ?? ''
+    const mime = MEDIA_MIME[ext]
+    if (mime) {
+      try {
+        const data = await readFile(basePath)
+        return new Response(data, {
+          headers: { 'Content-Type': mime, 'Content-Length': data.length.toString() },
+        })
+      }
+      catch {
+        return new Response('Not Found', { status: 404 })
+      }
+    }
+
     return net.fetch(pathToFileURL(basePath).toString())
   })
 
