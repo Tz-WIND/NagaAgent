@@ -31,6 +31,9 @@ function loadTracksFromStorage(): Track[] {
   if (saved != null && saved !== '') {
     try {
       const savedIds = JSON.parse(saved) as string[]
+      // 空数组兜底到默认曲目，避免用户清空后音律坊无歌可播
+      if (savedIds.length === 0)
+        return [...DEFAULT_TRACKS]
       return savedIds.map((filename, idx) => ({
         id: idx + 1,
         title: parseDisplayName(filename),
@@ -73,6 +76,9 @@ function initAudio() {
   })
   audio.addEventListener('pause', () => {
     isPlaying.value = false
+  })
+  audio.addEventListener('error', () => {
+    console.error(`[MusicPlayer] 音频加载失败: ${audio?.src}`, audio?.error)
   })
   audio.addEventListener('timeupdate', () => {
     if (!audio)

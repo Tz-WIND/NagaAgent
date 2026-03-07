@@ -209,10 +209,13 @@ async def tts_speech_proxy(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")
 
-    # 从前端请求头获取 token，或使用后端认证状态
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header and naga_auth.is_authenticated():
+    # 优先使用后端自身维护的认证状态（token 总是最新的），
+    # 其次使用前端请求头携带的 token（可能过期，导致打包模式下 TTS 失败）
+    auth_header = ""
+    if naga_auth.is_authenticated():
         auth_header = f"Bearer {naga_auth.get_access_token()}"
+    elif request.headers.get("Authorization", ""):
+        auth_header = request.headers.get("Authorization", "")
 
     if auth_header:
         # 已登录 → 代理到 NagaBusiness

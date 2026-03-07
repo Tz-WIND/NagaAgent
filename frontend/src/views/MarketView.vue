@@ -3,7 +3,7 @@ import { useToast } from 'primevue/usetoast'
 import { computed, h, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { getCredits, getPurchaseLink, redeemCode } from '@/api/business'
-import { isNagaLoggedIn, nagaUser, refreshUserStats } from '@/composables/useAuth'
+import { isNagaLoggedIn, nagaUser, refreshUserStats, sessionRestored } from '@/composables/useAuth'
 import { useBackground } from '@/composables/useBackground'
 import { CONFIG } from '@/utils/config'
 
@@ -330,6 +330,31 @@ const redeemInput = ref('')
 const redeemLoading = ref(false)
 
 async function loadRechargeData() {
+  if (rechargeLoaded.value)
+    return
+
+  // 等待会话恢复完成，避免 token 未同步时 businessClient 401
+  if (!sessionRestored.value) {
+    rechargeLoading.value = true
+    rechargeError.value = ''
+    const stop = watch(sessionRestored, (ready) => {
+      if (ready) {
+        stop()
+        _doLoadRecharge()
+      }
+    })
+    // 5秒超时兜底（未登录用户不会触发 sessionRestored）
+    setTimeout(() => {
+      stop()
+      if (!rechargeLoaded.value)
+        _doLoadRecharge()
+    }, 5000)
+    return
+  }
+  _doLoadRecharge()
+}
+
+async function _doLoadRecharge() {
   if (rechargeLoaded.value)
     return
   rechargeLoading.value = true
