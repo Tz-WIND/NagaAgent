@@ -51,17 +51,17 @@ class QuintupleTaskManager:
     """五元组提取任务管理器 - 重构版"""
 
     def __init__(self, max_workers: int = 3, max_queue_size: int = 100):
-        # 从配置文件读取设置或使用默认值（使用 getattr 逐字段读取，避免单字段缺失导致全部回退）
+        # 从配置文件读取设置或使用默认值
         try:
-            self.max_workers = getattr(config.grag, 'max_workers', None) or max_workers or 3
-            self.max_queue_size = getattr(config.grag, 'max_queue_size', None) or max_queue_size or 100
-            self.task_timeout = getattr(config.grag, 'extraction_timeout', 120)
-            self.auto_cleanup_hours = getattr(config.grag, 'auto_cleanup_hours', 24)
+            self.max_workers = max_workers or config.grag.max_workers
+            self.max_queue_size = max_queue_size or config.grag.max_queue_size
+            self.task_timeout = config.grag.task_timeout
+            self.auto_cleanup_hours = config.grag.auto_cleanup_hours
             self.enabled = True
         except Exception:
             self.max_workers = max_workers or 3
             self.max_queue_size = max_queue_size or 100
-            self.task_timeout = 120
+            self.task_timeout = 30
             self.auto_cleanup_hours = 24
             self.enabled = True
 
