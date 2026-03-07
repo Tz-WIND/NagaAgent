@@ -52,6 +52,12 @@ OPENCLAW_VERSION = "2026.2.17"
 AGENT_BROWSER_NPM_SPEC = "agent-browser"
 CACHE_DIR = PROJECT_ROOT / ".cache"
 
+# uv standalone 二进制
+UV_VERSION = "0.6.6"
+UV_RUNTIME_DIR = RUNTIME_DIR / "uv"
+UV_ARCHIVE = "uv-x86_64-pc-windows-msvc.zip"
+UV_DIST_URL = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{UV_ARCHIVE}"
+
 
 def log(msg: str) -> None:
     print(f"[build-win] {msg}")
@@ -359,14 +365,55 @@ def preinstall_agent_browser(force: bool = False) -> None:
     log(f"Agent Browser 预装完成: {agent_browser_cmd}")
 
 
+def download_uv_runtime() -> Path:
+    """下载 uv standalone 二进制包，返回本地缓存路径"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = CACHE_DIR / UV_ARCHIVE
+    if archive_path.exists():
+        log(f"使用缓存 uv 包: {archive_path}")
+        return archive_path
+    log(f"下载 uv v{UV_VERSION}: {UV_DIST_URL}")
+    urllib.request.urlretrieve(UV_DIST_URL, str(archive_path))
+    log(f"uv 下载完成: {archive_path} ({archive_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    return archive_path
+
+
+def extract_uv_runtime(archive_path: Path) -> None:
+    """解压 uv standalone 到 openclaw-runtime/uv/"""
+    if UV_RUNTIME_DIR.exists():
+        if (UV_RUNTIME_DIR / "uv.exe").exists():
+            log("uv 运行时已存在，跳过解压")
+            return
+        shutil.rmtree(UV_RUNTIME_DIR)
+
+    UV_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"解压 uv 到 {UV_RUNTIME_DIR}")
+
+    with zipfile.ZipFile(archive_path, "r") as zf:
+        for member in zf.infolist():
+            fname = Path(member.filename).name
+            if not fname or member.is_dir():
+                continue
+            target = UV_RUNTIME_DIR / fname
+            with zf.open(member) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+    if not (UV_RUNTIME_DIR / "uv.exe").exists():
+        raise FileNotFoundError("uv 解压后未找到 uv.exe")
+    log(f"uv 运行时准备完成: {UV_RUNTIME_DIR}")
+
+
 def prepare_openclaw_runtime(force: bool = False) -> None:
-    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw/Agent Browser 预装"""
+    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw/Agent Browser 预装 + uv"""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     zip_path = download_node_runtime()
     extract_node_runtime(zip_path)
     preinstall_openclaw(force=force)
     preinstall_agent_browser(force=force)
-    log("OpenClaw 运行时准备完成（OpenClaw + Agent Browser 已预装）")
+    # 下载并解压 uv standalone（用于 MCP uvx 服务）
+    uv_archive = download_uv_runtime()
+    extract_uv_runtime(uv_archive)
+    log("OpenClaw 运行时准备完成（Node.js + OpenClaw + Agent Browser + uv 已预装）")
 
 
 # ============ Step 4: PyInstaller 编译后端 ============

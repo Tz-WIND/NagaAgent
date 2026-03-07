@@ -411,9 +411,18 @@ def get_mcp_services():
 
     # 2. mcporter 外部配置（~/.mcporter/config.json 中的 mcpServers）
     mcporter_config = _load_mcporter_config()
+    # 打包模式下用内置运行时解析 npx/uvx 等命令
+    try:
+        from agentserver.openclaw.embedded_runtime import get_embedded_runtime
+        _runtime = get_embedded_runtime()
+    except Exception:
+        _runtime = None
     for name, cfg in mcporter_config.get("mcpServers", {}).items():
         cmd = cfg.get("command", "")
-        available = shutil.which(cmd) is not None if cmd else False
+        if cmd and _runtime:
+            available = _runtime.resolve_command(cmd) is not None
+        else:
+            available = shutil.which(cmd) is not None if cmd else False
         # 提取 meta 字段（以 _ 开头的不属于 MCP 协议本身）
         display_name = cfg.get("_displayName", name)
         description = cfg.get("_description", "")
