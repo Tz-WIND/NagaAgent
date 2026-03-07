@@ -506,9 +506,14 @@ class EmbeddedRuntime:
         Returns:
             是否启动成功
         """
-        if self._gateway_process is not None:
+        # 进程已存在且仍在运行 → 跳过
+        if self._gateway_process is not None and self._gateway_process.returncode is None:
             logger.info("Gateway 进程已在运行")
             return True
+        # 进程已退出（崩溃或正常退出）→ 清理引用以便重新启动
+        if self._gateway_process is not None:
+            logger.warning(f"Gateway 进程已退出 (code={self._gateway_process.returncode})，清理后重新启动")
+            self._gateway_process = None
 
         cmd = self._build_gateway_cmd()
         if not cmd:

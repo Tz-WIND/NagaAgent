@@ -204,17 +204,7 @@ async def lifespan(app: FastAPI):
                     elif not has_embedded_openclaw:
                         logger.warning(f"内嵌 OpenClaw 未安装且 node 不可用 (node_path={embedded_runtime.node_path})，跳过自动安装")
 
-                    # 检测端口是否已被占用
-                    if _is_port_in_use(18789):
-                        logger.info("端口 18789 已被占用，跳过内嵌 Gateway 启动")
-                    elif has_embedded_openclaw:
-                        gw_ok = await embedded_runtime.start_gateway()
-                        if gw_ok:
-                            logger.info("内嵌 OpenClaw Gateway 启动成功")
-                        else:
-                            logger.error("内嵌 OpenClaw Gateway 启动失败")
-                    else:
-                        logger.warning("内嵌 OpenClaw 不可用，无法启动 Gateway")
+                    # 注意：Gateway 启动延后到配置全部完成后（见下方统一启动段）
 
             # === 打包环境 ===
             if embedded_runtime.is_packaged:
