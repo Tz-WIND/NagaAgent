@@ -38,9 +38,10 @@ class GRAGMemoryManager:
             # 启动自动清理任务
             start_auto_cleanup()
 
-            # 设置任务完成回调
+            # 设置任务完成/失败回调
             self._weak_ref = weakref.ref(self)
             task_manager.on_task_completed = self._on_task_completed_wrapper
+            task_manager.on_task_failed = self._on_task_failed_wrapper
 
         except Exception as e:
             logger.error(f"GRAG记忆系统初始化失败: {e}")
@@ -87,60 +88,35 @@ class GRAGMemoryManager:
 
 
     def _on_task_completed_wrapper(self, task_id: str, quintuples: List):
-        """包装回调方法，处理实例可能被销毁的情况"""
+        """任务完成回调 — 直接同步存储，避免 run_coroutine_threadsafe 导致结果丢失"""
         instance = self._weak_ref()
         if not instance:
             return
         try:
-            loop = asyncio.get_running_loop()
-            # 已有运行中的事件循环（在 async worker 中调用时），直接提交
-            asyncio.run_coroutine_threadsafe(
-                instance._on_task_completed(task_id, quintuples),
-                loop=loop
-            )
-        except RuntimeError:
-            # 没有运行中的事件循环（被非 async 上下文调用时），同步执行存储
-            logger.warning(f"任务回调无运行中事件循环，同步执行存储: {task_id}")
-            try:
-                if quintuples:
-                    from .quintuple_graph import store_quintuples
-                    store_success = store_quintuples(quintuples)
-                    if store_success:
-                        logger.info(f"任务 {task_id} 的五元组同步存储成功")
-                    else:
-                        logger.error(f"任务 {task_id} 的五元组同步存储失败")
-                instance.active_tasks.discard(task_id)
-            except Exception as e:
-                logger.error(f"同步存储五元组失败: {e}")
-
-    async def _on_task_completed(self, task_id: str, quintuples: List) -> None:
-        try:
-            self.active_tasks.discard(task_id)
+            instance.active_tasks.discard(task_id)
             logger.info(f"任务完成回调: {task_id}, 提取到 {len(quintuples)} 个五元组")
 
-            # 确保在事件循环线程中执行
             if not quintuples:
                 logger.warning(f"任务 {task_id} 未提取到五元组")
                 return
 
-            logger.debug(f"准备存储五元组: {quintuples[:2]}...")
-
-            # 直接调用同步存储函数（避免线程切换）
             store_success = store_quintuples(quintuples)
-
             if store_success:
                 logger.info(f"任务 {task_id} 的五元组存储成功")
             else:
                 logger.error(f"任务 {task_id} 的五元组存储失败")
-
         except Exception as e:
             logger.error(f"任务完成回调处理失败: {e}")
+            traceback.print_exc()
 
-    async def _on_task_failed(self, task_id: str, error: str) -> None:
+    def _on_task_failed_wrapper(self, task_id: str, error: str):
         """任务失败回调"""
+        instance = self._weak_ref()
+        if not instance:
+            return
         try:
-            self.active_tasks.discard(task_id)
-            logger.error(f"任务失败回调: {task_id}, 错误: {error}")
+            instance.active_tasks.discard(task_id)
+            logger.error(f"五元组提取任务失败: {task_id}, 错误: {error}")
         except Exception as e:
             logger.error(f"任务失败回调处理失败: {e}")
 

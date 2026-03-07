@@ -270,9 +270,11 @@ class GRAGConfig(BaseModel):
     neo4j_user: str = Field(default="neo4j", description="Neo4j用户名")
     neo4j_password: str = Field(default="your_password", description="Neo4j密码")
     neo4j_database: str = Field(default="neo4j", description="Neo4j数据库名")
-    extraction_timeout: int = Field(default=12, ge=1, le=60, description="知识提取超时时间（秒）")
+    extraction_timeout: int = Field(default=120, ge=10, le=600, description="五元组提取任务超时时间（秒）")
     extraction_retries: int = Field(default=2, ge=0, le=5, description="知识提取重试次数")
     base_timeout: int = Field(default=15, ge=5, le=120, description="基础操作超时时间（秒）")
+    max_workers: int = Field(default=3, ge=1, le=10, description="五元组提取并发工作协程数")
+    max_queue_size: int = Field(default=100, ge=10, le=1000, description="五元组提取任务队列最大长度")
 
 
 class HandoffConfig(BaseModel):
