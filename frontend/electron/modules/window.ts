@@ -392,7 +392,7 @@ export function setFloatingHeight(height: number): void {
       newY = 0
   }
 
-  const toBounds = { x: bounds.x, y: newY, width: bounds.width, height: clamped }
+  const toBounds = { x: bounds.x, y: newY, width: EXPANDED_WIDTH, height: clamped }
   const delta = Math.abs(clamped - bounds.height)
 
   win.setMinimumSize(EXPANDED_WIDTH, MIN_FIT_HEIGHT)

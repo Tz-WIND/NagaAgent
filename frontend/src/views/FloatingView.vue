@@ -131,6 +131,7 @@ let unsubStateChange: (() => void) | undefined
 let unsubBlur: (() => void) | undefined
 let resizeObserver: ResizeObserver | null = null
 let fitRAF = 0
+let _lastFitHeight = 0 // 防止 ResizeObserver 反馈循环
 
 // ─── 会话历史（声明前置，fitWindowHeight 需要引用） ──────
 const showHistory = ref(false)
@@ -150,6 +151,10 @@ function fitWindowHeight() {
   const captureH = showCapturePanel.value ? (capturePanelRef.value?.offsetHeight ?? 0) : 0
   const contentH = el.scrollHeight
   const desired = HEADER_HEIGHT + sessionH + captureH + contentH + toolH + BORDER
+  // 高度未变化时跳过，打断 ResizeObserver → fitHeight → resize → observer 的反馈循环
+  if (desired === _lastFitHeight)
+    return
+  _lastFitHeight = desired
   window.electronAPI?.floating.fitHeight(desired)
 }
 
@@ -877,7 +882,7 @@ useEventListener('token', () => {
       :class="{ 'enter-anim': showContent }"
       :pt="{ barY: { class: 'w-2! rounded! bg-#373737! transition!' } }"
     >
-      <div ref="messageContentRef" class="p-3 grid gap-3">
+      <div ref="messageContentRef" class="p-3 grid gap-3 overflow-x-hidden">
         <MessageItem
           v-for="item, index in MESSAGES" :key="index"
           :role="item.role" :content="item.content"
@@ -1087,6 +1092,7 @@ useEventListener('token', () => {
 .floating-full {
   width: 100%;
   height: 100%;
+  max-width: 420px;
   display: flex;
   flex-direction: column;
   background: #110901;

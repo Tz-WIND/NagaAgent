@@ -13,7 +13,14 @@ export function createTray(): Tray {
     : join(app.getAppPath(), 'build', 'icon.png')
   let icon: Electron.NativeImage
   try {
-    icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 })
+    // 980x980 直接缩到 16x16 会导致 Windows 托盘只显示顶部（帽子）。
+    // 先缩到 64x64 中间尺寸再缩到目标尺寸，避免极端缩放比导致裁切/失真。
+    // macOS 托盘推荐 22x22（Retina 自动 2x），Windows 推荐 16x16。
+    const isWin = process.platform === 'win32'
+    const traySize = isWin ? 16 : 22
+    icon = nativeImage.createFromPath(iconPath)
+      .resize({ width: 64, height: 64 })
+      .resize({ width: traySize, height: traySize })
   }
   catch {
     icon = nativeImage.createEmpty()

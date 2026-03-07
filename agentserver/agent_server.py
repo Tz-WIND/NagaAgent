@@ -175,15 +175,27 @@ async def lifespan(app: FastAPI):
                     if not onboard_ok:
                         logger.error("OpenClaw 初始化失败（onboard + fallback 均失败）")
 
+                    # 首次运行时自动 npm install openclaw（内嵌运行时目录中）
+                    if not has_embedded_openclaw and embedded_runtime.node_path:
+                        logger.info("打包环境：内嵌 OpenClaw 尚未安装，执行自动安装...")
+                        install_ok = await embedded_runtime.install_openclaw()
+                        if install_ok:
+                            has_embedded_openclaw = True
+                            logger.info("内嵌 OpenClaw 自动安装成功")
+                        else:
+                            logger.error("内嵌 OpenClaw 自动安装失败")
+
                     # 检测端口是否已被占用
                     if _is_port_in_use(18789):
                         logger.info("端口 18789 已被占用，跳过内嵌 Gateway 启动")
-                    else:
+                    elif has_embedded_openclaw:
                         gw_ok = await embedded_runtime.start_gateway()
                         if gw_ok:
                             logger.info("内嵌 OpenClaw Gateway 启动成功")
                         else:
                             logger.error("内嵌 OpenClaw Gateway 启动失败")
+                    else:
+                        logger.warning("内嵌 OpenClaw 不可用，无法启动 Gateway")
 
             # === 打包环境 ===
             if embedded_runtime.is_packaged:
