@@ -156,7 +156,7 @@ export function playWakeVoice() {
       files = wakeVoiceMap[pack]
       audioSettings.value.wakeVoice = fallback
     }
-    else {
+    if (!files || files.length === 0) {
       console.warn(`[Audio] 无任何可用唤醒语音包`)
       return
     }

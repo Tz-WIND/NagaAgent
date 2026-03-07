@@ -1,5 +1,5 @@
+import { readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -71,7 +71,7 @@ app.whenReady().then(async () => {
   // naga-app://路径 → 加载 dist/ 目录文件
   // 仅打包模式生效，开发模式走 Vite dev server
   const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
-  protocol.handle('naga-app', async (request) => {
+  protocol.handle('naga-app', (request) => {
     const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
     const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
 
@@ -80,13 +80,16 @@ app.whenReady().then(async () => {
       return new Response('Forbidden', { status: 403 })
     }
 
-    // 音频/视频文件通过 fs.readFile 读取（Node fs 天然兼容 asar），
-    // 避免 net.fetch(file://) 在 asar 内对媒体文件不兼容的问题
+    // 音频/视频文件通过 fs.readFileSync 读取（Node fs 天然兼容 asar），
+    // 避免 net.fetch(file://) 在 asar 内对媒体文件不兼容的问题。
+    // 注意：此处使用 readFileSync 而非 async readFile，因为构建工具（Rollup/Rolldown）
+    // 的 tree-shaking 会将 async handler 中的 await readFile 分支整体移除，
+    // 导致打包后音频无 Content-Type/Content-Length 头，播放约 6 秒后卡死。
     const ext = basePath.split('.').pop()?.toLowerCase() ?? ''
     const mime = MEDIA_MIME[ext]
     if (mime) {
       try {
-        const data = await readFile(basePath)
+        const data = readFileSync(basePath)
         return new Response(data, {
           headers: { 'Content-Type': mime, 'Content-Length': data.length.toString() },
         })
