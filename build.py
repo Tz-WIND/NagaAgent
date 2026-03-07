@@ -78,6 +78,18 @@ else:
 
 NODE_DIST_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/{NODE_ARCHIVE}"
 
+# uv standalone 二进制版本与下载地址
+UV_VERSION = "0.6.6"
+UV_RUNTIME_DIR = RUNTIME_DIR / "uv"
+if IS_WINDOWS:
+    UV_ARCHIVE = "uv-x86_64-pc-windows-msvc.zip"
+elif IS_MACOS:
+    _uv_arch = "aarch64" if MAC_ARCH == "arm64" else "x86_64"
+    UV_ARCHIVE = f"uv-{_uv_arch}-apple-darwin.tar.gz"
+else:
+    UV_ARCHIVE = "uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_DIST_URL = f"https://github.com/astral-sh/uv/releases/download/{UV_VERSION}/{UV_ARCHIVE}"
+
 # 平台相关路径
 NODE_BIN = "node.exe" if IS_WINDOWS else "bin/node"
 NPM_BIN = "npm.cmd" if IS_WINDOWS else "bin/npm"
@@ -409,13 +421,72 @@ def preinstall_openclaw(force: bool = False) -> None:
     log(f"OpenClaw 预装完成: {openclaw_entry}")
 
 
+def download_uv_runtime() -> Path:
+    """下载 uv standalone 二进制包，返回本地缓存路径"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = CACHE_DIR / UV_ARCHIVE
+    if archive_path.exists():
+        log(f"使用缓存 uv 包: {archive_path}")
+        return archive_path
+    log(f"下载 uv v{UV_VERSION}: {UV_DIST_URL}")
+    urllib.request.urlretrieve(UV_DIST_URL, str(archive_path))
+    log(f"uv 下载完成: {archive_path} ({archive_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    return archive_path
+
+
+def extract_uv_runtime(archive_path: Path) -> None:
+    """解压 uv standalone 到 openclaw-runtime/uv/"""
+    if UV_RUNTIME_DIR.exists():
+        # 检查是否已解压
+        ext = ".exe" if IS_WINDOWS else ""
+        if (UV_RUNTIME_DIR / f"uv{ext}").exists():
+            log("uv 运行时已存在，跳过解压")
+            return
+        shutil.rmtree(UV_RUNTIME_DIR)
+
+    UV_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"解压 uv 到 {UV_RUNTIME_DIR}")
+
+    if str(archive_path).endswith(".zip"):
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for member in zf.infolist():
+                fname = Path(member.filename).name
+                if not fname or member.is_dir():
+                    continue
+                target = UV_RUNTIME_DIR / fname
+                with zf.open(member) as src, open(target, "wb") as dst:
+                    shutil.copyfileobj(src, dst)
+    else:
+        import tarfile
+        with tarfile.open(archive_path) as tf:
+            for member in tf.getmembers():
+                if not member.isfile():
+                    continue
+                fname = Path(member.name).name
+                if not fname:
+                    continue
+                member.name = fname
+                tf.extract(member, UV_RUNTIME_DIR)
+                extracted = UV_RUNTIME_DIR / fname
+                if not IS_WINDOWS:
+                    extracted.chmod(0o755)
+
+    ext = ".exe" if IS_WINDOWS else ""
+    if not (UV_RUNTIME_DIR / f"uv{ext}").exists():
+        raise FileNotFoundError(f"uv 解压后未找到 uv{ext}")
+    log(f"uv 运行时准备完成: {UV_RUNTIME_DIR}")
+
+
 def prepare_openclaw_runtime(force: bool = False) -> None:
-    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw 预装"""
+    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw 预装 + uv standalone"""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = download_node_runtime()
     extract_node_runtime(archive_path)
     preinstall_openclaw(force=force)
-    log("OpenClaw 运行时准备完成（已预装，无需首次启动安装）")
+    # 下载并解压 uv standalone（用于 MCP uvx 服务）
+    uv_archive = download_uv_runtime()
+    extract_uv_runtime(uv_archive)
+    log("OpenClaw 运行时准备完成（已预装 Node.js + OpenClaw + uv）")
 
 
 # ============ Step 4: PyInstaller 编译后端 ============

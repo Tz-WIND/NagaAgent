@@ -144,23 +144,58 @@ class EmbeddedRuntime:
 
     # ============ 可执行文件路径 ============
 
+    def _platform_bin(self, subdir: str, name: str) -> Optional[str]:
+        """在 runtime_root/<subdir>/ 下查找可执行文件（自动处理平台差异）"""
+        assert self._runtime_root is not None
+        is_win = platform.system() == "Windows"
+        # Windows: 先找 .cmd，再找 .exe，最后找无后缀
+        # Unix: 先找 bin/<name>，再找 <name>
+        if is_win:
+            for ext in (".cmd", ".exe", ""):
+                p = self._runtime_root / subdir / f"{name}{ext}"
+                if p.exists():
+                    return str(p)
+        else:
+            for prefix in ("bin/", ""):
+                p = self._runtime_root / subdir / f"{prefix}{name}"
+                if p.exists():
+                    return str(p)
+        return None
+
     @property
     def node_path(self) -> Optional[str]:
         """Node.js 可执行文件路径"""
         if self.is_packaged:
-            assert self._runtime_root is not None
-            exe = self._runtime_root / "node" / "node.exe"
-            return str(exe) if exe.exists() else None
+            return self._platform_bin("node", "node")
         return shutil.which("node")
 
     @property
     def npm_path(self) -> Optional[str]:
         """npm 可执行文件路径"""
         if self.is_packaged:
-            assert self._runtime_root is not None
-            cmd = self._runtime_root / "node" / "npm.cmd"
-            return str(cmd) if cmd.exists() else None
+            return self._platform_bin("node", "npm")
         return shutil.which("npm")
+
+    @property
+    def npx_path(self) -> Optional[str]:
+        """npx 可执行文件路径"""
+        if self.is_packaged:
+            return self._platform_bin("node", "npx")
+        return shutil.which("npx")
+
+    @property
+    def uv_path(self) -> Optional[str]:
+        """uv 可执行文件路径（内置 standalone 二进制）"""
+        if self.is_packaged:
+            return self._platform_bin("uv", "uv")
+        return shutil.which("uv")
+
+    @property
+    def uvx_path(self) -> Optional[str]:
+        """uvx 可执行文件路径（uv tool run 别名）"""
+        if self.is_packaged:
+            return self._platform_bin("uv", "uvx")
+        return shutil.which("uvx")
 
     @property
     def openclaw_path(self) -> Optional[str]:
@@ -188,16 +223,48 @@ class EmbeddedRuntime:
             return str(cmd) if cmd.exists() else None
         return shutil.which("clawhub")
 
+    # ============ 统一命令解析 ============
+
+    def resolve_command(self, cmd: str) -> Optional[str]:
+        """
+        将命令名解析为内置路径（打包模式）或系统 PATH（开发模式）。
+
+        支持: node, npm, npx, uv, uvx, openclaw, clawhub
+        其他命令直接 shutil.which 兜底。
+        """
+        mapping: Dict[str, Optional[str]] = {
+            "node": self.node_path,
+            "npm": self.npm_path,
+            "npx": self.npx_path,
+            "uv": self.uv_path,
+            "uvx": self.uvx_path,
+            "openclaw": self.openclaw_path,
+            "clawhub": self.clawhub_path,
+        }
+        resolved = mapping.get(cmd)
+        if resolved:
+            return resolved
+        return shutil.which(cmd)
+
     # ============ 环境变量 ============
 
     @property
     def env(self) -> Dict[str, str]:
-        """构建子进程环境变量，确保内嵌 node 优先"""
+        """构建子进程环境变量，确保内嵌 node / uv 优先"""
         env = os.environ.copy()
         if self.is_packaged and self._runtime_root is not None:
-            node_dir = str(self._runtime_root / "node")
-            bin_dir = str(self._runtime_root / "openclaw" / "node_modules" / ".bin")
-            env["PATH"] = f"{node_dir}{os.pathsep}{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+            extra_dirs = []
+            node_dir = self._runtime_root / "node"
+            if node_dir.exists():
+                extra_dirs.append(str(node_dir))
+            bin_dir = self._runtime_root / "openclaw" / "node_modules" / ".bin"
+            if bin_dir.exists():
+                extra_dirs.append(str(bin_dir))
+            uv_dir = self._runtime_root / "uv"
+            if uv_dir.exists():
+                extra_dirs.append(str(uv_dir))
+            if extra_dirs:
+                env["PATH"] = os.pathsep.join(extra_dirs) + os.pathsep + env.get("PATH", "")
             # 使用预置在 node_modules 下的 Playwright 浏览器，避免首次运行再联网下载。
             env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
         return env
