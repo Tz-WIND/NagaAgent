@@ -22,24 +22,28 @@ block_cipher = None
 _spec_path = Path(SPECPATH).resolve()
 PROJECT_ROOT = str(_spec_path.parent if _spec_path.is_file() else _spec_path)
 
-# 需要打包的数据文件
-datas = [
-    ('pyproject.toml', '.'),
-    ('system/prompts', 'system/prompts'),
-    ('mcpserver', 'mcpserver'),
-    ('agentserver', 'agentserver'),
-    ('apiserver', 'apiserver'),
-    ('system', 'system'),
-    ('summer_memory', 'summer_memory'),
-    ('voice', 'voice'),
-    ('skills', 'skills'),
-]
+# 自动扫描项目目录，黑名单排除——开发环境有的全带上，避免手动列目录遗漏
+_EXCLUDE_DIRS = {
+    # 前端/构建产物/非运行时
+    'frontend', 'build', 'dist', 'scripts', 'docs', 'logs', 'sessions',
+    'uploaded_documents', 'hooks', '.cache', '.git', '.github',
+    '__pycache__', '.venv', '.mypy_cache', '.pytest_cache', '.ruff_cache',
+    'node_modules',
+    # PyQt UI（headless 模式不需要）
+    'ui',
+}
 
-# 角色资源（/characters 静态挂载依赖）
-if os.path.exists(os.path.join(PROJECT_ROOT, 'characters')):
-    datas.append(('characters', 'characters'))
-else:
-    print("[spec] WARN: characters 目录不存在，角色静态资源将不可用")
+datas = [('pyproject.toml', '.')]
+
+for entry in os.listdir(PROJECT_ROOT):
+    full = os.path.join(PROJECT_ROOT, entry)
+    if not os.path.isdir(full):
+        continue
+    if entry in _EXCLUDE_DIRS or entry.startswith('.'):
+        continue
+    datas.append((entry, entry))
+    print(f"[spec] 自动打包目录: {entry}/")
+
 
 # 打包机可能不存在 config.json（仅有 config.json.example）
 if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
