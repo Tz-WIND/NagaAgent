@@ -61,16 +61,17 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
-  // MIME 映射（音频/视频等二进制媒体文件需要通过 fs.readFile 读取以兼容 asar）
+  // naga-app://路径 → 加载 dist/ 目录文件
+  // 仅打包模式生效，开发模式走 Vite dev server
+  const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+
+  // 媒体文件 MIME（用于 readFile fallback）
   const MEDIA_MIME: Record<string, string> = {
     mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
     flac: 'audio/flac', aac: 'audio/aac', webm: 'audio/webm',
     mp4: 'video/mp4', mkv: 'video/x-matroska',
   }
 
-  // naga-app://路径 → 加载 dist/ 目录文件
-  // 仅打包模式生效，开发模式走 Vite dev server
-  const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
   protocol.handle('naga-app', async (request) => {
     const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
     const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
@@ -80,23 +81,30 @@ app.whenReady().then(async () => {
       return new Response('Forbidden', { status: 403 })
     }
 
-    // 音频/视频文件通过 fs.readFile 读取（Node fs 天然兼容 asar），
-    // 避免 net.fetch(file://) 在 asar 内对媒体文件不兼容的问题
-    const ext = basePath.split('.').pop()?.toLowerCase() ?? ''
-    const mime = MEDIA_MIME[ext]
-    if (mime) {
-      try {
-        const data = await readFile(basePath)
-        return new Response(data, {
-          headers: { 'Content-Type': mime, 'Content-Length': data.length.toString() },
-        })
-      }
-      catch {
-        return new Response('Not Found', { status: 404 })
-      }
+    // 优先使用 net.fetch(file://)——原生支持 Range 请求和流式传输，
+    // 对音频/视频的 seek 和渐进式播放至关重要。
+    // 仅当 net.fetch 失败时（如 asar 内文件不兼容）才 fallback 到 readFile。
+    const fileUrl = pathToFileURL(basePath).toString()
+    try {
+      return await net.fetch(fileUrl)
     }
-
-    return net.fetch(pathToFileURL(basePath).toString())
+    catch {
+      // net.fetch 失败——对媒体文件用 fs.readFile 兜底（Node fs 兼容 asar）
+      const ext = basePath.split('.').pop()?.toLowerCase() ?? ''
+      const mime = MEDIA_MIME[ext]
+      if (mime) {
+        try {
+          const data = await readFile(basePath)
+          return new Response(data, {
+            headers: { 'Content-Type': mime, 'Content-Length': data.length.toString() },
+          })
+        }
+        catch {
+          return new Response('Not Found', { status: 404 })
+        }
+      }
+      return new Response('Not Found', { status: 404 })
+    }
   })
 
   // naga-char://角色名/文件名 → characters/角色名/文件名

@@ -67,6 +67,8 @@ const playModeLabel = computed(() => {
   return '列表循环'
 })
 
+let _stallTimer: ReturnType<typeof setTimeout> | null = null
+
 function initAudio() {
   if (audio)
     return
@@ -80,7 +82,12 @@ function initAudio() {
   audio.addEventListener('error', () => {
     console.error(`[MusicPlayer] 音频加载失败: ${audio?.src}`, audio?.error)
   })
+  // 播放卡死自动恢复：如果 waiting/stalled 超过 3 秒，尝试跳过 1 秒
+  audio.addEventListener('waiting', _startStallRecovery)
+  audio.addEventListener('stalled', _startStallRecovery)
+  audio.addEventListener('playing', _clearStallRecovery)
   audio.addEventListener('timeupdate', () => {
+    _clearStallRecovery()
     if (!audio)
       return
     currentTime.value = audio.currentTime
@@ -97,6 +104,35 @@ function initAudio() {
     }
   })
   audio.addEventListener('ended', handleEnded)
+}
+
+function _startStallRecovery() {
+  if (_stallTimer)
+    return
+  _stallTimer = setTimeout(() => {
+    _stallTimer = null
+    if (!audio || audio.paused)
+      return
+    // 播放卡死 3 秒，跳过 1 秒尝试恢复
+    const target = audio.currentTime + 1
+    if (audio.duration && target < audio.duration) {
+      console.warn(`[MusicPlayer] 播放卡住 3 秒，跳过到 ${target.toFixed(1)}s`)
+      audio.currentTime = target
+      audio.play().catch(() => {})
+    }
+    else {
+      // 已接近末尾，直接切下一首
+      console.warn('[MusicPlayer] 播放卡住且接近末尾，切换下一首')
+      handleEnded()
+    }
+  }, 3000)
+}
+
+function _clearStallRecovery() {
+  if (_stallTimer) {
+    clearTimeout(_stallTimer)
+    _stallTimer = null
+  }
 }
 
 function setupAudioForTrack() {
