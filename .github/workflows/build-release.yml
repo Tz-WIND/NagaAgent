@@ -70,11 +70,36 @@ jobs:
         if: matrix.platform == 'win'
         shell: bash
         run: |
-          mkdir -p frontend/backend-dist/openclaw-runtime
-          curl -L -o node.zip "https://nodejs.org/dist/v22.14.0/node-v22.14.0-win-x64.zip"
+          RUNTIME_DIR="frontend/backend-dist/openclaw-runtime"
+          NODE_DIR="$RUNTIME_DIR/node"
+          OPENCLAW_DIR="$RUNTIME_DIR/openclaw"
+          UV_DIR="$RUNTIME_DIR/uv"
+
+          # 1. 下载 Node.js 便携版
+          mkdir -p "$NODE_DIR"
+          curl -L -o node.zip "https://nodejs.org/dist/v22.13.1/node-v22.13.1-win-x64.zip"
           unzip -q node.zip -d _node_tmp
-          mv _node_tmp/node-v22.14.0-win-x64 frontend/backend-dist/openclaw-runtime/node
-          frontend/backend-dist/openclaw-runtime/node/npm.cmd install -g @anthropic-ai/claude-code
+          mv _node_tmp/node-v22.13.1-win-x64/* "$NODE_DIR/"
+          rm -rf _node_tmp node.zip
+
+          # 2. 预装 OpenClaw（--prefix 确保装到 openclaw/ 目录内）
+          mkdir -p "$OPENCLAW_DIR"
+          "$NODE_DIR/npm.cmd" install "openclaw@2026.2.17" \
+            --prefix "$OPENCLAW_DIR" \
+            --global=false \
+            --location=project
+          echo "OpenClaw installed:"
+          ls "$OPENCLAW_DIR/node_modules/.bin/" || true
+
+          # 3. 下载 uv standalone（用于 MCP uvx 服务）
+          mkdir -p "$UV_DIR"
+          curl -L -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.6.6/uv-x86_64-pc-windows-msvc.zip"
+          unzip -q uv.zip -d _uv_tmp
+          mv _uv_tmp/uv.exe "$UV_DIR/" 2>/dev/null || mv _uv_tmp/*/uv.exe "$UV_DIR/" 2>/dev/null || true
+          mv _uv_tmp/uvx.exe "$UV_DIR/" 2>/dev/null || mv _uv_tmp/*/uvx.exe "$UV_DIR/" 2>/dev/null || true
+          rm -rf _uv_tmp uv.zip
+          echo "Runtime prepared:"
+          ls -la "$RUNTIME_DIR/"
 
       # ---------- Frontend: electron-builder (build only, no publish) ----------
       - name: Install frontend dependencies

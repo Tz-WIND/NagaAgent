@@ -313,9 +313,20 @@ class EmbeddedRuntime:
             logger.error("内嵌运行时目录不可用，无法安装 OpenClaw")
             return False
 
-        # 定位 npm-cli.js（绕过 npm.cmd）
-        npm_cli = runtime_root / "node" / "node_modules" / "npm" / "bin" / "npm-cli.js"
-        if not npm_cli.exists():
+        # 定位 npm-cli.js（绕过 npm.cmd，避免 asyncio subprocess 兼容问题）
+        npm_cli = None
+        for candidate in [
+            runtime_root / "node" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+            runtime_root / "node" / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
+            runtime_root / "node" / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        ]:
+            if candidate.exists():
+                npm_cli = candidate
+                break
+
+        if npm_cli:
+            npm_cmd = [node, str(npm_cli)]
+        else:
             # 兜底：尝试直接用 npm_path（.cmd）
             npm = self.npm_path
             if not npm:
@@ -513,22 +524,60 @@ class EmbeddedRuntime:
         except Exception:
             return False
 
+    def _resolve_openclaw_entry(self) -> Optional[Path]:
+        """解析 openclaw npm 包的实际 CLI 入口文件路径。
+        优先从 package.json 的 bin 字段读取，兜底尝试常见文件名。
+        """
+        if not self._runtime_root:
+            return None
+        pkg_dir = self._runtime_root / "openclaw" / "node_modules" / "openclaw"
+        if not pkg_dir.exists():
+            return None
+
+        # 1. 从 package.json bin 字段读取
+        pkg_json = pkg_dir / "package.json"
+        if pkg_json.exists():
+            try:
+                import json
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                bin_field = pkg.get("bin", {})
+                if isinstance(bin_field, str):
+                    entry = pkg_dir / bin_field
+                    if entry.exists():
+                        return entry
+                elif isinstance(bin_field, dict):
+                    # 优先 "openclaw" key，否则取第一个
+                    rel = bin_field.get("openclaw") or next(iter(bin_field.values()), None)
+                    if rel:
+                        entry = pkg_dir / rel
+                        if entry.exists():
+                            return entry
+            except Exception as e:
+                logger.debug(f"解析 openclaw package.json bin 字段失败: {e}")
+
+        # 2. 兜底：尝试常见入口文件名
+        for name in ("openclaw.mjs", "openclaw.js", "dist/cli.js", "dist/cli.mjs"):
+            entry = pkg_dir / name
+            if entry.exists():
+                return entry
+        return None
+
     def _build_gateway_cmd(self) -> Optional[List[str]]:
         """构建启动 Gateway 的命令列表。
-        打包环境直接用 node openclaw.mjs 绕过 .cmd 脚本，
+        打包环境直接用 node <entry> 绕过 .cmd 脚本，
         避免 asyncio.create_subprocess_exec 在 Windows 上执行 .cmd 文件的兼容问题。
         """
         if self.is_packaged:
             node = self.node_path
             if not node:
                 return None
-            assert self._runtime_root is not None
-            openclaw_mjs = self._runtime_root / "openclaw" / "node_modules" / "openclaw" / "openclaw.mjs"
-            if not openclaw_mjs.exists():
-                # 兜底：尝试 .cmd
-                openclaw = self.openclaw_path
-                return [openclaw, "gateway"] if openclaw else None
-            return [node, str(openclaw_mjs), "gateway"]
+            entry = self._resolve_openclaw_entry()
+            if entry:
+                return [node, str(entry), "gateway"]
+            # 兜底：尝试 .cmd（可能在某些 Windows 环境下仍可工作）
+            logger.warning("未找到 openclaw JS 入口文件，尝试使用 .cmd 脚本")
+            openclaw = self.openclaw_path
+            return [openclaw, "gateway"] if openclaw else None
         # 开发环境：使用系统 openclaw 命令
         openclaw = self.openclaw_path
         if not openclaw:
