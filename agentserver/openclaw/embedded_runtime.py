@@ -300,11 +300,12 @@ class EmbeddedRuntime:
     # ============ 运行时安装 ============
 
     async def install_openclaw(self) -> bool:
-        """在打包环境下用内嵌 npm 安装 openclaw"""
-        npm = self.npm_path
+        """在打包环境下用内嵌 npm 安装 openclaw。
+        直接用 node npm-cli.js 绕过 npm.cmd，避免 .cmd 在 asyncio subprocess 中的兼容问题。
+        """
         node = self.node_path
-        if not npm or not node:
-            logger.error("内嵌 Node.js/npm 不可用，无法安装 OpenClaw")
+        if not node:
+            logger.error("内嵌 Node.js 不可用，无法安装 OpenClaw")
             return False
 
         runtime_root = self._runtime_root
@@ -312,13 +313,25 @@ class EmbeddedRuntime:
             logger.error("内嵌运行时目录不可用，无法安装 OpenClaw")
             return False
 
+        # 定位 npm-cli.js（绕过 npm.cmd）
+        npm_cli = runtime_root / "node" / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        if not npm_cli.exists():
+            # 兜底：尝试直接用 npm_path（.cmd）
+            npm = self.npm_path
+            if not npm:
+                logger.error("内嵌 npm 不可用，无法安装 OpenClaw")
+                return False
+            npm_cmd = [npm]
+        else:
+            npm_cmd = [node, str(npm_cli)]
+
         install_dir = runtime_root / "openclaw"
         install_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("首次启动：正在安装 OpenClaw，请稍候...")
+        logger.info(f"首次启动：正在安装 OpenClaw（{' '.join(npm_cmd[:2])}）...")
         try:
             proc = await asyncio.create_subprocess_exec(
-                npm,
+                *npm_cmd,
                 "install",
                 f"openclaw@{OPENCLAW_NPM_VERSION}",
                 cwd=str(install_dir),
@@ -410,16 +423,25 @@ class EmbeddedRuntime:
 
     async def _stop_gateway_via_cli(self, max_retries: int = 3, retry_interval_seconds: float = 1.0) -> bool:
         """通过 openclaw CLI 停止 Gateway（用于兜底，支持重试）。"""
-        openclaw: Optional[str] = self.openclaw_path
-        if not openclaw:
-            logger.warning("找不到 openclaw 可执行文件，无法执行 gateway stop")
-            return False
+        # 构建命令：打包模式下直接用 node openclaw.mjs 绕过 .cmd
+        cmd: Optional[List[str]] = None
+        if self.is_packaged and self._runtime_root:
+            node = self.node_path
+            openclaw_mjs = self._runtime_root / "openclaw" / "node_modules" / "openclaw" / "openclaw.mjs"
+            if node and openclaw_mjs.exists():
+                cmd = [node, str(openclaw_mjs)]
+        if not cmd:
+            openclaw = self.openclaw_path
+            if not openclaw:
+                logger.warning("找不到 openclaw 可执行文件，无法执行 gateway stop")
+                return False
+            cmd = [openclaw]
 
         attempts: int = max(1, max_retries)
         for attempt in range(1, attempts + 1):
             try:
                 process = await asyncio.create_subprocess_exec(
-                    openclaw,
+                    *cmd,
                     "gateway",
                     "stop",
                     stdout=asyncio.subprocess.PIPE,
@@ -492,11 +514,25 @@ class EmbeddedRuntime:
             return False
 
     def _build_gateway_cmd(self) -> Optional[List[str]]:
-        """构建启动 Gateway 的命令列表"""
+        """构建启动 Gateway 的命令列表。
+        打包环境直接用 node openclaw.mjs 绕过 .cmd 脚本，
+        避免 asyncio.create_subprocess_exec 在 Windows 上执行 .cmd 文件的兼容问题。
+        """
+        if self.is_packaged:
+            node = self.node_path
+            if not node:
+                return None
+            assert self._runtime_root is not None
+            openclaw_mjs = self._runtime_root / "openclaw" / "node_modules" / "openclaw" / "openclaw.mjs"
+            if not openclaw_mjs.exists():
+                # 兜底：尝试 .cmd
+                openclaw = self.openclaw_path
+                return [openclaw, "gateway"] if openclaw else None
+            return [node, str(openclaw_mjs), "gateway"]
+        # 开发环境：使用系统 openclaw 命令
         openclaw = self.openclaw_path
         if not openclaw:
             return None
-
         return [openclaw, "gateway"]
 
     async def start_gateway(self) -> bool:
