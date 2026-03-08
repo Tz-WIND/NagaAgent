@@ -1,6 +1,6 @@
 appId: com.nagaagent.app
 productName: Naga Agent
-copyright: Copyright © 2024 NagaAgent
+copyright: Copyright © 2024 娜迦博弈
 
 directories:
   buildResources: build
@@ -42,6 +42,12 @@ win:
       arch:
         - x64
   icon: build/icon.png
+  # 自签名代码签名证书（开发者：娜迦博弈）
+  certificateFile: build/codesign.pfx
+  certificatePassword: NagaSign2024
+  signingHashAlgorithms:
+    - sha256
+  publisherName: 娜迦博弈
 
 nsis:
   oneClick: false
