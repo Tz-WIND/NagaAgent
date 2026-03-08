@@ -43,11 +43,9 @@ win:
         - x64
   icon: build/icon.png
   # 自签名代码签名证书（开发者：娜迦博弈）
-  certificateFile: build/codesign.pfx
-  certificatePassword: NagaSign2024
-  signingHashAlgorithms:
-    - sha256
-  publisherName: 娜迦博弈
+  # electron-builder v26: cscLink + cscKeyPassword
+  cscLink: build/codesign.pfx
+  cscKeyPassword: NagaSign2024
 
 nsis:
   oneClick: false
