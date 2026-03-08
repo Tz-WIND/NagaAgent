@@ -14,9 +14,6 @@ const tabs = [
   { id: 'skin', label: '界面背景' },
   { id: 'album', label: '音之巷' },
   { id: 'memory-skin', label: '角色注册' },
-  { id: 'memory-trade', label: '记忆云迁' },
-  { id: 'mcp', label: 'MCP工具' },
-  { id: 'skill', label: '智能体技能' },
   { id: 'recharge', label: '模型充值' },
 ] as const
 
@@ -24,11 +21,8 @@ const svgIcon = (...paths: string[]) => h('svg', { 'viewBox': '0 0 24 24', 'fill
 
 const tabIcons: Record<string, { render: () => ReturnType<typeof h> }> = {
   'album': { render: () => svgIcon('M9 18V5l12-2v13', 'M9 18a3 3 0 1 0 6 0 9 9 0 0 0 6 0') },
-  'mcp': { render: () => svgIcon('M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z', 'M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z') },
-  'skill': { render: () => svgIcon('M13 2L3 14h9l-1 8 10-12h-9l1-8z') },
   'skin': { render: () => svgIcon('M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z', 'M8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3z', 'M21 15l-5-5L5 21') },
   'memory-skin': { render: () => svgIcon('M2 10c3 0 5 2 8 0s5-2 8 0', 'M2 14c3 0 5 2 8 0s5-2 8 0') },
-  'memory-trade': { render: () => svgIcon('M7 16V4m0 0L3 8m4-4l4 4', 'M17 8v12m0 0l4-4m-4 4l-4-4') },
   'recharge': { render: () => svgIcon('M12 2L3 9l4 12h10l4-12-9-7z') },
 }
 
@@ -713,12 +707,6 @@ async function handleRedeem() {
         <div class="recharge-notice">充值会在一个工作日内到账</div>
       </section>
 
-      <!-- 其他标签占位 -->
-      <section v-show="activeTab !== 'album' && activeTab !== 'memory-skin' && activeTab !== 'skin' && activeTab !== 'recharge'" class="placeholder-section">
-        <div class="placeholder-text">
-          {{ tabs.find(t => t.id === activeTab)?.label }} — 敬请期待
-        </div>
-      </section>
     </main>
   </div>
 </template>
