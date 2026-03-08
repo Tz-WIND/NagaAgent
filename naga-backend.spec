@@ -22,17 +22,16 @@ block_cipher = None
 _spec_path = Path(SPECPATH).resolve()
 PROJECT_ROOT = str(_spec_path.parent if _spec_path.is_file() else _spec_path)
 
-# 需要打包的数据文件（mcpserver / mqtt_tool 已禁用，不再打包）
+# 需要打包的数据文件
 datas = [
     ('pyproject.toml', '.'),
     ('system/prompts', 'system/prompts'),
-    # ('mcpserver', 'mcpserver'),  # 已禁用
+    ('mcpserver', 'mcpserver'),
     ('agentserver', 'agentserver'),
     ('apiserver', 'apiserver'),
     ('system', 'system'),
     ('summer_memory', 'summer_memory'),
     ('voice', 'voice'),
-    # ('mqtt_tool', 'mqtt_tool'),  # 已禁用
     ('skills', 'skills'),
 ]
 

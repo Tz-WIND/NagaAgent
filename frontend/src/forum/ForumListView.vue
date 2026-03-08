@@ -3,6 +3,7 @@ import type { ForumPost, SortMode, TimeOrder } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { sessionRestored } from '@/composables/useAuth'
 import { fetchPosts } from './api'
 import ForumPostCard from './components/ForumPostCard.vue'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
@@ -16,9 +17,26 @@ const posts = ref<ForumPost[]>([])
 const totalComments = ref(0)
 
 async function loadPosts() {
-  const res = await fetchPosts(sortMode.value, 1, 20, timeOrder.value, yearMonth.value)
-  posts.value = res.items
-  totalComments.value = res.items.reduce((sum, p) => sum + p.commentsCount, 0)
+  // 等待后端认证完成，避免 token 未就绪时 401
+  if (!sessionRestored.value) {
+    await new Promise<void>((resolve) => {
+      const stop = watch(sessionRestored, (ready) => {
+        if (ready) {
+          stop()
+          resolve()
+        }
+      })
+      setTimeout(() => { stop(); resolve() }, 5000)
+    })
+  }
+  try {
+    const res = await fetchPosts(sortMode.value, 1, 20, timeOrder.value, yearMonth.value)
+    posts.value = res.items
+    totalComments.value = res.items.reduce((sum, p) => sum + p.commentsCount, 0)
+  }
+  catch (e) {
+    console.error('[Forum] 加载帖子失败:', e)
+  }
 }
 
 watch([sortMode, timeOrder, yearMonth], () => loadPosts())

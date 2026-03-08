@@ -1,5 +1,6 @@
 import type { ForumProfile } from './types'
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
+import { sessionRestored } from '@/composables/useAuth'
 import { fetchProfile, updateProfile } from './api'
 
 const profile = ref<ForumProfile | null>(null)
@@ -9,11 +10,26 @@ export function useForumProfile() {
   async function load() {
     if (profile.value)
       return
+
+    // 等待后端认证完成，避免 token 未就绪时 401
+    if (!sessionRestored.value) {
+      await new Promise<void>((resolve) => {
+        const stop = watch(sessionRestored, (ready) => {
+          if (ready) {
+            stop()
+            resolve()
+          }
+        })
+        setTimeout(() => { stop(); resolve() }, 5000)
+      })
+    }
+
     if (!loading) {
       loading = fetchProfile().then((data) => {
         profile.value = data
       }).catch(() => {
-        // 后端暂不可用
+        // 请求失败，允许后续重试
+        loading = null
       })
     }
     await loading
