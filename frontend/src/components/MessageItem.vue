@@ -130,6 +130,53 @@ const reasoningExpanded = ref(true)
   height: auto;
 }
 
+/* 工具结果：可折叠区块 */
+.message-body :deep(.tool-result) {
+  margin: 0.3rem 0;
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0 4px 4px 0;
+  background: rgba(255, 255, 255, 0.03);
+  font-size: 0.85rem;
+}
+.message-body :deep(.tool-result summary) {
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+  color: rgba(255, 255, 255, 0.6);
+  user-select: none;
+  list-style: none;
+}
+.message-body :deep(.tool-result summary::before) {
+  content: '▶ ';
+  font-size: 0.65rem;
+  margin-right: 0.3rem;
+  transition: transform 0.15s;
+  display: inline-block;
+}
+.message-body :deep(.tool-result[open] summary::before) {
+  transform: rotate(90deg);
+}
+.message-body :deep(.tool-result summary:hover) {
+  color: rgba(255, 255, 255, 0.85);
+}
+.message-body :deep(.tool-result-body) {
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.45);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  max-height: 200px;
+  overflow-y: auto;
+}
+.message-body :deep(.tool-result-line) {
+  padding: 0.3rem 0.6rem;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.85rem;
+  border-left: 2px solid rgba(255, 255, 255, 0.15);
+  margin: 0.3rem 0;
+}
+
 /* 思考过程区块 */
 .reasoning-block {
   border-left: 2px solid rgba(212, 175, 55, 0.4);

@@ -140,12 +140,13 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
         }
       }
       else if (chunk.type === 'tool_results') {
-        // 显示工具结果摘要
+        // 工具结果：用 tool-result 代码块标记，Markdown 组件会渲染为可折叠
         const results = chunk.results || []
         for (const r of results) {
           const status = r.status === 'success' ? '✅' : '❌'
           const label = r.tool_name ? `${r.service_name}: ${r.tool_name}` : r.service_name
-          pushContent(`\n> ${status} ${label}\n`)
+          const resultText = (r.result || '').trim()
+          pushContent(`\n\`\`\`tool-result\n${status} ${label}\n${resultText}\n\`\`\`\n`)
         }
         pushContent('\n')
         // 工具结果追加完毕，更新下一轮 content 的起始位置
