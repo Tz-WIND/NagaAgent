@@ -22,11 +22,12 @@ block_cipher = None
 _spec_path = Path(SPECPATH).resolve()
 PROJECT_ROOT = str(_spec_path.parent if _spec_path.is_file() else _spec_path)
 
-# 需要打包的数据文件（mcpserver / mqtt_tool 已禁用，不再打包）
+# 需要打包的数据文件（mqtt_tool 已禁用，不再打包）
 datas = [
     ('pyproject.toml', '.'),
     ('system/prompts', 'system/prompts'),
-    # ('mcpserver', 'mcpserver'),  # 已禁用
+    # mcpserver: 只打包 agent-manifest.json（供前端技能列表 & 工具 schema 扫描），
+    # Python 模块由 PyInstaller 冻结导入，不需要作为 data 重复打包。
     ('agentserver', 'agentserver'),
     ('apiserver', 'apiserver'),
     ('system', 'system'),
@@ -35,6 +36,18 @@ datas = [
     # ('mqtt_tool', 'mqtt_tool'),  # 已禁用
     ('skills', 'skills'),
 ]
+
+# mcpserver: 收集所有 agent-manifest.json（前端技能列表 + 工具 schema 扫描需要）
+import glob as _glob
+_manifest_files = _glob.glob(
+    os.path.join(PROJECT_ROOT, 'mcpserver', '**', 'agent-manifest.json'),
+    recursive=True,
+)
+for _mf in _manifest_files:
+    _rel = os.path.relpath(_mf, PROJECT_ROOT)          # e.g. mcpserver/agent_weather_time/agent-manifest.json
+    _dest = os.path.dirname(_rel)                       # e.g. mcpserver/agent_weather_time
+    datas.append((_rel, _dest))
+print(f"[spec] 收集到 {len(_manifest_files)} 个 MCP agent manifest")
 
 # 角色资源（/characters 静态挂载依赖）
 if os.path.exists(os.path.join(PROJECT_ROOT, 'characters')):
