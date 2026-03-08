@@ -10,12 +10,12 @@ files:
   - dist/**/*
   - dist-electron/**/*
   - node_modules/lodash.isequal/**/*
-  - "!dist/models/重音テト/**"
+  - '!dist/models/重音テト/**'
 
 # 音频/视频等二进制媒体文件从 asar 中解包到真实文件系统，
 # 避免 HTMLAudioElement 通过自定义协议读取 asar 内文件失败
 asarUnpack:
-  - "dist/voices/**/*"
+  - 'dist/voices/**/*'
 
 extraResources:
   - from: build/icon.png

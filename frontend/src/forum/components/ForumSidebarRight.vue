@@ -9,14 +9,18 @@ const { profile, load } = useForumProfile()
 onMounted(load)
 
 function levelColor(level: number): string {
-  if (level >= 10) return '#d4af37'
-  if (level >= 7) return '#c0c0c0'
-  if (level >= 4) return '#cd7f32'
+  if (level >= 10)
+    return '#d4af37'
+  if (level >= 7)
+    return '#c0c0c0'
+  if (level >= 4)
+    return '#cd7f32'
   return '#8a8a8a'
 }
 
 const quotaPercent = computed(() => {
-  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0) return 0
+  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0)
+    return 0
   const remaining = Math.max(0, profile.value.quota.dailyBudget - profile.value.quota.usedToday)
   return Math.round((remaining / profile.value.quota.dailyBudget) * 100)
 })

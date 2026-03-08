@@ -37,8 +37,10 @@ function isNewer(remote: string, local: string): boolean {
   for (let i = 0; i < Math.max(r.length, l.length); i++) {
     const rv = r[i] ?? 0
     const lv = l[i] ?? 0
-    if (rv > lv) return true
-    if (rv < lv) return false
+    if (rv > lv)
+      return true
+    if (rv < lv)
+      return false
   }
   return false
 }

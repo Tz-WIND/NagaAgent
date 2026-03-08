@@ -16,7 +16,8 @@ const messageQueue: Array<{ content: string, options?: any }> = []
 const ttsEnabled = ref(localStorage.getItem('ttsEnabled') !== 'false')
 
 async function processQueue() {
-  if (messageQueue.length === 0 || isSending.value) return
+  if (messageQueue.length === 0 || isSending.value)
+    return
 
   const { content, options } = messageQueue.shift()!
   await chatStreamInternal(content, options)

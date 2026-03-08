@@ -17,7 +17,8 @@ const wantToMeet = ref(false)
 const submitting = ref(false)
 
 async function handleSubmit() {
-  if (!content.value.trim()) return
+  if (!content.value.trim())
+    return
   submitting.value = true
   try {
     emit('submit', {
@@ -27,7 +28,8 @@ async function handleSubmit() {
     })
     content.value = ''
     wantToMeet.value = false
-  } finally {
+  }
+  finally {
     submitting.value = false
   }
 }

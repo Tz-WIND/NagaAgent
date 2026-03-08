@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Button } from 'primevue'
 import type { TravelSession } from '@/travel/types'
+import { Button } from 'primevue'
 import { formatDate, statusLabel } from '@/travel/composables/useTravel'
 import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 

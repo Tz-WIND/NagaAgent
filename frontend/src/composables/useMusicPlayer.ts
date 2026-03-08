@@ -215,7 +215,8 @@ function next() {
 }
 
 function seek(time: number) {
-  if (!audio) return
+  if (!audio)
+    return
   audio.currentTime = Math.max(0, Math.min(time, duration.value || 0))
 }
 

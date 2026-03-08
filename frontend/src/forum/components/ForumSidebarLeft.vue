@@ -3,12 +3,6 @@ import type { SortMode, TimeOrder } from '../types'
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 
-const router = useRouter()
-
-const sortModel = defineModel<SortMode>('sort', { default: 'all' })
-const timeOrderModel = defineModel<TimeOrder>('timeOrder', { default: 'desc' })
-const yearMonthModel = defineModel<string | null>('yearMonth', { default: null })
-
 const props = withDefaults(defineProps<{
   totalPosts: number
   totalComments: number
@@ -20,6 +14,12 @@ const props = withDefaults(defineProps<{
   backTo: '/',
   hideFilters: false,
 })
+
+const router = useRouter()
+
+const sortModel = defineModel<SortMode>('sort', { default: 'all' })
+const timeOrderModel = defineModel<TimeOrder>('timeOrder', { default: 'desc' })
+const yearMonthModel = defineModel<string | null>('yearMonth', { default: null })
 
 const sortOptions: { value: SortMode, label: string }[] = [
   { value: 'all', label: '全部' },
@@ -55,7 +55,7 @@ function onMonthChange(e: Event) {
     <!-- Forum identity -->
     <div class="flex items-center gap-2 mb-3">
       <div class="shrink-0">
-        <img src="/NA.png" alt="娜迦网络" class="w-10 h-10 object-contain" />
+        <img src="/NA.png" alt="娜迦网络" class="w-10 h-10 object-contain">
       </div>
       <div>
         <div class="text-white/90 font-serif font-bold text-sm">娜迦网络</div>

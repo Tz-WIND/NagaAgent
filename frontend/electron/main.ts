@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, resolve } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, protocol, shell, systemPreferences } from 'electron'
@@ -63,9 +63,15 @@ app.on('second-instance', () => {
 app.whenReady().then(async () => {
   // MIME 映射（音频/视频等二进制媒体文件需要通过 fs.readFile 读取以兼容 asar）
   const MEDIA_MIME: Record<string, string> = {
-    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
-    flac: 'audio/flac', aac: 'audio/aac', webm: 'audio/webm',
-    mp4: 'video/mp4', mkv: 'video/x-matroska',
+    mp3: 'audio/mpeg',
+    wav: 'audio/wav',
+    ogg: 'audio/ogg',
+    m4a: 'audio/mp4',
+    flac: 'audio/flac',
+    aac: 'audio/aac',
+    webm: 'audio/webm',
+    mp4: 'video/mp4',
+    mkv: 'video/x-matroska',
   }
 
   // naga-app://路径 → 加载 dist/ 目录文件
@@ -179,7 +185,8 @@ app.whenReady().then(async () => {
   ipcMain.handle('window:getBounds', () => getMainWindow()?.getBounds() ?? { x: 0, y: 0, width: 1280, height: 800 })
   ipcMain.on('window:setBounds', (_event, bounds: { x?: number, y?: number, width?: number, height?: number }) => {
     const win = getMainWindow()
-    if (!win || win.isMaximized()) return
+    if (!win || win.isMaximized())
+      return
     const current = win.getBounds()
     const next = {
       x: bounds.x ?? current.x,

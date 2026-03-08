@@ -14,7 +14,7 @@ const __dirname = dirname(__filename)
 let backendProcess: ChildProcess | null = null
 let devRetryCount = 0
 
-type AppPackageMetadata = {
+interface AppPackageMetadata {
   nagaDebugConsole?: boolean
 }
 
@@ -121,7 +121,8 @@ export function startBackend(): void {
     const lines = text.split('\n')
     for (const line of lines) {
       const trimmed = line.trimEnd()
-      if (!trimmed) continue
+      if (!trimmed)
+        continue
       outputLines.push(trimmed)
 
       // Parse progress signals
@@ -223,20 +224,25 @@ export function stopBackend(): void {
   if (process.platform === 'win32') {
     // /T 连同子进程树一起终止
     spawn('taskkill', ['/pid', String(pid), '/f', '/t'])
-  } else {
+  }
+  else {
     // 杀整个进程组（负 PID），确保 uvicorn workers 等子进程一起退出
     try {
       process.kill(-pid, 'SIGTERM')
-    } catch {
+    }
+    catch {
       // 进程组不存在，回退杀单个进程
-      try { process.kill(pid, 'SIGTERM') } catch { /* already dead */ }
+      try { process.kill(pid, 'SIGTERM') }
+      catch { /* already dead */ }
     }
     // 保险：200ms 后 SIGKILL 整个进程组
     setTimeout(() => {
       try {
         process.kill(-pid, 'SIGKILL')
-      } catch {
-        try { process.kill(pid, 'SIGKILL') } catch { /* already dead */ }
+      }
+      catch {
+        try { process.kill(pid, 'SIGKILL') }
+        catch { /* already dead */ }
       }
     }, 200)
   }

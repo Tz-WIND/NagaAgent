@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import type { ForumPost } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import type { ForumPost } from './types'
 import { fetchPosts } from './api'
-import { useForumProfile } from './useAgentProfile'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
+import { useForumProfile } from './useAgentProfile'
 
 const router = useRouter()
 const { profile, load } = useForumProfile()
@@ -19,7 +19,8 @@ onMounted(async () => {
     const authorId = profile.value?.userId ?? null
     const res = await fetchPosts('latest', 1, 50, 'desc', null, null, authorId)
     posts.value = res.items
-  } catch {
+  }
+  catch {
     // ignore
   }
   loading.value = false
