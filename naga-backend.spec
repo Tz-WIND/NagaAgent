@@ -69,12 +69,11 @@ datas += collect_data_files('tiktoken_ext')
 datas += collect_data_files('litellm')
 datas += collect_data_files('py2neo')
 
-# 排除不需要的大型库（环境有 910 个包，只需约 27 个核心包）
-### 不不不千万不能排除 先全加上再说
+# 排除不需要的大型库（经审计确认未使用）
 excludes = [
     # PyQt / Qt / UI
-    #'PyQt5', 'PyQt5.QtWidgets', 'PyQt5.QtGui', 'PyQt5.QtCore', 'PyQt5.QtOpenGL',
-    #'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtGui', 'PyQt6.QtCore',
+    'PyQt5', 'PyQt5.QtWidgets', 'PyQt5.QtGui', 'PyQt5.QtCore', 'PyQt5.QtOpenGL',
+    'PyQt6', 'PyQt6.QtWidgets', 'PyQt6.QtGui', 'PyQt6.QtCore',
     'ui', 'tkinter',
     # 深度学习框架（后端调 API，不跑本地模型）
     'torch', 'torchaudio', 'torchvision', 'torchgen', 'torchdata',
@@ -83,16 +82,16 @@ excludes = [
     'onnxruntime', 'onnx',
     'transformers', 'accelerate', 'diffusers', 'safetensors',
     'modelscope',
-    # 科学计算
-    'scipy', 'sympy', 'numba', 'llvmlite',
+    # 科学计算（scipy 项目有用到，不排除）
+    'sympy', 'numba', 'llvmlite',
     'statsmodels', 'patsy',
-    # 数据处理 / 分析
+    # 数据处理 / 分析（pandas 项目未使用）
     'pandas', 'polars', '_polars_runtime_32', 'pyarrow', 'dask',
     'geopandas', 'folium', 'branca', 'xyzservices', 'fiona', 'shapely', 'pyproj', 'pyogrio',
     'h5py', 'tables',
     # 可视化
     'matplotlib', 'bokeh', 'plotly', 'seaborn', 'panel', 'holoviews', 'datashader',
-    # 图像 / CV（MCP可选，不打包）
+    # CV（MCP可选）- 注意：PIL/Pillow 项目有用到，不排除
     'cv2', 'opencv', 'skimage', 'sklearn',
     # NLP 本地库
     'nltk', 'spacy', 'gensim',
@@ -122,8 +121,8 @@ excludes = [
     'astropy',
     # GUI 自动化（MCP可选）
     'pyautogui', 'pytesseract', 'pycaw', 'screen_brightness_control',
-    # 图数据库（连接失败也不影响）
-    'neo4j', 'py2neo', 'pyneo', 'pyvis',
+    # 图可视化（pyvis 未使用；neo4j/py2neo 项目有用到，不排除）
+    'pyvis',
     # 游戏 / 音频播放
     'pygame',
     # 爬虫（MCP可选）
@@ -138,7 +137,7 @@ excludes = [
 ]
 
 # 动态导入的模块（PyInstaller 静态分析可能遗漏）
-hiddenimports = excludes + [
+hiddenimports = [
     # Web 框架
     'uvicorn',
     'uvicorn.logging',
@@ -169,15 +168,25 @@ hiddenimports = excludes + [
     'anyio',
     # 系统信息
     'psutil',
-    # 其他（MCP/redis 已禁用）
-    # 'key_value',
-    # 'key_value.aio',
-    # 'redis',
+    # HTTP / 工具
     'requests',
     # tiktoken 编码
     'tiktoken',
     'tiktoken_ext',
     'tiktoken_ext.openai_public',
+    # 图数据库（项目实际使用，try-except 容错）
+    'neo4j',
+    'py2neo',
+    # 图像处理（screenshot_provider / screen_vision 使用）
+    'PIL',
+    'PIL.Image',
+    'PIL.ImageDraw',
+    # 音频 DSP（lip-sync 使用）
+    'scipy',
+    'scipy.signal',
+    'scipy.fft',
+    # numpy（音频处理核心）
+    'numpy',
 ]
 hiddenimports += collect_submodules('psutil')
 hiddenimports += collect_submodules('charset_normalizer')
@@ -211,8 +220,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    #excludes=excludes,
-    excludes=[],
+    excludes=excludes,
     cipher=block_cipher,
     noarchive=False,
 )
