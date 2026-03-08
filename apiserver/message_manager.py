@@ -67,6 +67,9 @@ class MessageManager:
             self.ai_name = "娜迦"
             logger.warning("无法导入配置，使用默认历史轮数设置")
 
+        # 后台异步任务引用集合（防止 GC 回收未完成的任务）
+        self._background_tasks: set = set()
+
         # 会话持久化存储目录
         from system.config import get_data_dir
         self.sessions_dir = get_data_dir() / "sessions"
@@ -692,8 +695,10 @@ class MessageManager:
                 from summer_memory.memory_client import get_remote_memory_client
                 remote = get_remote_memory_client()
                 if remote is not None:
-                    import asyncio
-                    asyncio.create_task(self._add_memory_with_fallback(remote, user_message, assistant_response))
+                    self._create_background_task(
+                        self._add_memory_with_fallback(remote, user_message, assistant_response),
+                        name=f"remote_memory_{user_message[:20]}"
+                    )
                     logger.info(f"已提交远程记忆提取任务: {user_message[:50]}...")
                 else:
                     # 无远程客户端（未登录），走本地 summer_memory
@@ -704,17 +709,38 @@ class MessageManager:
             logger.error(f"保存对话与日志失败: {e}")
 
 
+    def _create_background_task(self, coro, name: str = "background"):
+        """创建后台异步任务并保存引用，防止被 GC 回收"""
+        try:
+            task = asyncio.create_task(coro, name=name)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+            task.add_done_callback(self._on_background_task_done)
+        except RuntimeError as e:
+            logger.warning(f"创建后台任务失败（无运行中事件循环）: {name}, {e}")
+
+    @staticmethod
+    def _on_background_task_done(task: asyncio.Task):
+        """后台任务完成回调 — 记录未捕获的异常"""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"后台任务 [{task.get_name()}] 异常: {exc}", exc_info=exc)
+
     async def _add_memory_with_fallback(self, remote, user_message: str, assistant_response: str):
         """远程记忆存储，失败时回退到本地"""
         try:
+            logger.info(f"[Memory] 开始远程记忆上传: {user_message[:50]}...")
             result = await remote.add_memory(user_message, assistant_response)
-            if result.get("success"):
-                logger.info(f"远程记忆存储成功: {user_message[:50]}...")
+            logger.info(f"[Memory] 远程记忆上传响应: {result}")
+            if result.get("success") is not False:
+                logger.info(f"[Memory] 远程记忆存储成功: {user_message[:50]}...")
             else:
-                logger.warning(f"远程记忆存储返回失败: {result.get('error', '未知错误')}，回退本地")
+                logger.warning(f"[Memory] 远程记忆存储返回失败: {result.get('error', '未知错误')}，回退本地")
                 self._try_local_memory(user_message, assistant_response)
         except Exception as e:
-            logger.warning(f"远程记忆存储异常: {e}，回退本地")
+            logger.warning(f"[Memory] 远程记忆存储异常: {e}，回退本地")
             self._try_local_memory(user_message, assistant_response)
 
     def _try_local_memory(self, user_message: str, assistant_response: str):
@@ -722,8 +748,10 @@ class MessageManager:
         try:
             from summer_memory.memory_manager import memory_manager
             if memory_manager and memory_manager.enabled and memory_manager.auto_extract:
-                import asyncio
-                asyncio.create_task(memory_manager.add_conversation_memory(user_message, assistant_response))
+                self._create_background_task(
+                    memory_manager.add_conversation_memory(user_message, assistant_response),
+                    name=f"local_memory_{user_message[:20]}"
+                )
                 logger.info(f"已提交本地五元组提取任务: {user_message[:50]}...")
         except Exception as e:
             logger.debug(f"本地记忆系统不可用: {e}")

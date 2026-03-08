@@ -5,7 +5,7 @@ import { watch } from 'vue'
 export const audioSettings = useStorage('naga-audio-settings', {
   bgmVolume: 0.3,
   effectVolume: 0.5,
-  wakeVoice: 'Default',
+  wakeVoice: '默认',
   clickEffect: '翻书.mp3',
   bgmEnabled: true,
   effectEnabled: true,
@@ -20,7 +20,7 @@ const effectGlob = import.meta.glob('/public/voices/effect/*.*', { query: '?url'
 function parseStartVoices() {
   const map: Record<string, string[]> = {}
   for (const key of Object.keys(startVoiceGlob)) {
-    // key: /public/voices/start/Default/音频3.mp3
+    // key: /public/voices/start/默认/音频3.mp3
     const rel = key.replace('/public/voices/start/', '')
     const slashIdx = rel.indexOf('/')
     if (slashIdx === -1)
@@ -145,11 +145,21 @@ export function stopBgm() {
 
 // ─── 唤醒语音 ──────────────────────────────────────
 export function playWakeVoice() {
-  const pack = audioSettings.value.wakeVoice
-  const files = wakeVoiceMap[pack]
+  let pack = audioSettings.value.wakeVoice
+  let files = wakeVoiceMap[pack]
+  // 兼容旧版 localStorage 残留的英文 key（如 "Default"），回退到第一个可用语音包
   if (!files || files.length === 0) {
-    console.warn(`[Audio] 唤醒语音包 "${pack}" 无可用文件`)
-    return
+    const fallback = wakeVoiceOptions[0]
+    if (fallback) {
+      console.warn(`[Audio] 唤醒语音包 "${pack}" 无可用文件，回退到 "${fallback}"`)
+      pack = fallback
+      files = wakeVoiceMap[pack]
+      audioSettings.value.wakeVoice = fallback
+    }
+    if (!files || files.length === 0) {
+      console.warn(`[Audio] 无任何可用唤醒语音包`)
+      return
+    }
   }
 
   const file = files[Math.floor(Math.random() * files.length)]!
