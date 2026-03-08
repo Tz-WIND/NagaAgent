@@ -61,17 +61,16 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
-  // naga-app://路径 → 加载 dist/ 目录文件
-  // 仅打包模式生效，开发模式走 Vite dev server
-  const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
-
-  // 媒体文件 MIME（用于 readFileSync fallback）
+  // MIME 映射（音频/视频等二进制媒体文件需要通过 fs.readFile 读取以兼容 asar）
   const MEDIA_MIME: Record<string, string> = {
     mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4',
     flac: 'audio/flac', aac: 'audio/aac', webm: 'audio/webm',
     mp4: 'video/mp4', mkv: 'video/x-matroska',
   }
 
+  // naga-app://路径 → 加载 dist/ 目录文件
+  // 仅打包模式生效，开发模式走 Vite dev server
+  const appDistDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
   protocol.handle('naga-app', (request) => {
     const rawPath = decodeURIComponent(new URL(request.url).pathname).replace(/^\/+/, '')
     const relativePath = rawPath.startsWith('dist/') ? rawPath.slice(5) : rawPath
