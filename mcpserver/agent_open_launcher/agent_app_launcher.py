@@ -110,17 +110,6 @@ class AppLauncherAgent(object):
                         "requested_app": app_name,
                         "available_apps": available_apps,
                         "total_available": app_info["total_count"],
-                        "application_format": {
-                            "tool_name": "启动应用",
-                            "app": "应用名称（必填，从上述列表中选择）",
-                            "args": "启动参数（可选）"
-                        },
-                        "example": {
-                            "tool_name": "启动应用",
-                            "app": "Chrome",
-                            "args": ""
-                        },
-                        "suggestion": "请重新调用启动应用工具（不提供app参数）获取完整应用列表"
                     }
                 }
 
@@ -128,7 +117,9 @@ class AppLauncherAgent(object):
             print(f"🚀 启动应用: {app_name} (来源: {source}) -> {app_info['path']}")
 
             try:
-                if source == "shortcut":
+                if source == "macos_app":
+                    result = self._launch_macos(app_info, args)
+                elif source == "shortcut":
                     result = self._launch_shortcut(app_info, args)
                 else:
                     result = self._launch_executable(app_info, args)
@@ -206,19 +197,38 @@ class AppLauncherAgent(object):
                 "data": {
                     "app_name": app_info["name"],
                     "exe_path": exe_path,
-                    "args": args,
-                    "source": "registry"
                 }
             }
         except Exception as e:
             return {
                 "status": "error",
                 "message": f"启动应用失败: {str(e)}",
-                "data": {
-                    "app_name": app_info["name"],
-                    "exe_path": app_info["path"],
-                    "error": str(e)
-                }
+                "data": {"app_name": app_info["name"], "error": str(e)}
+            }
+
+    def _launch_macos(self, app_info: dict, args: str = None) -> dict:
+        """macOS: 使用 open 命令启动 .app"""
+        try:
+            cmd = ["open", app_info["path"]]
+            if args:
+                cmd.append("--args")
+                if isinstance(args, str):
+                    cmd.extend(args.split())
+                elif isinstance(args, list):
+                    cmd.extend(args)
+
+            subprocess.Popen(cmd)
+
+            return {
+                "status": "success",
+                "message": f"已成功启动应用: {app_info['name']}",
+                "data": {"app_name": app_info["name"]}
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"启动应用失败: {str(e)}",
+                "data": {"app_name": app_info["name"], "error": str(e)}
             }
 
 
