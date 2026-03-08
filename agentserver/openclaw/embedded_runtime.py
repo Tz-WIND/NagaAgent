@@ -333,8 +333,6 @@ class EmbeddedRuntime:
                 logger.error("内嵌 npm 不可用，无法安装 OpenClaw")
                 return False
             npm_cmd = [npm]
-        else:
-            npm_cmd = [node, str(npm_cli)]
 
         install_dir = runtime_root / "openclaw"
         install_dir.mkdir(parents=True, exist_ok=True)
