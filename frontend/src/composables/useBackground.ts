@@ -64,7 +64,8 @@ export function useBackground() {
   }
 
   function purchase(id: string): boolean {
-    if (ownedBackgrounds.value.includes(id)) return false
+    if (ownedBackgrounds.value.includes(id))
+      return false
     ownedBackgrounds.value = [...ownedBackgrounds.value, id]
     return true
   }
@@ -82,7 +83,8 @@ export function useBackground() {
   }
 
   function getActiveBackgroundUrl(): string | null {
-    if (!activeBackground.value) return null
+    if (!activeBackground.value)
+      return null
     return getBackgroundUrl(activeBackground.value)
   }
 

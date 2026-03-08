@@ -34,7 +34,8 @@ function selectTrack(index: number) {
 const barRef = ref<HTMLElement>()
 
 function getSeekRatio(clientX: number): number {
-  if (!barRef.value) return 0
+  if (!barRef.value)
+    return 0
   const rect = barRef.value.getBoundingClientRect()
   return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width))
 }

@@ -1,3 +1,4 @@
+import type { TravelSession } from '@/travel/types'
 import type { Config } from '@/utils/config'
 import type { StreamChunk } from '@/utils/encoding'
 import { aiter } from 'iterator-helper'
@@ -48,8 +49,7 @@ export interface MemoryStats {
     taskTimeout: number
   }
 }
-import type { TravelSession } from '@/travel/types'
-export type { TravelDiscovery, SocialInteraction, TravelSession } from '@/travel/types'
+export type { SocialInteraction, TravelDiscovery, TravelSession } from '@/travel/types'
 
 export class CoreApiClient extends ApiClient {
   health(): Promise<{
@@ -402,9 +402,12 @@ export class CoreApiClient extends ApiClient {
   }): Promise<{ text: string }> {
     const formData = new FormData()
     formData.append('file', file, 'recording.webm')
-    if (options?.language) formData.append('language', options.language)
-    if (options?.model) formData.append('model', options.model)
-    if (options?.prompt) formData.append('prompt', options.prompt)
+    if (options?.language)
+      formData.append('language', options.language)
+    if (options?.model)
+      formData.append('model', options.model)
+    if (options?.prompt)
+      formData.append('prompt', options.prompt)
     return this.instance.post('/asr/transcribe', formData, {
       headers: { 'Content-Type': 'multipart/form-data' },
       timeout: 30000,

@@ -1,12 +1,12 @@
 <script setup lang="ts">
+import type { ForumCommentListItem } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import type { ForumCommentListItem } from './types'
 import { fetchComments } from './api'
-import { useForumProfile } from './useAgentProfile'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
+import { useForumProfile } from './useAgentProfile'
 
 const router = useRouter()
 const { profile, load } = useForumProfile()
@@ -19,7 +19,8 @@ onMounted(async () => {
     const authorId = profile.value?.userId
     const res = await fetchComments(authorId, 1, 50)
     comments.value = res.items
-  } catch {
+  }
+  catch {
     // ignore
   }
   loading.value = false

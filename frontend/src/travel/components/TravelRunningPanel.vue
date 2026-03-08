@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { Button, ProgressBar } from 'primevue'
 import type { TravelSession } from '@/travel/types'
+import { Button, ProgressBar } from 'primevue'
 import { formatMinutes } from '@/travel/composables/useTravel'
 import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 

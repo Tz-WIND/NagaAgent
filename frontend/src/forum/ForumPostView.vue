@@ -1,15 +1,15 @@
 <script setup lang="ts">
+import type { ForumPostDetail } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { useToast } from 'primevue/usetoast'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import type { ForumPostDetail } from './types'
+import Markdown from '@/components/Markdown.vue'
 import { fetchPost, likePost } from './api'
 import ForumCommentItem from './components/ForumCommentItem.vue'
 import ForumImagePreview from './components/ForumImagePreview.vue'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
-import Markdown from '@/components/Markdown.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,7 +28,8 @@ function goBack() {
 }
 
 async function toggleLike() {
-  if (!post.value) return
+  if (!post.value)
+    return
   const res = await likePost(post.value.id)
   post.value.likesCount = res.likes
   post.value.liked = res.liked

@@ -1,7 +1,7 @@
+import type { TravelSession } from '@/travel/types'
 import { useToast } from 'primevue/usetoast'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import coreApi from '@/api/core'
-import type { TravelSession } from '@/travel/types'
 
 export const statusLabel: Record<string, string> = {
   pending: '准备中',
@@ -18,7 +18,8 @@ export function formatMinutes(m: number): string {
 }
 
 export function formatDate(iso?: string): string {
-  if (!iso) return '-'
+  if (!iso)
+    return '-'
   const d = new Date(iso)
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
@@ -40,12 +41,14 @@ export function useTravel() {
   )
 
   const timeProgress = computed(() => {
-    if (!travelSession.value) return 0
+    if (!travelSession.value)
+      return 0
     return Math.min(100, (travelSession.value.elapsedMinutes / travelSession.value.timeLimitMinutes) * 100)
   })
 
   const creditProgress = computed(() => {
-    if (!travelSession.value) return 0
+    if (!travelSession.value)
+      return 0
     return Math.min(100, (travelSession.value.creditsUsed / travelSession.value.creditLimit) * 100)
   })
 
@@ -54,7 +57,8 @@ export function useTravel() {
       const res = await coreApi.getTravelStatus()
       travelSession.value = res.session
       isActive.value = res.active
-    } catch {
+    }
+    catch {
       // ignore
     }
   }
@@ -63,7 +67,8 @@ export function useTravel() {
     try {
       const res = await coreApi.getTravelHistory()
       historyList.value = res.sessions
-    } catch {
+    }
+    catch {
       // ignore
     }
   }
@@ -99,10 +104,12 @@ export function useTravel() {
       toast.add({ severity: 'success', summary: '出发！', detail: '旅行已开始', life: 3000 })
       await fetchStatus()
       startPolling()
-    } catch (e: any) {
+    }
+    catch (e: any) {
       const msg = e?.response?.data?.detail || e?.message || '启动失败'
       toast.add({ severity: 'error', summary: '启动失败', detail: msg, life: 5000 })
-    } finally {
+    }
+    finally {
       loading.value = false
     }
   }
@@ -114,7 +121,8 @@ export function useTravel() {
       stopPolling()
       await fetchStatus()
       fetchHistory()
-    } catch {
+    }
+    catch {
       toast.add({ severity: 'error', summary: '操作失败', detail: '停止旅行失败', life: 3000 })
     }
   }

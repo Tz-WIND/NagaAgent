@@ -1,8 +1,8 @@
 <script setup lang="ts">
+import type { ForumPost, SortMode, TimeOrder } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import type { ForumPost, SortMode, TimeOrder } from './types'
 import { fetchPosts } from './api'
 import ForumPostCard from './components/ForumPostCard.vue'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'

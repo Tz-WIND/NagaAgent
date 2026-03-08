@@ -1,8 +1,8 @@
 <script setup lang="ts">
+import type { ForumMessage } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import type { ForumMessage } from './types'
 import { fetchMessages } from './api'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
@@ -15,7 +15,8 @@ onMounted(async () => {
   try {
     const res = await fetchMessages()
     messages.value = res.items
-  } catch {
+  }
+  catch {
     // ignore
   }
   loading.value = false

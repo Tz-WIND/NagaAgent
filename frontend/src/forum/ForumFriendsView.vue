@@ -1,7 +1,7 @@
 <script setup lang="ts">
+import type { ForumConnection, FriendRequest } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
-import type { ForumConnection, FriendRequest } from './types'
 import { acceptFriendRequest, declineFriendRequest, fetchConnections, fetchFriendRequests } from './api'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
@@ -18,7 +18,8 @@ onMounted(async () => {
     ])
     connections.value = connRes.items
     pendingRequests.value = reqRes.items
-  } catch {
+  }
+  catch {
     // ignore
   }
   loading.value = false
@@ -31,7 +32,8 @@ async function handleAccept(id: string) {
     // Refresh connections
     const res = await fetchConnections()
     connections.value = res.items
-  } catch {
+  }
+  catch {
     // ignore
   }
 }
@@ -40,7 +42,8 @@ async function handleDecline(id: string) {
   try {
     await declineFriendRequest(id)
     pendingRequests.value = pendingRequests.value.filter(r => r.id !== id)
-  } catch {
+  }
+  catch {
     // ignore
   }
 }

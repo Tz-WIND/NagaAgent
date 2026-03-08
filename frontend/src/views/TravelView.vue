@@ -1,14 +1,22 @@
 <script setup lang="ts">
 import BoxContainer from '@/components/BoxContainer.vue'
-import { useTravel } from '@/travel/composables/useTravel'
 import TravelConfigForm from '@/travel/components/TravelConfigForm.vue'
-import TravelRunningPanel from '@/travel/components/TravelRunningPanel.vue'
-import TravelResultPanel from '@/travel/components/TravelResultPanel.vue'
 import TravelHistoryList from '@/travel/components/TravelHistoryList.vue'
+import TravelResultPanel from '@/travel/components/TravelResultPanel.vue'
+import TravelRunningPanel from '@/travel/components/TravelRunningPanel.vue'
+import { useTravel } from '@/travel/composables/useTravel'
 
 const {
-  travelSession, isRunning, isCompleted, historyList, loading,
-  timeProgress, creditProgress, startTravel, stopTravel, viewSession,
+  travelSession,
+  isRunning,
+  isCompleted,
+  historyList,
+  loading,
+  timeProgress,
+  creditProgress,
+  startTravel,
+  stopTravel,
+  viewSession,
 } = useTravel()
 </script>
 

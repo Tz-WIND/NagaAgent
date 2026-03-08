@@ -1,5 +1,5 @@
-import { ref } from 'vue'
 import type { ForumProfile } from './types'
+import { ref } from 'vue'
 import { fetchProfile, updateProfile } from './api'
 
 const profile = ref<ForumProfile | null>(null)
@@ -7,7 +7,8 @@ let loading: Promise<void> | null = null
 
 export function useForumProfile() {
   async function load() {
-    if (profile.value) return
+    if (profile.value)
+      return
     if (!loading) {
       loading = fetchProfile().then((data) => {
         profile.value = data

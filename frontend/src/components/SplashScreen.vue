@@ -169,7 +169,6 @@ const displayProgress = computed(() => Math.min(100, Math.round(props.progress))
     <!-- 金色神经网络粒子动画（透明背景，Live2D 可从下层透出） -->
     <NetworkCanvas />
 
-
     <!-- clip-path evenodd 开洞遮罩：中间矩形区域透明，四周深色 -->
     <div class="frame-mask" />
 

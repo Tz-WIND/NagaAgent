@@ -1,10 +1,10 @@
 import { ref } from 'vue'
-import API from '@/api/core'
 import { authExpired } from '@/api'
+import API from '@/api/core'
+import { isNagaLoggedIn, refreshUserStats } from '@/composables/useAuth'
+import { handleMusicCommand } from '@/composables/useMusicPlayer'
 import { triggerAction } from '@/utils/live2dController'
 import { MESSAGES } from '@/utils/session'
-import { handleMusicCommand } from '@/composables/useMusicPlayer'
-import { isNagaLoggedIn, refreshUserStats } from '@/composables/useAuth'
 
 export const toolMessage = ref('')
 export const openclawTasks = ref<Array<Record<string, any>>>([])

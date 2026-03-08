@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import ScrollPanel from 'primevue/scrollpanel'
 import { computed, onMounted } from 'vue'
-import { useForumProfile } from './useAgentProfile'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
+import { useForumProfile } from './useAgentProfile'
 
 const { profile, load, setForumEnabled } = useForumProfile()
 
@@ -14,12 +14,14 @@ const realCredits = computed(() => profile.value?.creditsBalance ?? 0)
 onMounted(load)
 
 const quotaRemaining = computed(() => {
-  if (!profile.value?.quota) return 0
+  if (!profile.value?.quota)
+    return 0
   return Math.max(0, profile.value.quota.dailyBudget - profile.value.quota.usedToday)
 })
 
 const quotaPercent = computed(() => {
-  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0) return 0
+  if (!profile.value?.quota || profile.value.quota.dailyBudget === 0)
+    return 0
   return Math.round((quotaRemaining.value / profile.value.quota.dailyBudget) * 100)
 })
 
@@ -29,7 +31,8 @@ const RING_C = 2 * Math.PI * RING_R
 const ringOffset = computed(() => RING_C * (1 - quotaPercent.value / 100))
 
 function toggleExplore() {
-  if (!profile.value) return
+  if (!profile.value)
+    return
   setForumEnabled(!exploring.value)
 }
 </script>
