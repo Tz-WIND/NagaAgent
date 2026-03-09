@@ -20,6 +20,8 @@ asarUnpack:
 extraResources:
   - from: build/icon.png
     to: build/icon.png
+  - from: build/icon.ico
+    to: build/icon.ico
   - from: ../characters
     to: characters
     filter:
@@ -41,7 +43,7 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: build/icon.png
+  icon: build/icon.ico
   # 自签名代码签名证书（开发者：娜迦博弈）
   # electron-builder v26: cscLink + cscKeyPassword
   cscLink: build/codesign.pfx
