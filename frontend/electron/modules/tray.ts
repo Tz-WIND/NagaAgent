@@ -6,21 +6,24 @@ import { getMainWindow } from './window'
 let tray: Tray | null = null
 
 export function createTray(): Tray {
-  // In dev: icon is at project_root/build/icon.png
-  // In production: icon is at resources/build/icon.png
-  const iconPath = app.isPackaged
-    ? join(process.resourcesPath, 'build', 'icon.png')
-    : join(app.getAppPath(), 'build', 'icon.png')
+  const isWin = process.platform === 'win32'
+  const baseDir = app.isPackaged ? process.resourcesPath : app.getAppPath()
+
   let icon: Electron.NativeImage
   try {
-    // 980x980 直接缩到 16x16 会导致 Windows 托盘只显示顶部（帽子）。
-    // 先缩到 64x64 中间尺寸再缩到目标尺寸，避免极端缩放比导致裁切/失真。
-    // macOS 托盘推荐 22x22（Retina 自动 2x），Windows 推荐 16x16。
-    const isWin = process.platform === 'win32'
-    const traySize = isWin ? 16 : 22
-    icon = nativeImage.createFromPath(iconPath)
-      .resize({ width: 64, height: 64 })
-      .resize({ width: traySize, height: traySize })
+    if (isWin) {
+      // Windows: 使用多尺寸 .ico（内含 16/24/32/48/64/128/256），
+      // 系统根据 DPI 自动选取最佳尺寸，避免手动 resize 导致裁切/失真。
+      const icoPath = join(baseDir, 'build', 'icon.ico')
+      icon = nativeImage.createFromPath(icoPath)
+    }
+    else {
+      // macOS: 22x22 PNG（Retina 由系统自动 2x）
+      const pngPath = join(baseDir, 'build', 'icon.png')
+      icon = nativeImage.createFromPath(pngPath)
+        .resize({ width: 64, height: 64 })
+        .resize({ width: 22, height: 22 })
+    }
   }
   catch {
     icon = nativeImage.createEmpty()
