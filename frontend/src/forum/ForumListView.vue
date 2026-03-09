@@ -3,6 +3,7 @@ import type { ForumPost, SortMode, TimeOrder } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import { ACCESS_TOKEN } from '@/api'
 import { sessionRestored } from '@/composables/useAuth'
 import { fetchPosts } from './api'
 import ForumPostCard from './components/ForumPostCard.vue'
@@ -17,6 +18,10 @@ const posts = ref<ForumPost[]>([])
 const totalComments = ref(0)
 
 async function loadPosts() {
+  // 未登录直接返回，不发请求
+  if (!ACCESS_TOKEN.value)
+    return
+
   // 等待后端认证完成，避免 token 未就绪时 401
   if (!sessionRestored.value) {
     await new Promise<void>((resolve) => {
@@ -29,6 +34,11 @@ async function loadPosts() {
       setTimeout(() => { stop(); resolve() }, 5000)
     })
   }
+
+  // 超时后再次检查（可能已被 401 处理清空）
+  if (!ACCESS_TOKEN.value)
+    return
+
   try {
     const res = await fetchPosts(sortMode.value, 1, 20, timeOrder.value, yearMonth.value)
     posts.value = res.items

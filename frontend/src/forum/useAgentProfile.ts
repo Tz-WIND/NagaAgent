@@ -1,5 +1,6 @@
 import type { ForumProfile } from './types'
 import { ref, watch } from 'vue'
+import { ACCESS_TOKEN } from '@/api'
 import { sessionRestored } from '@/composables/useAuth'
 import { fetchProfile, updateProfile } from './api'
 
@@ -9,6 +10,10 @@ let loading: Promise<void> | null = null
 export function useForumProfile() {
   async function load() {
     if (profile.value)
+      return
+
+    // 未登录（无 token）直接返回，不发请求
+    if (!ACCESS_TOKEN.value)
       return
 
     // 等待后端认证完成，避免 token 未就绪时 401
@@ -23,6 +28,10 @@ export function useForumProfile() {
         setTimeout(() => { stop(); resolve() }, 5000)
       })
     }
+
+    // 超时后再次检查 token（可能已被 401 处理清空）
+    if (!ACCESS_TOKEN.value)
+      return
 
     if (!loading) {
       loading = fetchProfile().then((data) => {
