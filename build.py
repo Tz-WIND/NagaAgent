@@ -54,7 +54,7 @@ MAC_ARCH = "arm64" if platform.machine() == "arm64" else "x64"
 PROJECT_ROOT = Path(__file__).resolve().parent
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
 BACKEND_DIST_DIR = FRONTEND_DIR / "backend-dist"
-RUNTIME_DIR = BACKEND_DIST_DIR / "openclaw-runtime"
+RUNTIME_DIR = BACKEND_DIST_DIR / "runtime"
 NODE_RUNTIME_DIR = RUNTIME_DIR / "node"
 OPENCLAW_RUNTIME_DIR = RUNTIME_DIR / "openclaw"
 SPEC_FILE = PROJECT_ROOT / "naga-backend.spec"
@@ -300,7 +300,7 @@ def _extract_tarball(archive_path: Path) -> None:
 
 
 def extract_node_runtime(archive_path: Path) -> None:
-    """解压 Node.js 到 openclaw-runtime/node"""
+    """解压 Node.js 到 runtime/node"""
     if NODE_RUNTIME_DIR.exists():
         log(f"清理旧 Node.js 运行时: {NODE_RUNTIME_DIR}")
         shutil.rmtree(NODE_RUNTIME_DIR)
@@ -420,6 +420,13 @@ def preinstall_openclaw(force: bool = False) -> None:
         raise FileNotFoundError(f"OpenClaw 预装失败，未找到可用入口: {openclaw_entry}")
     log(f"OpenClaw 预装完成: {openclaw_entry}")
 
+    # 复制 gateway_start.mjs 到运行时目录，打包后用它启动 gateway
+    gateway_script_src = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
+    gateway_script_dst = RUNTIME_DIR / "gateway_start.mjs"
+    if gateway_script_src.exists():
+        shutil.copy2(gateway_script_src, gateway_script_dst)
+        log(f"已复制 gateway_start.mjs -> {gateway_script_dst}")
+
 
 def download_uv_runtime() -> Path:
     """下载 uv standalone 二进制包，返回本地缓存路径"""
@@ -435,7 +442,7 @@ def download_uv_runtime() -> Path:
 
 
 def extract_uv_runtime(archive_path: Path) -> None:
-    """解压 uv standalone 到 openclaw-runtime/uv/"""
+    """解压 uv standalone 到 runtime/uv/"""
     if UV_RUNTIME_DIR.exists():
         # 检查是否已解压
         ext = ".exe" if IS_WINDOWS else ""
@@ -579,8 +586,8 @@ def print_summary() -> None:
         size = sum(f.stat().st_size for f in backend_dir.rglob("*") if f.is_file())
         log(f"后端产物: {backend_dir}  ({size / 1024 / 1024:.0f} MB)")
 
-    # OpenClaw 运行时
-    runtime_dir = BACKEND_DIST_DIR / "openclaw-runtime"
+    # 运行时（Node.js + OpenClaw + uv）
+    runtime_dir = BACKEND_DIST_DIR / "runtime"
     if runtime_dir.exists():
         size = sum(f.stat().st_size for f in runtime_dir.rglob("*") if f.is_file())
         log(f"OpenClaw 运行时: {runtime_dir}  ({size / 1024 / 1024:.0f} MB)")

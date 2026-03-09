@@ -33,7 +33,7 @@ async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
         return False
 
     if runtime.is_gateway_port_in_use():
-        logger.info("端口 18789 已被占用，跳过 Gateway 启动")
+        logger.info(f"端口 {config.openclaw.gateway_port} 已被占用，跳过 Gateway 启动")
         return False
 
     gw_ok = await runtime.start_gateway()
@@ -44,57 +44,12 @@ async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
     return gw_ok
 
 
-async def _auto_install_openclaw() -> bool:
-    """尝试通过 npm install -g openclaw 自动安装"""
-    npm = shutil.which("npm")
-    if not npm:
-        logger.warning("自动安装 OpenClaw 失败：npm 不可用")
-        return False
-
-    try:
-        logger.info("OpenClaw 未安装，正在执行 npm install -g openclaw，请稍候...")
-        proc = await asyncio.create_subprocess_exec(
-            npm,
-            "install",
-            "-g",
-            "openclaw",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-
-        if proc.returncode != 0:
-            logger.error(f"npm install -g openclaw 失败: {stderr.decode()[:500]}")
-            return False
-
-        # 验证安装成功
-        if shutil.which("openclaw"):
-            logger.info("OpenClaw 自动安装成功")
-            return True
-        else:
-            logger.error("npm install -g openclaw 执行成功但 openclaw 命令未找到")
-            return False
-
-    except asyncio.TimeoutError:
-        logger.error("npm install -g openclaw 超时（120秒）")
-        return False
-    except Exception as e:
-        logger.error(f"自动安装 OpenClaw 失败: {e}")
-        return False
-
-
-def _should_use_embedded_openclaw(runtime: EmbeddedRuntime) -> bool:
-    """是否应优先使用内嵌 OpenClaw（仅打包环境且用户本机未安装）"""
-    return runtime.is_packaged and runtime.openclaw_installed and not runtime.has_global_install
-
-
 def _on_config_changed() -> None:
     """配置变更监听器：自动更新 OpenClaw LLM 配置"""
     try:
         embedded_runtime = get_embedded_runtime()
 
-        # 仅在使用内嵌 OpenClaw 时更新配置
-        if _should_use_embedded_openclaw(embedded_runtime):
+        if embedded_runtime.openclaw_installed:
             from agentserver.openclaw.llm_config_bridge import inject_naga_llm_config
 
             inject_naga_llm_config()
@@ -153,123 +108,51 @@ async def lifespan(app: FastAPI):
                 ensure_hooks_allow_request_session_key,
                 ensure_gateway_local_mode,
                 ensure_hooks_path,
+                ensure_gateway_port,
             )
 
             embedded_runtime = get_embedded_runtime()
-            mode = embedded_runtime.runtime_mode
-            logger.info(f"OpenClaw 运行时模式: {mode}")
-            has_global_openclaw: bool = False
-            has_embedded_openclaw: bool = False
+            logger.info(f"OpenClaw 运行时模式: {embedded_runtime.runtime_mode}")
+            logger.info(f"  runtime_root: {embedded_runtime.runtime_root}")
+            logger.info(f"  node_path: {embedded_runtime.node_path}")
+            logger.info(f"  openclaw_path: {embedded_runtime.openclaw_path}")
 
-            if embedded_runtime.is_packaged:
-                # ── 诊断日志：打印内嵌运行时路径状态 ──
-                logger.info(f"  runtime_root: {embedded_runtime.runtime_root}")
-                logger.info(f"  node_path: {embedded_runtime.node_path}")
-                logger.info(f"  npm_path: {embedded_runtime.npm_path}")
-                logger.info(f"  openclaw_path: {embedded_runtime.openclaw_path}")
-                if embedded_runtime.runtime_root:
-                    import os as _os
-                    try:
-                        _contents = _os.listdir(str(embedded_runtime.runtime_root))
-                        logger.info(f"  runtime_root 内容: {_contents}")
-                        _node_dir = embedded_runtime.runtime_root / "node"
-                        if _node_dir.exists():
-                            logger.info(f"  node/ 内容: {_os.listdir(str(_node_dir))[:20]}")
-                    except Exception as _e:
-                        logger.warning(f"  列出 runtime_root 内容失败: {_e}")
-
-                has_global_openclaw = shutil.which("openclaw") is not None
-                has_embedded_openclaw = embedded_runtime.openclaw_installed
-                logger.info(f"  has_global_openclaw={has_global_openclaw}, has_embedded_openclaw={has_embedded_openclaw}")
-
-                if has_global_openclaw:
-                    logger.info("打包环境：检测到全局安装 OpenClaw，跳过内嵌 OpenClaw 初始化/启动")
+            # ── Step 1: 检测是否已安装，未安装则自动安装到 runtime/openclaw/ ──
+            if not embedded_runtime.openclaw_installed:
+                if embedded_runtime.node_path:
+                    logger.info("OpenClaw 未安装，正在自动安装到 runtime/openclaw/ ...")
+                    install_ok = await embedded_runtime.install_openclaw()
+                    if install_ok:
+                        logger.info("OpenClaw 自动安装成功")
+                    else:
+                        logger.error("OpenClaw 自动安装失败")
                 else:
-                    logger.info("打包环境：准备启动内嵌 OpenClaw Gateway")
+                    logger.warning("OpenClaw 未安装且 Node.js 不可用，跳过自动安装")
 
-                    # 首次运行时自动执行 onboard 初始化（含 fallback 配置生成）
-                    onboard_ok = await embedded_runtime.ensure_onboarded()
-                    if not onboard_ok:
-                        logger.error("OpenClaw 初始化失败（onboard + fallback 均失败）")
-
-                    # 首次运行时自动 npm install openclaw（内嵌运行时目录中）
-                    if not has_embedded_openclaw and embedded_runtime.node_path:
-                        logger.info("打包环境：内嵌 OpenClaw 尚未安装，执行自动安装...")
-                        install_ok = await embedded_runtime.install_openclaw()
-                        if install_ok:
-                            has_embedded_openclaw = True
-                            logger.info("内嵌 OpenClaw 自动安装成功")
-                        else:
-                            logger.error("内嵌 OpenClaw 自动安装失败")
-                    elif not has_embedded_openclaw:
-                        logger.warning(f"内嵌 OpenClaw 未安装且 node 不可用 (node_path={embedded_runtime.node_path})，跳过自动安装")
-
-                    # 注意：Gateway 启动延后到配置全部完成后（见下方统一启动段）
-
-            # === 打包环境 ===
-            if embedded_runtime.is_packaged:
-                if has_global_openclaw:
-                    logger.info("打包环境：检测到全局安装的 OpenClaw，优先使用")
-                    # 记录使用系统已有，避免卸载时误清理用户目录
-                    state_file = embedded_runtime._get_install_state_file()
-                    if state_file and (not state_file.exists() or embedded_runtime.is_auto_installed):
-                        embedded_runtime._write_install_state(auto_installed=False)
-                elif has_embedded_openclaw:
-                    logger.info("打包环境：未检测到全局 OpenClaw，使用预装内嵌 OpenClaw")
-                    # 记录为自动安装，保证卸载时可清理内嵌运行时相关目录
-                    if not embedded_runtime.is_auto_installed:
-                        embedded_runtime._write_install_state(auto_installed=True)
-                else:
-                    logger.warning("打包环境：未检测到全局 OpenClaw，且内嵌 OpenClaw 不可用")
-
-            # === 开发环境 ===
-            else:
-                if mode == "global":
-                    logger.info("检测到全局安装的 OpenClaw")
-                else:
-                    # 尝试自动安装 openclaw
-                    installed = await _auto_install_openclaw()
-                    if not installed:
-                        logger.warning("OpenClaw 不可用：未全局安装，自动安装也失败")
-                has_global_openclaw = shutil.which("openclaw") is not None
-
-            # === 统一：按运行时来源处理配置与 Gateway ===
-            openclaw_available = has_global_openclaw or has_embedded_openclaw
-            if openclaw_available:
-                use_embedded_openclaw = _should_use_embedded_openclaw(embedded_runtime)
-                # 兼容旧配置：内嵌 Gateway 场景下补齐 gateway.mode=local，避免启动被阻塞
-                if use_embedded_openclaw:
-                    ensure_gateway_local_mode(auto_create=False)
-                    # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
-                    ensure_hooks_allow_request_session_key(auto_create=False)
-                # 确保 hooks.path 显式设置，避免 Gateway 不注册 hooks 路由（405）
-                ensure_hooks_path(auto_create=False)
-
-                # 确保配置文件存在（全局/内嵌均需要）
+            # ── Step 2: 确保配置文件存在 + 兼容补丁 ──
+            if embedded_runtime.openclaw_installed:
                 ensure_openclaw_config()
-                # 仅在内嵌 OpenClaw 场景下注入 Naga LLM 配置
-                if use_embedded_openclaw:
-                    inject_naga_llm_config()
-                    logger.info("已自动注入内嵌 OpenClaw 的 Naga LLM 配置")
+                ensure_gateway_port(auto_create=False)
+                ensure_gateway_local_mode(auto_create=False)
+                ensure_hooks_path(auto_create=False)
+                ensure_hooks_allow_request_session_key(auto_create=False)
 
-                if embedded_runtime.is_packaged:
-                    if use_embedded_openclaw:
-                        await _start_gateway_if_port_free(embedded_runtime)
-                    elif has_global_openclaw:
-                        logger.info("打包环境：使用全局 OpenClaw，跳过内嵌 Gateway 启动")
-                else:
-                    await _start_gateway_if_port_free(embedded_runtime)
+                await embedded_runtime.ensure_onboarded()
+                inject_naga_llm_config()
+
+                # ── Step 3: 启动 Gateway ──
+                await _start_gateway_if_port_free(embedded_runtime)
 
             # 检测最终状态并初始化客户端
             openclaw_status = detect_openclaw(check_connection=False)
 
             if openclaw_status.installed:
                 openclaw_config = ClientOpenClawConfig(
-                    gateway_url=openclaw_status.gateway_url or "http://127.0.0.1:18789",
+                    gateway_url=openclaw_status.gateway_url or config.openclaw.gateway_url,
                     gateway_token=openclaw_status.gateway_token,
                     hooks_token=openclaw_status.hooks_token,
                     hooks_path=getattr(openclaw_status, "hooks_path", "/hooks"),
-                    timeout=120,
+                    timeout=config.openclaw.timeout,
                 )
                 logger.info(f"OpenClaw 配置: {openclaw_config.gateway_url}")
                 logger.info(
@@ -280,17 +163,10 @@ async def lifespan(app: FastAPI):
                 )
             else:
                 openclaw_config = ClientOpenClawConfig(
-                    gateway_url=getattr(config.openclaw, "gateway_url", "http://127.0.0.1:18789")
-                    if hasattr(config, "openclaw")
-                    else "http://127.0.0.1:18789",
-                    gateway_token=getattr(config.openclaw, "gateway_token", None)
-                    if hasattr(config, "openclaw")
-                    else None,
-                    hooks_token=getattr(config.openclaw, "hooks_token", None) if hasattr(config, "openclaw") else None,
-                    hooks_path=getattr(config.openclaw, "hooks_path", "/hooks")
-                    if hasattr(config, "openclaw")
-                    else "/hooks",
-                    timeout=120,
+                    gateway_url=config.openclaw.gateway_url,
+                    gateway_token=config.openclaw.token,
+                    hooks_token=config.openclaw.token,
+                    timeout=config.openclaw.timeout,
                 )
                 logger.info(f"OpenClaw 未检测到安装，使用配置文件: {openclaw_config.gateway_url}")
 
@@ -492,7 +368,7 @@ async def configure_openclaw(payload: Dict[str, Any]):
     """配置 OpenClaw 连接
 
     请求体:
-    - gateway_url: Gateway 地址 (默认 http://localhost:18789)
+    - gateway_url: Gateway 地址 (默认从 config.openclaw.gateway_url 读取)
     - token: 认证 token
     - timeout: 超时时间
     - default_model: 默认模型
@@ -502,10 +378,10 @@ async def configure_openclaw(payload: Dict[str, Any]):
         from agentserver.openclaw import OpenClawConfig as ClientOpenClawConfig
 
         openclaw_config = ClientOpenClawConfig(
-            gateway_url=payload.get("gateway_url", "http://localhost:18789"),
+            gateway_url=payload.get("gateway_url", config.openclaw.gateway_url),
             token=payload.get("token"),
             hooks_path=payload.get("hooks_path", "/hooks"),
-            timeout=payload.get("timeout", 120),
+            timeout=payload.get("timeout", config.openclaw.timeout),
             default_model=payload.get("default_model"),
             default_channel=payload.get("default_channel", "last"),
         )

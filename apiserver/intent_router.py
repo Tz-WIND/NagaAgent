@@ -25,7 +25,7 @@ logger = logging.getLogger("IntentRouter")
 ROUTER_MODEL = "gpt-4.1-nano"
 
 # 内置工具名称（非 MCP、非 Skill）
-BUILTIN_TOOLS = {"openclaw", "openclaw_tool", "live2d"}
+BUILTIN_TOOLS = {"openclaw", "tool", "live2d"}
 
 
 @dataclass

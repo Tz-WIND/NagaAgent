@@ -14,7 +14,7 @@ import os
 # 确保 localhost 请求绕过代理
 os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 
-GATEWAY_URL = "http://127.0.0.1:18789"
+GATEWAY_URL = "http://127.0.0.1:20789"
 GATEWAY_TOKEN = "9d3d8c24a1739f3a8a21653bbc218bc54f53ff1a5c5381de"
 HOOKS_TOKEN = "testnagahook"
 

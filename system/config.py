@@ -560,14 +560,26 @@ class OpenClawConfig(BaseModel):
     """OpenClaw 集成配置
 
     官方文档: https://docs.openclaw.ai/
+    gateway_port 是整个项目的单一端口来源，所有模块从这里读取。
     """
 
-    gateway_url: str = Field(default="http://localhost:18789", description="OpenClaw Gateway 地址")
+    gateway_port: int = Field(default=20789, description="OpenClaw Gateway 端口（20789 避免与标准 OpenClaw 18789 冲突）")
+    gateway_url: str = Field(default="http://127.0.0.1:20789", description="OpenClaw Gateway 地址（留空则根据 gateway_port 自动生成）")
     token: Optional[str] = Field(default=None, description="认证 token")
     timeout: int = Field(default=120, ge=5, le=600, description="请求超时时间（秒）")
     default_model: Optional[str] = Field(default=None, description="默认模型")
     default_channel: str = Field(default="last", description="默认消息通道")
     enabled: bool = Field(default=False, description="是否启用 OpenClaw 集成")
+
+    def model_post_init(self, __context) -> None:
+        """确保 gateway_url 与 gateway_port 一致"""
+        # 如果用户只改了 port 没改 url，或 url 还是旧的 18789 默认值，自动同步
+        if self.gateway_url in ("", "http://localhost:18789", "http://127.0.0.1:18789"):
+            self.gateway_url = f"http://127.0.0.1:{self.gateway_port}"
+        elif f":{self.gateway_port}" not in self.gateway_url:
+            # url 里的端口和 gateway_port 不一致，以 gateway_port 为准
+            import re
+            self.gateway_url = re.sub(r":\d+$", f":{self.gateway_port}", self.gateway_url)
 
 
 class NagaBusinessConfig(BaseModel):

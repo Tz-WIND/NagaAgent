@@ -29,12 +29,12 @@ extraResources:
     to: backend
     filter:
       - '**/*'
-  - from: backend-dist/openclaw-runtime
-    to: openclaw-runtime
+  - from: backend-dist/runtime
+    to: runtime
     filter:
       - '**/*'
   - from: ../openclaw.LICENSE
-    to: openclaw-runtime/LICENSE
+    to: runtime/LICENSE
 
 win:
   target:

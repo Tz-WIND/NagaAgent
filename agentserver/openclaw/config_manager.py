@@ -380,8 +380,7 @@ class OpenClawConfigManager:
             "hooks.enabled": True,
             "hooks.token": hooks_token,
             "hooks.allowRequestSessionKey": True,
-            # 搜索集成：设置 BRAVE_API_KEY 占位值，走本地代理
-            "env.BRAVE_API_KEY": "naga-proxy",
+            # BRAVE_API_KEY 由 inject_naga_llm_config() 从 config.online_search 同步
         }
 
         return self.batch_update(updates)

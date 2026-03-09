@@ -70,6 +70,14 @@ class OpenClawInstaller:
         from .embedded_runtime import get_embedded_runtime
         return get_embedded_runtime()
 
+    @staticmethod
+    def _get_gateway_port() -> int:
+        try:
+            from system.config import config as _cfg
+            return _cfg.openclaw.gateway_port
+        except Exception:
+            return 20789
+
     # 默认配置模板（使用免费的 GLM 模型作为兜底）
     DEFAULT_CONFIG_TEMPLATE = {
         "agents": {
@@ -95,10 +103,9 @@ class OpenClawInstaller:
         "hooks": {
             "enabled": True,
             "token": "",  # 将在初始化时生成
-            "allowRequestSessionKey": True,
         },
         "gateway": {
-            "port": 18789,
+            "port": 20789,  # 运行时由 _get_gateway_port() 覆盖
             "mode": "local",
             "bind": "loopback",
             "auth": {
@@ -117,6 +124,7 @@ class OpenClawInstaller:
 
         token = secrets.token_hex(24)
         api = config.api
+        port = config.openclaw.gateway_port
         workspace = str(Path.home() / ".openclaw" / "workspace")
 
         return {
@@ -126,7 +134,6 @@ class OpenClawInstaller:
             },
             "env": {
                 "shellEnv": {"enabled": False},
-                "BRAVE_API_KEY": "naga-proxy",
             },
             "models": {
                 "providers": {
@@ -165,15 +172,15 @@ class OpenClawInstaller:
                 "enabled": True,
                 "path": "/hooks",
                 "token": token,
-                "allowRequestSessionKey": True,
             },
             "gateway": {
-                "port": 18789,
+                "port": port,
                 "mode": "local",
                 "bind": "loopback",
                 "auth": {"mode": "token", "token": token},
             },
             "skills": {"install": {"nodeManager": "npm"}},
+            "tools": {"allow": ["*"]},
         }
 
     def __init__(self):

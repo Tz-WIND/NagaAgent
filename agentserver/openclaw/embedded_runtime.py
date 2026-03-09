@@ -333,6 +333,8 @@ class EmbeddedRuntime:
                 logger.error("内嵌 npm 不可用，无法安装 OpenClaw")
                 return False
             npm_cmd = [npm]
+        else:
+            npm_cmd = [node, str(npm_cli)]
 
         install_dir = runtime_root / "openclaw"
         install_dir.mkdir(parents=True, exist_ok=True)
@@ -364,9 +366,41 @@ class EmbeddedRuntime:
         if self.openclaw_path:
             logger.info(f"OpenClaw 安装成功: {self.openclaw_path}")
             self._write_install_state(auto_installed=True)
+            self._overlay_vendor_dist()
             return True
         logger.error("npm install 执行成功但 openclaw 未找到")
         return False
+
+    def _overlay_vendor_dist(self) -> None:
+        """
+        将 vendor/openclaw/dist/ 的编译产物覆盖到 runtime/openclaw/ 中，
+        替换 npm 包的原始文件（如定制的 web-search.js）。
+        """
+        if not self._runtime_root:
+            return
+        # 定位 vendor dist
+        vendor_dist = Path(__file__).resolve().parent.parent.parent / "vendor" / "openclaw" / "dist"
+        if not vendor_dist.exists():
+            logger.debug(f"vendor/openclaw/dist/ 不存在，跳过 overlay: {vendor_dist}")
+            return
+        target_dist = self._runtime_root / "openclaw" / "node_modules" / "openclaw" / "dist"
+        if not target_dist.exists():
+            logger.debug(f"目标 dist 不存在，跳过 overlay: {target_dist}")
+            return
+        try:
+            import shutil as _shutil
+            # 只覆盖 vendor 中存在的文件，不删除 npm 包的其他文件
+            count = 0
+            for src_file in vendor_dist.rglob("*.js"):
+                rel = src_file.relative_to(vendor_dist)
+                dst_file = target_dist / rel
+                if dst_file.exists():
+                    _shutil.copy2(src_file, dst_file)
+                    count += 1
+            if count:
+                logger.info(f"已从 vendor/openclaw/dist/ 覆盖 {count} 个文件到 runtime")
+        except Exception as e:
+            logger.warning(f"overlay vendor dist 失败（不影响基本功能）: {e}")
 
     async def uninstall_openclaw(self) -> bool:
         """
@@ -513,8 +547,19 @@ class EmbeddedRuntime:
 
         return False
 
-    def is_gateway_port_in_use(self, host: str = "127.0.0.1", port: int = 18789) -> bool:
-        """检测 Gateway 默认端口是否被占用。"""
+    @staticmethod
+    def _get_gateway_port() -> int:
+        """从 system.config 读取 Gateway 端口（单一来源）。"""
+        try:
+            from system.config import config as _cfg
+            return _cfg.openclaw.gateway_port
+        except Exception:
+            return 20789
+
+    def is_gateway_port_in_use(self, host: str = "127.0.0.1", port: int = None) -> bool:
+        """检测 Gateway 端口是否被占用。port 为 None 时从 config 读取。"""
+        if port is None:
+            port = self._get_gateway_port()
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.settimeout(1)
@@ -605,11 +650,24 @@ class EmbeddedRuntime:
 
         try:
             logger.info(f"启动 OpenClaw Gateway: {' '.join(cmd)}")
+            port = self._get_gateway_port()
+            # 将端口 + 搜索 base URL 通过环境变量传给 gateway 进程
+            gw_env = self.env
+            gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
+            try:
+                from system.config import config as _cfg
+                search_base = getattr(_cfg.online_search, "search_api_base", "")
+                if search_base:
+                    gw_env["BRAVE_SEARCH_BASE_URL"] = search_base
+            except Exception:
+                pass
+            # 确保 vendor 定制代码已覆盖（启动前检查一次）
+            self._overlay_vendor_dist()
             self._gateway_process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=self.env,
+                env=gw_env,
             )
             # 轮询等待 Gateway 就绪（替代固定 sleep(3)）
             import socket
@@ -622,7 +680,7 @@ class EmbeddedRuntime:
                 try:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.settimeout(1)
-                    if sock.connect_ex(("127.0.0.1", 18789)) == 0:
+                    if sock.connect_ex(("127.0.0.1", port)) == 0:
                         ready = True
                         sock.close()
                         break

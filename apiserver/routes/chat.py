@@ -469,6 +469,9 @@ async def chat_stream(request: ChatRequest):
             current_round_text = ""
             is_tool_event = False  # 标记当前是否在处理工具事件（不送TTS）
             was_compressed = False  # 运行时是否执行过上下文压缩（用于保存 info 标记）
+            # 累积所有轮次内容（含工具结果），用于持久化完整对话
+            all_rounds_content = ""
+            had_tool_events = False
 
             async for chunk in run_agentic_loop(messages, session_id, model_override=model_override, tools=tools):
                 if chunk.startswith("data: "):
@@ -494,6 +497,9 @@ async def chat_stream(request: ChatRequest):
                             elif chunk_type == "round_end":
                                 # 每轮结束时，完成TTS处理并重置
                                 has_more = chunk_data.get("has_more", False)
+                                if has_more:
+                                    # 中间轮：累积本轮内容到持久化缓冲
+                                    all_rounds_content += current_round_text
                                 if has_more and tool_extractor and not request.return_audio:
                                     # 中间轮结束，flush TTS缓冲
                                     try:
@@ -524,6 +530,15 @@ async def chat_stream(request: ChatRequest):
                                 is_tool_event = True
                             elif chunk_type == "tool_results":
                                 is_tool_event = True
+                                # 将工具结果格式化为 tool-result 代码块，用于持久化
+                                had_tool_events = True
+                                for r in chunk_data.get("results", []):
+                                    st = "\u2705" if r.get("status") == "success" else "\u274c"
+                                    svc = r.get("service_name", "unknown")
+                                    tn = r.get("tool_name", "")
+                                    label = f"{svc}: {tn}" if tn else svc
+                                    rt = (r.get("result", "") or "").strip()
+                                    all_rounds_content += f"\n```tool-result\n{st} {label}\n{rt}\n```\n"
                             elif chunk_type == "round_start":
                                 # 新一轮开始，重置工具事件标记
                                 is_tool_event = False
@@ -597,6 +612,13 @@ async def chat_stream(request: ChatRequest):
             # fallback: 如果 tool_extractor 没有累积到文本，使用最后一轮的 current_round_text
             if not complete_response and current_round_text:
                 complete_response = current_round_text
+
+            # 如果有工具事件，将所有轮次内容（含工具结果块）拼接为完整响应
+            if had_tool_events:
+                # 追加最后一轮内容（最终 LLM 回复）
+                final_text = complete_response or current_round_text
+                all_rounds_content += final_text
+                complete_response = all_rounds_content.strip()
 
             # 统一保存对话历史与日志
             _save_conversation_and_logs(session_id, user_message, complete_response)

@@ -70,7 +70,7 @@ jobs:
         if: matrix.platform == 'win'
         shell: bash
         run: |
-          RUNTIME_DIR="frontend/backend-dist/openclaw-runtime"
+          RUNTIME_DIR="frontend/backend-dist/runtime"
           NODE_DIR="$RUNTIME_DIR/node"
           OPENCLAW_DIR="$RUNTIME_DIR/openclaw"
           UV_DIR="$RUNTIME_DIR/uv"
@@ -91,7 +91,26 @@ jobs:
           echo "OpenClaw installed:"
           ls "$OPENCLAW_DIR/node_modules/.bin/" || true
 
-          # 3. 下载 uv standalone（用于 MCP uvx 服务）
+          # 3. 编译 vendor/openclaw 定制源码，覆盖 npm 包的 dist
+          echo "Building vendor/openclaw from source..."
+          cd "$GITHUB_WORKSPACE/vendor/openclaw"
+          npm install --ignore-scripts 2>/dev/null || true
+          NODE_OPTIONS="--max-old-space-size=4096" npx tsc -p tsconfig.naga.json 2>&1 | grep -v "error TS" || true
+          # 覆盖 npm 包中对应的 JS 文件
+          VENDOR_DIST="$GITHUB_WORKSPACE/vendor/openclaw/dist"
+          TARGET_DIST="$OPENCLAW_DIR/node_modules/openclaw/dist"
+          if [ -d "$VENDOR_DIST" ] && [ -d "$TARGET_DIST" ]; then
+            cd "$VENDOR_DIST"
+            find . -name "*.js" | while read f; do
+              if [ -f "$TARGET_DIST/$f" ]; then
+                cp "$f" "$TARGET_DIST/$f"
+              fi
+            done
+            echo "Overlay vendor dist OK"
+          fi
+          cd "$GITHUB_WORKSPACE"
+
+          # 4. 下载 uv standalone（用于 MCP uvx 服务）
           mkdir -p "$UV_DIR"
           curl -L -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.6.6/uv-x86_64-pc-windows-msvc.zip"
           unzip -q uv.zip -d _uv_tmp

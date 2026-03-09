@@ -5,7 +5,7 @@
 #     chmod +x agentserver/openclaw/test_connection.sh
 #     ./agentserver/openclaw/test_connection.sh
 
-GATEWAY_URL="http://127.0.0.1:18789"
+GATEWAY_URL="http://127.0.0.1:20789"
 GATEWAY_TOKEN="9d3d8c24a1739f3a8a21653bbc218bc54f53ff1a5c5381de"
 HOOKS_TOKEN="testnagahook"
 

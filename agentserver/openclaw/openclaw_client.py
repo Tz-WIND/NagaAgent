@@ -115,8 +115,8 @@ class OpenClawSessionInfo:
 class OpenClawConfig:
     """OpenClaw 配置"""
 
-    # OpenClaw Gateway 默认端口是 18789
-    gateway_url: str = "http://127.0.0.1:18789"
+    # gateway_url 默认值在 __post_init__ 中从 system.config 动态获取
+    gateway_url: str = ""
     # Gateway 认证 token (对应 gateway.auth.token)
     gateway_token: Optional[str] = None
     # Hooks 认证 token (对应 hooks.token)
@@ -133,6 +133,13 @@ class OpenClawConfig:
     token: Optional[str] = None
 
     def __post_init__(self):
+        # gateway_url 默认值从 system.config 动态获取
+        if not self.gateway_url:
+            try:
+                from system.config import config as _cfg
+                self.gateway_url = _cfg.openclaw.gateway_url
+            except Exception:
+                self.gateway_url = "http://127.0.0.1:20789"
         # 如果只配置了 token，同时用于 gateway 和 hooks
         if self.token and not self.gateway_token:
             self.gateway_token = self.token

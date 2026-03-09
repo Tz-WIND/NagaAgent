@@ -546,8 +546,26 @@ async def execute_pre_search(query: str, count: int = 8) -> Optional[str]:
     return None  # 无可用搜索源，跳过前置搜索
 
 
+# Gateway 可直接调用的工具（/tools/invoke），其余为 agent-session 工具需走 /hooks/agent
+_GATEWAY_DIRECT_TOOLS = frozenset({
+    "web_search", "web_fetch", "browser",
+    "memory_search", "memory_get",
+    "sessions_list", "sessions_history", "session_status",
+    "agents_list", "cron", "message", "tts", "canvas", "nodes",
+})
+
+# 可本地执行的工具（无需经过 OpenClaw，直接本地完成）
+_LOCAL_EXEC_TOOLS = frozenset({
+    "exec", "read", "write", "edit", "ls", "find", "grep", "process", "image",
+    "sessions_spawn", "sessions_send", "gateway",
+})
+
+
 async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
-    """直接调用 OpenClaw 工具，跳过 Agent LLM（通过 /tools/invoke）"""
+    """调用 OpenClaw 工具。
+    Gateway 级工具直接走 /tools/invoke；
+    agent-session 级工具（exec/read/write 等）走 /hooks/agent 让 agent 代执行。
+    """
     tool_name = call.get("tool_name", "")
     tool_args = call.get("args", {})
 
@@ -570,6 +588,10 @@ async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
             "tool_call": call, "result": "OpenClaw 服务当前不可用，请稍后重试",
             "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
         }
+
+    # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
+    if tool_name in _LOCAL_EXEC_TOOLS:
+        return await _execute_local_tool(call, tool_name, tool_args)
 
     try:
         client = _get_openclaw_client()
@@ -634,6 +656,201 @@ async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
             }
     except Exception as e:
         logger.error(f"[AgenticLoop] OpenClaw直接工具调用失败: {tool_name}, error={e}")
+        return {
+            "tool_call": call, "result": f"调用异常: {e}",
+            "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
+        }
+
+
+async def _execute_local_tool(
+    call: Dict[str, Any], tool_name: str, tool_args: Dict[str, Any]
+) -> Dict[str, Any]:
+    """本地直接执行 agent-session 级工具（exec/read/write/ls/grep 等），不经过 OpenClaw。"""
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    def _ok(text: str) -> Dict[str, Any]:
+        return {
+            "tool_call": call, "result": text,
+            "status": "success", "service_name": "openclaw_tool", "tool_name": tool_name,
+        }
+
+    def _err(text: str) -> Dict[str, Any]:
+        return {
+            "tool_call": call, "result": text,
+            "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
+        }
+
+    try:
+        if tool_name == "exec":
+            cmd = tool_args.get("command", "")
+            if not cmd:
+                return _err("缺少 command 参数")
+            timeout = min(tool_args.get("timeout", 60), 300)
+            workdir = tool_args.get("workdir")
+            proc = await asyncio.create_subprocess_shell(
+                cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workdir,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return _err(f"命令执行超时 ({timeout}s)")
+            out = (stdout or b"").decode(errors="replace")
+            err = (stderr or b"").decode(errors="replace")
+            text = out
+            if err:
+                text += f"\n[stderr]\n{err}" if out else err
+            if proc.returncode != 0:
+                text += f"\n[exit code: {proc.returncode}]"
+            return _ok(text[:50000] if text else "(无输出)")
+
+        elif tool_name == "read":
+            fp = tool_args.get("file_path", "")
+            if not fp:
+                return _err("缺少 file_path 参数")
+            p = _Path(fp).expanduser()
+            if not p.exists():
+                return _err(f"文件不存在: {fp}")
+            content = p.read_text(encoding="utf-8", errors="replace")
+            return _ok(content[:100000])
+
+        elif tool_name == "write":
+            fp = tool_args.get("file_path", "")
+            content = tool_args.get("content", "")
+            if not fp:
+                return _err("缺少 file_path 参数")
+            p = _Path(fp).expanduser()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content, encoding="utf-8")
+            return _ok(f"已写入 {fp} ({len(content)} 字符)")
+
+        elif tool_name == "edit":
+            fp = tool_args.get("file_path", "")
+            old = tool_args.get("old_string", "")
+            new = tool_args.get("new_string", "")
+            if not fp or not old:
+                return _err("缺少 file_path 或 old_string 参数")
+            p = _Path(fp).expanduser()
+            if not p.exists():
+                return _err(f"文件不存在: {fp}")
+            text = p.read_text(encoding="utf-8", errors="replace")
+            if old not in text:
+                return _err(f"未找到要替换的文本")
+            text = text.replace(old, new, 1)
+            p.write_text(text, encoding="utf-8")
+            return _ok(f"已替换 {fp}")
+
+        elif tool_name == "ls":
+            path = tool_args.get("path", ".")
+            p = _Path(path).expanduser()
+            if not p.is_dir():
+                return _err(f"目录不存在: {path}")
+            entries = sorted(p.iterdir(), key=lambda x: (not x.is_dir(), x.name))
+            lines = []
+            for e in entries[:500]:
+                prefix = "d " if e.is_dir() else "  "
+                lines.append(f"{prefix}{e.name}")
+            return _ok("\n".join(lines) if lines else "(空目录)")
+
+        elif tool_name == "find":
+            pattern = tool_args.get("pattern", "*")
+            path = tool_args.get("path", ".")
+            p = _Path(path).expanduser()
+            matches = sorted(p.rglob(pattern))[:200]
+            return _ok("\n".join(str(m) for m in matches) if matches else "未找到匹配文件")
+
+        elif tool_name == "grep":
+            import re as _re
+            pattern = tool_args.get("pattern", "")
+            path = tool_args.get("path", ".")
+            include = tool_args.get("include", "")
+            if not pattern:
+                return _err("缺少 pattern 参数")
+            p = _Path(path).expanduser()
+            glob_pat = include if include else "**/*"
+            files = p.rglob(glob_pat) if p.is_dir() else [p]
+            results = []
+            try:
+                regex = _re.compile(pattern)
+            except _re.error as e:
+                return _err(f"正则表达式错误: {e}")
+            for f in files:
+                if not f.is_file() or f.stat().st_size > 2_000_000:
+                    continue
+                try:
+                    for i, line in enumerate(f.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                        if regex.search(line):
+                            results.append(f"{f}:{i}: {line.rstrip()}")
+                            if len(results) >= 200:
+                                break
+                except Exception:
+                    continue
+                if len(results) >= 200:
+                    break
+            return _ok("\n".join(results) if results else "未找到匹配")
+
+        elif tool_name == "image":
+            url = tool_args.get("url", "")
+            return _err(f"image 工具暂不支持本地执行，请使用 openclaw__agent 模式: {url}")
+
+        elif tool_name == "process":
+            return _err("process 工具暂不支持本地执行，请使用 openclaw__agent 模式")
+
+        else:
+            # sessions_spawn, sessions_send, gateway 等走 OpenClaw agent session 降级
+            return await _execute_openclaw_session_tool(call, tool_name, tool_args)
+
+    except Exception as e:
+        logger.error(f"[AgenticLoop] 本地工具执行失败: {tool_name}, error={e}")
+        return _err(f"执行失败: {e}")
+
+
+async def _execute_openclaw_session_tool(
+    call: Dict[str, Any], tool_name: str, tool_args: Dict[str, Any]
+) -> Dict[str, Any]:
+    """通过 agent session (/hooks/agent) 执行需要 OpenClaw agent 的工具。"""
+    args_str = json.dumps(tool_args, ensure_ascii=False) if tool_args else ""
+    instruction = f"请直接使用 {tool_name} 工具执行以下操作，只返回工具执行结果：\n{args_str}"
+
+    payload = {
+        "message": instruction,
+        "session_key": f"naga_tool_{tool_name}",
+        "name": "Naga",
+        "wake_mode": "now",
+        "timeout_seconds": 120,
+    }
+
+    try:
+        client = _get_openclaw_client()
+        response = await client.post(
+            f"http://localhost:{get_server_port('agent_server')}/openclaw/send",
+            json=payload,
+        )
+        if response.status_code == 200:
+            result_data = response.json()
+            if not result_data.get("success", True):
+                error_msg = result_data.get("error") or "agent 会话执行失败"
+                return {
+                    "tool_call": call, "result": f"调用失败: {error_msg}",
+                    "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
+                }
+            replies = result_data.get("replies") or []
+            reply = "\n".join(replies) if replies else (result_data.get("reply") or "任务已提交，暂无返回结果")
+            return {
+                "tool_call": call, "result": reply,
+                "status": "success", "service_name": "openclaw_tool", "tool_name": tool_name,
+            }
+        else:
+            return {
+                "tool_call": call, "result": f"HTTP {response.status_code}: {response.text[:200]}",
+                "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
+            }
+    except Exception as e:
+        logger.error(f"[AgenticLoop] OpenClaw session工具调用失败: {tool_name}, error={e}")
         return {
             "tool_call": call, "result": f"调用异常: {e}",
             "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
@@ -741,7 +958,7 @@ async def execute_tool_calls(tool_calls: List[Dict[str, Any]], session_id: str) 
             tasks.append(_execute_mcp_call(call))
         elif agent_type == "openclaw":
             tasks.append(_execute_openclaw_call(call, session_id))
-        elif agent_type == "openclaw_tool":
+        elif agent_type in ("tool", "openclaw_tool"):
             tasks.append(_execute_openclaw_tool_call(call))
         elif agent_type == "naga_control":
             tasks.append(_execute_naga_control(call))
@@ -814,7 +1031,7 @@ def _convert_native_to_dispatch(native_calls: List[Dict[str, Any]]) -> List[Dict
     """将 OpenAI function call 格式转换为现有 dispatch 格式
 
     命名约定: {agentType}__{service_name}__{tool_name}
-    - openclaw_tool__web_search → agentType="openclaw_tool", tool_name="web_search"
+    - tool__web_search → agentType="tool", tool_name="web_search"
     - mcp__weather_time__today_weather → agentType="mcp", service_name="weather_time", tool_name="today_weather"
     - openclaw__agent → agentType="openclaw", task_type="message"
     - live2d__action → agentType="live2d"
@@ -835,6 +1052,11 @@ def _convert_native_to_dispatch(native_calls: List[Dict[str, Any]]) -> List[Dict
         dispatch: Dict[str, Any] = {"agentType": agent_type}
 
         if agent_type == "openclaw_tool" and len(parts) >= 2:
+            # 兼容旧格式
+            dispatch["agentType"] = "tool"
+            dispatch["tool_name"] = parts[1]
+            dispatch["args"] = args
+        elif agent_type == "tool" and len(parts) >= 2:
             dispatch["tool_name"] = parts[1]
             dispatch["args"] = args
         elif agent_type == "mcp" and len(parts) >= 3:

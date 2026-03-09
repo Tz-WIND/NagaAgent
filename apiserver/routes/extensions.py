@@ -143,9 +143,11 @@ def _resolve_packaged_openclaw_runtime_dir() -> Optional[Path]:
     candidates: List[Path] = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-        candidates.append(meipass.parent.parent / "openclaw-runtime" / "openclaw")
+        candidates.append(meipass.parent.parent / "runtime" / "openclaw")
     # 开发环境下也允许直接复用本地构建产物中的预装运行时
-    candidates.append(Path(__file__).resolve().parent.parent.parent / "frontend" / "backend-dist" / "openclaw-runtime" / "openclaw")
+    candidates.append(Path(__file__).resolve().parent.parent.parent / "frontend" / "backend-dist" / "runtime" / "openclaw")
+    # 开发模式：项目根 runtime/
+    candidates.append(Path(__file__).resolve().parent.parent.parent / "runtime" / "openclaw")
     for candidate in candidates:
         if (candidate / "node_modules").exists():
             return candidate

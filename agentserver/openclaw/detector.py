@@ -14,6 +14,15 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+def _get_gateway_port() -> int:
+    """从 system.config 读取 Gateway 端口（单一来源）。"""
+    try:
+        from system.config import config as _cfg
+        return _cfg.openclaw.gateway_port
+    except Exception:
+        return 20789
+
+
 @dataclass
 class OpenClawStatus:
     """OpenClaw 状态信息"""
@@ -24,7 +33,7 @@ class OpenClawStatus:
 
     # Gateway 配置
     gateway_url: Optional[str] = None
-    gateway_port: int = 18789
+    gateway_port: int = 0  # 0 表示尚未初始化，运行时从 config 读
     gateway_token: Optional[str] = None
     gateway_enabled: bool = False
 
@@ -81,6 +90,7 @@ class OpenClawDetector:
             OpenClawStatus 对象
         """
         status = OpenClawStatus()
+        status.gateway_port = _get_gateway_port()
 
         # 1. 检查是否安装（目录是否存在）
         if self.OPENCLAW_DIR.exists():
@@ -125,7 +135,7 @@ class OpenClawDetector:
         # Gateway 配置
         gateway = config.get("gateway", {})
         status.gateway_enabled = gateway.get("enabled", False)
-        status.gateway_port = gateway.get("port", 18789)
+        status.gateway_port = gateway.get("port", _get_gateway_port())
 
         # 构建 Gateway URL
         host = gateway.get("host", "127.0.0.1")
@@ -173,7 +183,7 @@ class OpenClawDetector:
 
             parsed = urlparse(url)
             host = parsed.hostname or "127.0.0.1"
-            port = parsed.port or 18789
+            port = parsed.port or _get_gateway_port()
 
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(2)
