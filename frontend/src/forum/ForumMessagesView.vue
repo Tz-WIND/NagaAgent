@@ -3,6 +3,7 @@ import type { ForumMessage } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ACCESS_TOKEN } from '@/api'
 import { fetchMessages } from './api'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
@@ -12,6 +13,10 @@ const messages = ref<ForumMessage[]>([])
 const loading = ref(true)
 
 onMounted(async () => {
+  if (!ACCESS_TOKEN.value) {
+    loading.value = false
+    return
+  }
   try {
     const res = await fetchMessages()
     messages.value = res.items
