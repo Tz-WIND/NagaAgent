@@ -66,6 +66,19 @@ businessClient.interceptors.response.use(
   },
 )
 
+// ── 模型定价 ──
+
+export interface ModelPricing {
+  id: string
+  inputPrice?: number | string
+  outputPrice?: number | string
+  [key: string]: unknown
+}
+
+export function getModels(): Promise<{ object: string, data: ModelPricing[] }> {
+  return businessClient.get('/api/v1/models').then(r => r.data)
+}
+
 // ── 积分 ──
 
 export function getCredits(): Promise<{

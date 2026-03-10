@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import type { MemoryStats } from '@/api/core'
+import type { ModelPricing } from '@/api/business'
 import { useStorage } from '@vueuse/core'
 import { Accordion, Button, Divider, InputNumber, InputText, Message, Select, Slider, Textarea, ToggleSwitch } from 'primevue'
 import { useToast } from 'primevue/usetoast'
 import { computed, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import API from '@/api/core'
+import { getModels } from '@/api/business'
 import BoxContainer from '@/components/BoxContainer.vue'
 import ConfigGroup from '@/components/ConfigGroup.vue'
 import ConfigItem from '@/components/ConfigItem.vue'
@@ -65,9 +67,35 @@ const accordionModel = useStorage('accordion-config-model', [])
 const accordionMemory = useStorage('accordion-config-memory', [])
 
 const MODEL_OPTIONS = [
-  { label: '默认', value: 'default' },
+  { label: 'Default', value: 'default' },
   { label: 'Deepseek-V3.2', value: 'Deepseek-V3.2' },
+  { label: 'Kimi-K2.5', value: 'Kimi-K2.5' },
 ]
+
+// ── 模型定价（登录后从服务端拉取） ──
+const modelPricingMap = ref<Record<string, ModelPricing>>({})
+
+const selectedModelPricing = computed(() => {
+  const model = CONFIG.value.api.model || 'default'
+  return modelPricingMap.value[model] ?? modelPricingMap.value[model.toLowerCase()] ?? null
+})
+
+async function loadModelPricing() {
+  if (!isNagaLoggedIn.value)
+    return
+  try {
+    const res = await getModels()
+    const map: Record<string, ModelPricing> = {}
+    for (const m of res.data ?? []) {
+      if (m.id)
+        map[m.id] = m
+    }
+    modelPricingMap.value = map
+  }
+  catch {
+    // 定价获取失败不影响使用
+  }
+}
 
 const toast = useToast()
 
@@ -90,6 +118,7 @@ onMounted(async () => {
     autoLaunchEnabled.value = await window.electronAPI!.autoLaunch.get()
   }
   testConnection()
+  loadModelPricing()
 })
 
 async function onAutoLaunchChange(value: boolean) {
@@ -188,14 +217,19 @@ async function testConnection() {
         <ConfigGroup value="llm" header="大语言模型">
           <div class="grid gap-4">
             <ConfigItem name="模型名称" description="用于对话的大语言模型">
-              <span v-if="isNagaLoggedIn" class="naga-authed">&#10003; 已登陆，无需填写</span>
-              <Select
-                v-else
-                v-model="CONFIG.api.model"
-                :options="MODEL_OPTIONS"
-                option-label="label"
-                option-value="value"
-              />
+              <div class="flex items-center gap-3">
+                <Select
+                  v-model="CONFIG.api.model"
+                  :options="MODEL_OPTIONS"
+                  option-label="label"
+                  option-value="value"
+                />
+                <span v-if="selectedModelPricing" class="model-pricing">
+                  <span title="输入价格">↑{{ selectedModelPricing.inputPrice ?? '-' }}</span>
+                  <span class="text-white/15">/</span>
+                  <span title="输出价格">↓{{ selectedModelPricing.outputPrice ?? '-' }}</span>
+                </span>
+              </div>
             </ConfigItem>
             <ConfigItem name="API 地址" description="大语言模型的 API 地址">
               <span v-if="isNagaLoggedIn" class="naga-authed">&#10003; 已登陆 ({{ nagaUser?.username }})，使用 NagaModel 网关</span>
@@ -621,5 +655,15 @@ async function testConnection() {
   color: #4ade80;
   font-size: 0.875rem;
   font-weight: 500;
+}
+
+.model-pricing {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.4);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 </style>
