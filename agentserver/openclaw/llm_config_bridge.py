@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("openclaw.bridge")
 
 
 def _get_openclaw_paths():
@@ -49,10 +49,10 @@ def _migrate_legacy_config_if_needed() -> None:
 
 
 def _apply_hooks_compat_patch(config_data: Dict[str, Any]) -> bool:
-    """确保 hooks 配置兼容（新版 OpenClaw 不再需要 allowRequestSessionKey）。"""
-    hooks = config_data.setdefault("hooks", {})
+    """清理 hooks 中 OpenClaw 不认识的字段，防止配置校验失败。"""
+    hooks = config_data.get("hooks", {})
     changed = False
-    # 移除新版不认识的字段
+    # allowRequestSessionKey 在新版 OpenClaw 中是 unrecognized key，需删除
     if "allowRequestSessionKey" in hooks:
         del hooks["allowRequestSessionKey"]
         changed = True
@@ -317,6 +317,23 @@ def inject_naga_llm_config() -> bool:
         _apply_gateway_port_patch(config_data)
 
         # ── LLM Provider ──
+        # 已登录或有 refresh_token（登录态可恢复）→ 用 NagaBusiness 网关
+        try:
+            from apiserver.naga_auth import is_authenticated, has_refresh_token, get_access_token, NAGA_MODEL_URL
+            use_business = is_authenticated() or has_refresh_token()
+            if use_business:
+                base_url = NAGA_MODEL_URL
+                api_key = get_access_token() or naga_config.api.api_key
+                logger.info(f"使用 NagaBusiness 网关: {base_url}")
+            else:
+                base_url = naga_config.api.base_url.rstrip("/")
+                api_key = naga_config.api.api_key
+                logger.info(f"使用静态配置: {base_url}")
+        except ImportError:
+            base_url = naga_config.api.base_url.rstrip("/")
+            api_key = naga_config.api.api_key
+            api_key = naga_config.api.api_key
+
         provider_name = "naga"
         model_id = naga_config.api.model
         full_model_id = f"{provider_name}/{model_id}"
@@ -325,8 +342,8 @@ def inject_naga_llm_config() -> bool:
         models_config["mode"] = "merge"
         providers = models_config.setdefault("providers", {})
         providers[provider_name] = {
-            "baseUrl": naga_config.api.base_url.rstrip("/"),
-            "apiKey": naga_config.api.api_key,
+            "baseUrl": base_url,
+            "apiKey": api_key,
             "auth": "api-key",
             "api": "openai-completions",
             "models": [

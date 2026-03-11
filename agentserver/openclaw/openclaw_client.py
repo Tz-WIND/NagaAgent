@@ -23,7 +23,7 @@ from enum import Enum
 
 import httpx
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("openclaw.client")
 
 
 class TaskStatus(Enum):

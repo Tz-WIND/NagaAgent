@@ -231,6 +231,7 @@ export type HookAgentPayload = {
   model?: string;
   thinking?: string;
   timeoutSeconds?: number;
+  workspace?: string;
 };
 
 export type HookAgentDispatchPayload = Omit<HookAgentPayload, "sessionKey"> & {
@@ -390,6 +391,9 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
     typeof timeoutRaw === "number" && Number.isFinite(timeoutRaw) && timeoutRaw > 0
       ? Math.floor(timeoutRaw)
       : undefined;
+  const workspaceRaw = payload.workspace;
+  const workspace =
+    typeof workspaceRaw === "string" && workspaceRaw.trim() ? workspaceRaw.trim() : undefined;
   return {
     ok: true,
     value: {
@@ -404,6 +408,7 @@ export function normalizeAgentPayload(payload: Record<string, unknown>):
       model,
       thinking,
       timeoutSeconds,
+      workspace,
     },
   };
 }

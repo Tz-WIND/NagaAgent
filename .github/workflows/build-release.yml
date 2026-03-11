@@ -82,33 +82,23 @@ jobs:
           mv _node_tmp/node-v22.13.1-win-x64/* "$NODE_DIR/"
           rm -rf _node_tmp node.zip
 
-          # 2. 预装 OpenClaw（--prefix 确保装到 openclaw/ 目录内）
-          mkdir -p "$OPENCLAW_DIR"
-          "$NODE_DIR/npm.cmd" install "openclaw@2026.2.17" \
-            --prefix "$OPENCLAW_DIR" \
-            --global=false \
-            --location=project
-          echo "OpenClaw installed:"
-          ls "$OPENCLAW_DIR/node_modules/.bin/" || true
-
-          # 3. 编译 vendor/openclaw 定制源码，覆盖 npm 包的 dist
-          echo "Building vendor/openclaw from source..."
+          # 2. 编译 vendor/openclaw 源码
+          echo "Compiling vendor/openclaw from source..."
           cd "$GITHUB_WORKSPACE/vendor/openclaw"
-          npm install --ignore-scripts 2>/dev/null || true
+          npm install --ignore-scripts 2>/dev/null || npm install
           NODE_OPTIONS="--max-old-space-size=4096" npx tsc -p tsconfig.naga.json 2>&1 | grep -v "error TS" || true
-          # 覆盖 npm 包中对应的 JS 文件
-          VENDOR_DIST="$GITHUB_WORKSPACE/vendor/openclaw/dist"
-          TARGET_DIST="$OPENCLAW_DIR/node_modules/openclaw/dist"
-          if [ -d "$VENDOR_DIST" ] && [ -d "$TARGET_DIST" ]; then
-            cd "$VENDOR_DIST"
-            find . -name "*.js" | while read f; do
-              if [ -f "$TARGET_DIST/$f" ]; then
-                cp "$f" "$TARGET_DIST/$f"
-              fi
-            done
-            echo "Overlay vendor dist OK"
-          fi
+          # 验证核心文件
+          test -f dist/gateway/server.js || { echo "FATAL: dist/gateway/server.js missing"; exit 1; }
           cd "$GITHUB_WORKSPACE"
+
+          # 3. 复制编译产物 + 依赖到 runtime
+          mkdir -p "$OPENCLAW_DIR"
+          cp -r vendor/openclaw/dist "$OPENCLAW_DIR/dist"
+          cp -r vendor/openclaw/node_modules "$OPENCLAW_DIR/node_modules"
+          cp vendor/openclaw/package.json "$OPENCLAW_DIR/package.json"
+          cp vendor/openclaw/openclaw.mjs "$OPENCLAW_DIR/openclaw.mjs"
+          cp agentserver/openclaw/gateway_start.mjs "$OPENCLAW_DIR/gateway_start.mjs"
+          echo "OpenClaw runtime prepared (from source)"
 
           # 4. 下载 uv standalone（用于 MCP uvx 服务）
           mkdir -p "$UV_DIR"

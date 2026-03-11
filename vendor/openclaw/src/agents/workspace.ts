@@ -114,9 +114,12 @@ async function loadTemplate(name: string): Promise<string> {
       const content = await fs.readFile(templatePath, "utf-8");
       return stripFrontMatter(content);
     } catch {
-      throw new Error(
-        `Missing workspace template: ${name} (${templatePath}). Ensure docs/reference/templates are packaged.`,
-      );
+      // 模板不存在时自动创建空文件并返回空字符串
+      try {
+        await fs.mkdir(templateDir, { recursive: true });
+        await fs.writeFile(templatePath, "", "utf-8");
+      } catch { /* ignore write errors */ }
+      return "";
     }
   })();
 

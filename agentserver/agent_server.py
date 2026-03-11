@@ -49,11 +49,11 @@ def _on_config_changed() -> None:
     try:
         embedded_runtime = get_embedded_runtime()
 
-        if embedded_runtime.openclaw_installed:
+        if embedded_runtime.is_vendor_ready:
             from agentserver.openclaw.llm_config_bridge import inject_naga_llm_config
 
             inject_naga_llm_config()
-            logger.info("配置变更：已更新内嵌 OpenClaw LLM 配置")
+            logger.info("配置变更：已更新 OpenClaw LLM 配置")
     except Exception as e:
         logger.warning(f"配置变更时更新 OpenClaw 配置失败: {e}")
 
@@ -113,24 +113,15 @@ async def lifespan(app: FastAPI):
 
             embedded_runtime = get_embedded_runtime()
             logger.info(f"OpenClaw 运行时模式: {embedded_runtime.runtime_mode}")
-            logger.info(f"  runtime_root: {embedded_runtime.runtime_root}")
+            logger.info(f"  vendor_root: {embedded_runtime.vendor_root}")
             logger.info(f"  node_path: {embedded_runtime.node_path}")
-            logger.info(f"  openclaw_path: {embedded_runtime.openclaw_path}")
+            logger.info(f"  is_vendor_ready: {embedded_runtime.is_vendor_ready}")
 
-            # ── Step 1: 检测是否已安装，未安装则自动安装到 runtime/openclaw/ ──
-            if not embedded_runtime.openclaw_installed:
-                if embedded_runtime.node_path:
-                    logger.info("OpenClaw 未安装，正在自动安装到 runtime/openclaw/ ...")
-                    install_ok = await embedded_runtime.install_openclaw()
-                    if install_ok:
-                        logger.info("OpenClaw 自动安装成功")
-                    else:
-                        logger.error("OpenClaw 自动安装失败")
-                else:
-                    logger.warning("OpenClaw 未安装且 Node.js 不可用，跳过自动安装")
+            # ── Step 1: 确保 vendor 就绪 + 配置 + onboard ──
+            if not embedded_runtime.is_vendor_ready:
+                await embedded_runtime.ensure_vendor_ready()
 
-            # ── Step 2: 确保配置文件存在 + 兼容补丁 ──
-            if embedded_runtime.openclaw_installed:
+            if embedded_runtime.is_vendor_ready:
                 ensure_openclaw_config()
                 ensure_gateway_port(auto_create=False)
                 ensure_gateway_local_mode(auto_create=False)
@@ -140,7 +131,16 @@ async def lifespan(app: FastAPI):
                 await embedded_runtime.ensure_onboarded()
                 inject_naga_llm_config()
 
-                # ── Step 3: 启动 Gateway ──
+                # ── Step 1.5: 清理端口范围内的残留进程 ──
+                try:
+                    from agentserver.openclaw.instance_manager import cleanup_port_range
+                    cleaned = cleanup_port_range()
+                    if cleaned:
+                        await asyncio.sleep(1)  # 等端口释放
+                except Exception as e:
+                    logger.warning(f"端口清理失败（可忽略）: {e}")
+
+                # ── Step 2: 启动 Gateway ──
                 await _start_gateway_if_port_free(embedded_runtime)
 
             # 检测最终状态并初始化客户端
@@ -176,6 +176,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"OpenClaw客户端初始化失败（可选功能）: {e}")
             Modules.openclaw_client = None
+
+        # 初始化干员多实例管理器（通讯录模式：只恢复列表，不启动进程）
+        try:
+            from agentserver.openclaw.instance_manager import InstanceManager
+            embedded_runtime = get_embedded_runtime()
+            Modules.instance_manager = InstanceManager(embedded_runtime, primary_client=Modules.openclaw_client)
+            logger.info("干员多实例管理器已初始化")
+            # 从 manifest 恢复通讯录（不启动进程）
+            try:
+                agents = Modules.instance_manager.restore_from_manifest()
+                logger.info(f"通讯录恢复完成，共 {len(agents)} 个干员")
+            except Exception as e:
+                logger.warning(f"恢复通讯录失败（可忽略）: {e}")
+        except Exception as e:
+            logger.warning(f"干员多实例管理器初始化失败（可选功能）: {e}")
+            Modules.instance_manager = None
 
         # 注册配置变更监听器
         add_config_listener(_on_config_changed)
@@ -246,6 +262,11 @@ async def lifespan(app: FastAPI):
         if hb_executor:
             await hb_executor.close()
 
+        # 停止所有干员子实例（主 Gateway 由下方 stop_gateway 处理）
+        if Modules.instance_manager:
+            await Modules.instance_manager.destroy_all()
+            logger.info("干员多实例已全部停止")
+
         # 停止 Gateway 进程（内嵌模式）
         embedded_runtime = get_embedded_runtime()
         if embedded_runtime.gateway_running:
@@ -258,12 +279,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NagaAgent Server", version="1.0.0", lifespan=lifespan)
 
+# 配置 CORS（前端直连 8001 需要）
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class Modules:
     """全局模块管理器"""
 
     openclaw_client = None
     dogtag_scheduler = None  # 军牌系统统一调度器
+    instance_manager = None  # 干员多实例管理器
 
 
 def _now_iso() -> str:
@@ -480,6 +513,145 @@ async def openclaw_wake(payload: Dict[str, Any]):
     except Exception as e:
         logger.error(f"OpenClaw 触发事件失败: {e}")
         raise HTTPException(500, f"触发失败: {e}")
+
+
+# ============ 干员实例管理 ============
+
+
+@app.get("/openclaw/instances")
+async def list_instances():
+    """列出所有干员（通讯录），不管进程是否在跑"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    return {"instances": Modules.instance_manager.list_agents()}
+
+
+# ── 新通讯录 API ──
+
+@app.get("/openclaw/agents")
+async def list_agents():
+    """列出通讯录中所有干员（不管进程是否在跑）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    return {"agents": Modules.instance_manager.list_agents()}
+
+
+@app.post("/openclaw/agents")
+async def create_agent(payload: Dict[str, Any]):
+    """新建干员（写 manifest + 创建目录，不启动进程）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    name = payload.get("name")
+    try:
+        inst = Modules.instance_manager.create_agent(name)
+        return {"id": inst.id, "name": inst.name, "running": inst.running}
+    except Exception as e:
+        logger.error(f"创建干员失败: {e}")
+        raise HTTPException(500, f"创建失败: {e}")
+
+
+@app.delete("/openclaw/agents/{agent_id}")
+async def delete_agent(agent_id: str, delete_data: bool = True):
+    """从通讯录删除干员 + 停止进程 + 可选删数据"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    try:
+        await Modules.instance_manager.destroy_agent_async(agent_id, delete_data=delete_data)
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"删除干员失败: {e}")
+        raise HTTPException(500, f"删除失败: {e}")
+
+
+@app.put("/openclaw/agents/{agent_id}/name")
+async def rename_agent(agent_id: str, payload: Dict[str, Any]):
+    """重命名干员（通讯录 + 目录）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    new_name = (payload.get("name") or "").strip()
+    if not new_name:
+        raise HTTPException(400, "name 不能为空")
+    ok = Modules.instance_manager.rename_agent(agent_id, new_name)
+    if not ok:
+        raise HTTPException(404, "干员不存在")
+    return {"success": True, "name": new_name}
+
+
+@app.get("/openclaw/agents/{agent_id}/history")
+async def get_agent_history(agent_id: str, limit: int = 50):
+    """获取干员对话历史（自动 ensure_running 启动进程）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    inst = Modules.instance_manager.get_instance(agent_id)
+    if inst is None:
+        raise HTTPException(404, "干员不存在")
+
+    # 按需启动进程（需要 Gateway 运行才能查询 session 历史）
+    if not inst.running or not inst.client:
+        try:
+            inst = await Modules.instance_manager.ensure_running(agent_id)
+        except Exception as e:
+            logger.warning(f"启动干员 [{agent_id}] 以获取历史失败: {e}")
+            return {"messages": []}
+
+    session_key = inst.client._default_session_key
+    if not session_key:
+        return {"messages": []}
+
+    try:
+        http = await inst.client._get_client()
+        resp = await http.post(
+            f"{inst.client.config.gateway_url}/tools/invoke",
+            json={"tool": "sessions_history", "args": {"sessionKey": session_key, "limit": limit}},
+            headers=inst.client.config.get_gateway_headers(),
+            timeout=15,
+        )
+        if resp.status_code == 200:
+            result = resp.json().get("result", {})
+            # sessions_history 工具直接返回 {messages: [...]}，不在 details 子对象中
+            raw_msgs = result.get("messages", [])
+            messages = []
+            for msg in raw_msgs:
+                role = msg.get("role", "")
+                if role not in ("user", "assistant"):
+                    continue
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    content = "\n".join(
+                        item.get("text", "") for item in content
+                        if isinstance(item, dict) and item.get("type") == "text"
+                    )
+                if isinstance(content, str) and content.strip():
+                    messages.append({"role": role, "content": content})
+            return {"messages": messages}
+        return {"messages": []}
+    except Exception as e:
+        logger.warning(f"获取干员 [{inst.name}] 历史失败: {e}")
+        return {"messages": []}
+
+
+@app.post("/openclaw/agents/{agent_id}/stream")
+async def stream_to_agent(agent_id: str, payload: Dict[str, Any]):
+    """向干员发送消息（SSE 流式输出），内部自动 ensure_running"""
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    message = payload.get("message", "")
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    timeout = payload.get("timeout_seconds", 120)
+
+    async def event_stream():
+        async for chunk in Modules.instance_manager.send_message_stream(agent_id, message, timeout):
+            yield f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ============ 本地搜索代理（拦截 OpenClaw web_search） ============

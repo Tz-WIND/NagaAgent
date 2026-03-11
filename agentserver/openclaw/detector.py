@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("openclaw.detector")
 
 
 def _get_gateway_port() -> int:
@@ -110,9 +110,9 @@ class OpenClawDetector:
         from .embedded_runtime import get_embedded_runtime
         runtime = get_embedded_runtime()
         if not status.installed:
-            if runtime.is_packaged and runtime.openclaw_path:
+            if runtime.is_vendor_ready:
                 status.installed = True
-                logger.info("打包环境：内嵌运行时可用，标记 OpenClaw 为已安装")
+                logger.info(f"vendor 模式可用（{runtime.runtime_mode}），标记 OpenClaw 为已安装")
 
         # 3. 检查 Gateway 连接（可选）
         if check_connection and status.gateway_url:

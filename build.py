@@ -65,7 +65,6 @@ MIN_PYTHON = (3, 11)
 
 # OpenClaw 运行时版本
 NODE_VERSION = "22.13.1"
-OPENCLAW_VERSION = "2026.2.17"
 CACHE_DIR = PROJECT_ROOT / ".cache"
 
 # Node.js 下载地址（按平台）
@@ -324,34 +323,23 @@ def extract_node_runtime(archive_path: Path) -> None:
 
 
 def preinstall_openclaw(force: bool = False) -> None:
-    """在内嵌运行时目录中预装 OpenClaw"""
+    """编译 vendor/openclaw 源码并复制到运行时目录"""
+    vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
+    if not vendor_root.exists():
+        raise FileNotFoundError(f"vendor/openclaw 不存在: {vendor_root}")
+
     npm_bin = NODE_RUNTIME_DIR / NPM_BIN
-    if not npm_bin.exists():
-        raise FileNotFoundError(f"npm 不存在: {npm_bin}")
+    node_bin = NODE_RUNTIME_DIR / NODE_BIN
+    if not node_bin.exists():
+        raise FileNotFoundError(f"node 不存在: {node_bin}")
 
-    # 检测已安装版本
-    if IS_WINDOWS:
-        openclaw_entry = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin" / "openclaw.cmd"
-    else:
-        openclaw_entry = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin" / "openclaw"
-
-    openclaw_pkg = OPENCLAW_RUNTIME_DIR / "node_modules" / "openclaw" / "package.json"
-    installed_version: Optional[str] = None
-    if openclaw_pkg.exists():
-        try:
-            installed_version = json.loads(openclaw_pkg.read_text(encoding="utf-8")).get("version")
-        except Exception:
-            installed_version = None
-
-    if not force and openclaw_entry.exists() and installed_version == OPENCLAW_VERSION:
-        log(f"OpenClaw 已预装且版本匹配: {installed_version}，跳过安装")
+    # 检测是否已有编译产物
+    dist_marker = OPENCLAW_RUNTIME_DIR / "dist" / "gateway" / "server.js"
+    if not force and dist_marker.exists():
+        log("OpenClaw runtime 已存在，跳过编译")
         return
-    if not force and openclaw_entry.exists():
-        log(
-            f"检测到已安装 OpenClaw 版本 {installed_version or 'unknown'}，"
-            f"目标版本 {OPENCLAW_VERSION}，将执行重装"
-        )
 
+    # 清理旧运行时
     if OPENCLAW_RUNTIME_DIR.exists():
         log(f"清理旧 OpenClaw 运行时: {OPENCLAW_RUNTIME_DIR}")
         shutil.rmtree(OPENCLAW_RUNTIME_DIR)
@@ -363,69 +351,47 @@ def preinstall_openclaw(force: bool = False) -> None:
     else:
         node_bin_dir = NODE_RUNTIME_DIR / "bin"
         env["PATH"] = f"{node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
-    env["NPM_CONFIG_AUDIT"] = "false"
-    env["NPM_CONFIG_FUND"] = "false"
-    env["NPM_CONFIG_GLOBAL"] = "false"
 
-    pkg_spec = f"openclaw@{OPENCLAW_VERSION}"
-    log(f"预装 OpenClaw（npm install {pkg_spec}）...")
+    # 1. 安装 vendor 依赖（如果 node_modules 不存在）
+    if not (vendor_root / "node_modules").exists():
+        log("安装 vendor/openclaw 依赖...")
+        run(
+            [str(npm_bin), "install", "--ignore-scripts"],
+            cwd=vendor_root,
+            env=env,
+        )
+
+    # 2. 编译 TypeScript
+    log("编译 vendor/openclaw 源码...")
+    compile_env = env.copy()
+    compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
+    npx_bin = NODE_RUNTIME_DIR / ("npx.cmd" if IS_WINDOWS else "bin/npx")
+    if not npx_bin.exists():
+        npx_bin = NODE_RUNTIME_DIR / "npx"
     run(
-        [
-            str(npm_bin),
-            "install",
-            pkg_spec,
-            "--global=false",
-            "--location=project",
-            "--prefix",
-            str(OPENCLAW_RUNTIME_DIR),
-        ],
-        cwd=OPENCLAW_RUNTIME_DIR,
-        env=env,
+        [str(npx_bin), "tsc", "-p", "tsconfig.naga.json"],
+        cwd=vendor_root,
+        env=compile_env,
     )
 
-    openclaw_bin_dir = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin"
-    openclaw_mjs = OPENCLAW_RUNTIME_DIR / "node_modules" / "openclaw" / "openclaw.mjs"
+    vendor_dist = vendor_root / "dist" / "gateway" / "server.js"
+    if not vendor_dist.exists():
+        raise FileNotFoundError(f"编译失败：dist/gateway/server.js 不存在: {vendor_dist}")
 
-    # 某些 npm/环境组合下不会生成入口脚本，补一个相对路径 shim（供打包后运行）
-    if not openclaw_entry.exists() and openclaw_mjs.exists():
-        openclaw_bin_dir.mkdir(parents=True, exist_ok=True)
-        if IS_WINDOWS:
-            shim = '@echo off\r\nsetlocal\r\n"%~dp0..\\..\\..\\node\\node.exe" "%~dp0..\\openclaw\\openclaw.mjs" %*\r\n'
-            openclaw_entry.write_text(shim, encoding="utf-8")
-        else:
-            shim = '#!/bin/sh\nexec "$(dirname "$0")/../../../node/bin/node" "$(dirname "$0")/../openclaw/openclaw.mjs" "$@"\n'
-            openclaw_entry.write_text(shim, encoding="utf-8")
-            openclaw_entry.chmod(0o755)
-        log(f"检测到缺少 openclaw 入口，已自动生成 shim: {openclaw_entry}")
+    # 3. 复制编译产物 + 依赖到 runtime
+    log("复制编译产物到运行时目录...")
+    shutil.copytree(vendor_root / "dist", OPENCLAW_RUNTIME_DIR / "dist")
+    shutil.copytree(vendor_root / "node_modules", OPENCLAW_RUNTIME_DIR / "node_modules")
+    shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
+    shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
 
-    if not openclaw_entry.exists():
-        # 诊断信息
-        if IS_WINDOWS:
-            fallback_bin = openclaw_bin_dir / "openclaw"
-        else:
-            fallback_bin = openclaw_bin_dir / "openclaw.cmd"
-        if fallback_bin.exists():
-            log(f"警告：未找到预期入口，但存在替代脚本: {fallback_bin}")
-        if openclaw_mjs.exists():
-            log(f"警告：存在 mjs 入口: {openclaw_mjs}")
-        node_modules_dir = OPENCLAW_RUNTIME_DIR / "node_modules"
-        pkg_json = OPENCLAW_RUNTIME_DIR / "package.json"
-        lock_file = OPENCLAW_RUNTIME_DIR / "package-lock.json"
-        log(f"诊断：package.json exists={pkg_json.exists()} path={pkg_json}")
-        log(f"诊断：package-lock.json exists={lock_file.exists()} path={lock_file}")
-        log(f"诊断：node_modules exists={node_modules_dir.exists()} path={node_modules_dir}")
-        if node_modules_dir.exists():
-            top_level = [p.name for p in node_modules_dir.iterdir()][:20]
-            log(f"诊断：node_modules 顶层(前20)={top_level}")
-        raise FileNotFoundError(f"OpenClaw 预装失败，未找到可用入口: {openclaw_entry}")
-    log(f"OpenClaw 预装完成: {openclaw_entry}")
-
-    # 复制 gateway_start.mjs 到运行时目录，打包后用它启动 gateway
+    # 4. 复制 gateway_start.mjs
     gateway_script_src = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
-    gateway_script_dst = RUNTIME_DIR / "gateway_start.mjs"
     if gateway_script_src.exists():
-        shutil.copy2(gateway_script_src, gateway_script_dst)
-        log(f"已复制 gateway_start.mjs -> {gateway_script_dst}")
+        shutil.copy2(gateway_script_src, OPENCLAW_RUNTIME_DIR / "gateway_start.mjs")
+        log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
+
+    log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
 
 
 def download_uv_runtime() -> Path:

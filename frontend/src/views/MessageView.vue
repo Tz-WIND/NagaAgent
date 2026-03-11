@@ -1,14 +1,15 @@
 <script lang="ts">
 import { onKeyStroke, useEventListener } from '@vueuse/core'
-import { nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ACCESS_TOKEN, authExpired } from '@/api'
 import API from '@/api/core'
+import AgentContacts from '@/components/AgentContacts.vue'
 import BoxContainer from '@/components/BoxContainer.vue'
 import MessageItem from '@/components/MessageItem.vue'
 import { toolMessage } from '@/composables/useToolStatus'
 import { CONFIG } from '@/utils/config'
 import { live2dState, setEmotion } from '@/utils/live2dController'
-import { CURRENT_SESSION_ID, formatRelativeTime, IS_TEMPORARY_SESSION, loadCurrentSession, MESSAGES, newSession, switchSession } from '@/utils/session'
+import { type ChatTab, activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
 const isSending = ref(false)
@@ -260,15 +261,140 @@ function scrollToBottom() {
   containerRef.value?.scrollToBottom()
 }
 
-function sendMessage() {
-  if (input.value) {
-    chatStream(input.value)
-    nextTick().then(scrollToBottom)
-    input.value = ''
+// ── Tab 管理 ──
+const renamingTabId = ref<string | null>(null)
+const renameValue = ref('')
+const renameInputRef = ref<HTMLInputElement | null>(null)
+
+/** 当前活跃 tab 的 messages（用于模板渲染） */
+const activeMessages = computed(() => getActiveTab().messages)
+
+/** 当前活跃 tab 是否正在加载干员历史 */
+const agentLoadingActive = computed(() => {
+  const tab = getActiveTab()
+  return tab.type === 'agent' && tab.instanceId ? isAgentLoading(tab.instanceId) : false
+})
+
+/** 关闭 tab（不杀进程，只从 tabs 移除） */
+function closeTab(tab: ChatTab) {
+  const idx = tabs.value.findIndex(t => t.id === tab.id)
+  if (idx > 0) {
+    tabs.value.splice(idx, 1)
+  }
+  if (activeTabId.value === tab.id) {
+    activeTabId.value = 'naga'
   }
 }
 
-onMounted(() => {
+function startRename(tab: ChatTab) {
+  renamingTabId.value = tab.id
+  renameValue.value = tab.name
+  nextTick(() => renameInputRef.value?.focus())
+}
+
+function finishRename(tab: ChatTab) {
+  const newName = renameValue.value.trim()
+  if (newName && newName !== tab.name) {
+    const oldName = tab.name
+    tab.name = newName
+    // 同步消息中的 sender
+    for (const msg of tab.messages) {
+      if (msg.sender === oldName) msg.sender = newName
+    }
+    // 同步到后端 + 通讯录
+    if (tab.instanceId) {
+      API.renameAgent(tab.instanceId, newName).then(() => {
+        const contact = agentContacts.value.find(a => a.id === tab.instanceId)
+        if (contact) contact.name = newName
+      }).catch(() => {})
+    }
+  }
+  renamingTabId.value = null
+}
+
+// 切换 tab 时清除未读 + 懒加载历史
+watch(activeTabId, async (id) => {
+  const tab = tabs.value.find(t => t.id === id)
+  if (tab) {
+    tab.unread = 0
+    // 懒加载干员对话历史（首次点击立即触发）
+    if (tab.type === 'agent' && tab.instanceId && !isAgentLoading(tab.instanceId) && tab.messages.length === 0) {
+      await loadAgentMessages(tab)
+      nextTick().then(scrollToBottom)
+    }
+  }
+})
+
+// ── 发送分发 ──
+function sendMessage() {
+  const tab = getActiveTab()
+  if (!input.value?.trim())
+    return
+
+  if (tab.type === 'agent') {
+    sendToAgent(tab, input.value.trim())
+    input.value = ''
+    return
+  }
+  // 娜迦 tab → 原有 chatStream
+  chatStream(input.value)
+  nextTick().then(scrollToBottom)
+  input.value = ''
+}
+
+async function sendToAgent(tab: ChatTab, msg: string) {
+  if (!tab.instanceId) {
+    tab.messages.push({ role: 'system', content: '干员实例未就绪，请稍后再试' })
+    return
+  }
+
+  tab.messages.push({ role: 'user', content: msg })
+  nextTick().then(scrollToBottom)
+
+  tab.messages.push({ role: 'assistant', content: '', generating: true, status: '思考中', sender: tab.name })
+  const assistantMsg = tab.messages[tab.messages.length - 1]!
+
+  try {
+    // 流式接收回复（使用新 API，内部自动 ensure_running）
+    for await (const chunk of API.streamToAgent(tab.instanceId, msg)) {
+      if (chunk.type === 'status') {
+        assistantMsg.status = chunk.text
+      } else if (chunk.type === 'content') {
+        assistantMsg.content += chunk.text
+      } else if (chunk.type === 'done') {
+        assistantMsg.content = chunk.text  // 用完整文本覆盖，防止拼接偏差
+      } else if (chunk.type === 'error') {
+        assistantMsg.content = `错误: ${chunk.text}`
+      } else if (chunk.type === 'tool_call') {
+        assistantMsg.status = `🔧 ${chunk.name || '工具调用中'}...`
+        assistantMsg.content += `\n\n> 🔧 调用工具: ${chunk.name || '工具'}...\n`
+      } else if (chunk.type === 'tool_result') {
+        assistantMsg.status = `✅ ${chunk.name || '工具'} 完成`
+        assistantMsg.content += `> ✅ ${chunk.name || '工具'} 完成\n\n`
+      }
+      nextTick().then(scrollToBottom)
+    }
+
+    if (!assistantMsg.content)
+      assistantMsg.content = '（无回复）'
+  }
+  catch (e: any) {
+    const detail = e?.response?.data?.detail || e.message || e
+    assistantMsg.content = `发送失败: ${detail}`
+  }
+
+  delete assistantMsg.generating
+  delete assistantMsg.status
+
+  // 非活跃 tab → 未读+1
+  if (activeTabId.value !== tab.id) {
+    tab.unread++
+  }
+
+  nextTick().then(scrollToBottom)
+}
+
+onMounted(async () => {
   loadCurrentSession()
   scrollToBottom()
 })
@@ -465,21 +591,61 @@ function getSupportedMimeType(): string {
 
 <template>
   <div class="flex flex-col gap-8 relative">
-    <BoxContainer ref="containerRef" class="w-full grow">
-      <div class="grid gap-4 pb-8">
-        <MessageItem
-          v-for="item, index in MESSAGES" :key="index"
-          :role="item.role" :content="item.content"
-          :reasoning="item.reasoning" :sender="item.sender"
-          :generating="item.generating" :status="item.status"
-          :class="(item.generating && index === MESSAGES.length - 1) || 'border-b'"
-        />
-      </div>
-    </BoxContainer>
+    <div class="flex min-h-0 grow">
+      <!-- 左侧通讯录抽屉 -->
+      <AgentContacts />
 
-    <!-- Session History Panel -->
+      <!-- 主内容区 -->
+      <BoxContainer ref="containerRef" class="w-full grow" hide-back>
+        <!-- Tab Bar：header slot -->
+        <template #header>
+          <div class="flex gap-1 px-1 pt-3 pb-2">
+            <button
+              v-for="tab in tabs" :key="tab.id"
+              class="tab-btn" :class="{ active: tab.id === activeTabId }"
+              @click="activeTabId = tab.id"
+              @dblclick="startRename(tab)"
+            >
+              <input
+                v-if="renamingTabId === tab.id"
+                ref="renameInputRef"
+                v-model="renameValue"
+                class="tab-rename-input"
+                @blur="finishRename(tab)"
+                @keydown.enter="finishRename(tab)"
+                @click.stop
+              >
+              <template v-else>
+                {{ tab.name }}
+                <span v-if="tab.type === 'agent'" class="tab-close" @click.stop="closeTab(tab)">×</span>
+              </template>
+              <span v-if="tab.unread && tab.id !== activeTabId" class="badge">{{ tab.unread }}</span>
+            </button>
+          </div>
+        </template>
+
+        <!-- 干员加载中：转圈圈 -->
+        <div v-if="agentLoadingActive" class="agent-loading-overlay">
+          <div class="agent-loading-spinner" />
+          <div class="agent-loading-text">干员加载中</div>
+        </div>
+
+        <!-- 消息列表（当前活跃 tab） -->
+        <div v-else class="grid gap-4 pb-8">
+          <MessageItem
+            v-for="item, index in activeMessages" :key="index"
+            :role="item.role" :content="item.content"
+            :reasoning="item.reasoning" :sender="item.sender"
+            :generating="item.generating" :status="item.status"
+            :class="(item.generating && index === activeMessages.length - 1) || 'border-b'"
+          />
+        </div>
+      </BoxContainer>
+    </div>
+
+    <!-- Session History Panel（仅在娜迦 tab 可见） -->
     <Transition name="slide-up">
-      <div v-if="showHistory" class="session-panel">
+      <div v-if="showHistory && activeTabId === 'naga'" class="session-panel">
         <div class="flex items-center justify-between px-3 py-2 border-b border-white/10">
           <span class="text-white/70 text-sm font-bold">对话历史</span>
           <button
@@ -528,6 +694,7 @@ function getSupportedMimeType(): string {
     <div class="mx-[var(--nav-back-width)]">
       <div class="box flex items-center gap-2">
         <button
+          v-if="activeTabId === 'naga'"
           class="p-2 text-white/60 hover:text-white bg-transparent border-none cursor-pointer text-sm shrink-0"
           title="新建对话"
           @click="handleNewSession"
@@ -535,6 +702,7 @@ function getSupportedMimeType(): string {
           +
         </button>
         <button
+          v-if="activeTabId === 'naga'"
           class="p-2 text-white/60 hover:text-white bg-transparent border-none cursor-pointer text-sm shrink-0"
           :class="{ 'text-white!': showHistory }"
           title="对话历史"
@@ -546,10 +714,10 @@ function getSupportedMimeType(): string {
           v-model="input"
           class="p-2 lh-none text-white w-full bg-transparent border-none outline-none"
           type="text"
-          placeholder="Type a message..."
+          :placeholder="activeTabId === 'naga' ? 'Type a message...' : `发送给 ${getActiveTab().name}...`"
         >
         <button
-          v-if="CONFIG.voice_realtime.enabled"
+          v-if="CONFIG.voice_realtime.enabled && activeTabId === 'naga'"
           class="input-icon-btn shrink-0"
           :class="{ recording: isRecording }"
           :title="isRecording ? '停止录音' : '语音输入'"
@@ -559,7 +727,7 @@ function getSupportedMimeType(): string {
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
         </button>
         <button
-          v-if="CONFIG.system.voice_enabled"
+          v-if="CONFIG.system.voice_enabled && activeTabId === 'naga'"
           class="input-icon-btn shrink-0"
           :title="ttsEnabled ? '关闭语音播报' : '开启语音播报'"
           @click="toggleTTS"
@@ -568,6 +736,7 @@ function getSupportedMimeType(): string {
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" y1="9" x2="16" y2="15" /><line x1="16" y1="9" x2="22" y2="15" /></svg>
         </button>
         <button
+          v-if="activeTabId === 'naga'"
           class="input-icon-btn shrink-0"
           title="上传文件 (Word/Excel/文本)"
           @click="triggerUpload"
@@ -587,7 +756,77 @@ function getSupportedMimeType(): string {
 </template>
 
 <style scoped>
-.session-panel {
+/* ── Tab 栏（与 ConfigView 完全一致） ── */
+.tab-btn {
+  flex: 1;
+  position: relative;
+  padding: 0.5rem 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  text-align: center;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.4);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.tab-btn.active {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.tab-close {
+  font-size: 0.7rem;
+  opacity: 0;
+  margin-left: 2px;
+  transition: opacity 0.15s;
+}
+
+.tab-btn:hover .tab-close {
+  opacity: 0.6;
+}
+
+.tab-close:hover {
+  opacity: 1 !important;
+  color: #e74c3c;
+}
+
+.tab-rename-input {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.4);
+  color: white;
+  outline: none;
+  width: 60px;
+  font-size: inherit;
+  font-weight: inherit;
+  text-align: center;
+}
+
+.badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  background: #e74c3c;
+  color: white;
+  font-size: 10px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ── 以下为原有样式 ── */.session-panel {
   position: absolute;
   left: var(--nav-back-width);
   right: 0;
@@ -649,5 +888,33 @@ function getSupportedMimeType(): string {
 @keyframes recording-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.5; }
+}
+
+.agent-loading-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  height: 100%;
+  min-height: 200px;
+}
+
+.agent-loading-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(255, 255, 255, 0.6);
+  border-radius: 50%;
+  animation: agent-spin 0.8s linear infinite;
+}
+
+.agent-loading-text {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 14px;
+}
+
+@keyframes agent-spin {
+  to { transform: rotate(360deg); }
 }
 </style>

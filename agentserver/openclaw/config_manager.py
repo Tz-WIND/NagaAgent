@@ -15,7 +15,7 @@ from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass
 from datetime import datetime
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("openclaw.config")
 
 
 @dataclass

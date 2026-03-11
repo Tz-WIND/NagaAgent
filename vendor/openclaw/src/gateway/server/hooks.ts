@@ -76,6 +76,7 @@ export function createGatewayHooksRequestHandler(params: {
           message: value.message,
           sessionKey,
           lane: "cron",
+          workspaceOverride: value.workspace,
         });
         const summary = result.summary?.trim() || result.error?.trim() || result.status;
         const prefix =

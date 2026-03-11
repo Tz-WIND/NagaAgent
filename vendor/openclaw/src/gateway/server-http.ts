@@ -50,8 +50,10 @@ import {
   resolveHookChannel,
   resolveHookDeliver,
 } from "./hooks.js";
-import { sendGatewayAuthFailure, setDefaultSecurityHeaders } from "./http-common.js";
+import { sendGatewayAuthFailure, setSseHeaders, writeDone, setDefaultSecurityHeaders } from "./http-common.js";
 import { getBearerToken } from "./http-utils.js";
+import { onAgentEvent } from "../infra/agent-events.js";
+import { resolveAssistantStreamDeltaText } from "./agent-event-assistant-text.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
 import {
@@ -481,6 +483,92 @@ export function createHooksRequestHandler(
         agentId: targetAgentId,
       });
       sendJson(res, 200, { ok: true, runId });
+      return true;
+    }
+
+    // ── NagaAgent: /hooks/agent/stream — SSE 流式输出 ──
+    if (subPath === "agent/stream") {
+      const normalized = normalizeAgentPayload(payload as Record<string, unknown>);
+      if (!normalized.ok) {
+        sendJson(res, 400, { ok: false, error: normalized.error });
+        return true;
+      }
+      if (!isHookAgentAllowed(hooksConfig, normalized.value.agentId)) {
+        sendJson(res, 400, { ok: false, error: getHookAgentPolicyError() });
+        return true;
+      }
+      const sessionKey = resolveHookSessionKey({
+        hooksConfig,
+        source: "mapping",  // 内部端点，绕过 allowRequestSessionKey 检查
+        sessionKey: normalized.value.sessionKey,
+      });
+      if (!sessionKey.ok) {
+        sendJson(res, 400, { ok: false, error: sessionKey.error });
+        return true;
+      }
+      const targetAgentId = resolveHookTargetAgentId(hooksConfig, normalized.value.agentId);
+      const finalSessionKey = normalizeHookDispatchSessionKey({
+        sessionKey: sessionKey.value,
+        targetAgentId,
+      });
+
+      // CORS
+      res.setHeader("Access-Control-Allow-Origin", "*");
+
+      let closed = false;
+
+      setSseHeaders(res);
+      res.write(`data: ${JSON.stringify({ type: "status", text: "thinking" })}\n\n`);
+
+      // 用 sessionKey 过滤 events（每个干员实例 sessionKey 唯一）
+      const unsubscribe = onAgentEvent((evt) => {
+        if (closed) return;
+        if (evt.sessionKey !== finalSessionKey) return;
+
+        if (evt.stream === "assistant") {
+          const delta = resolveAssistantStreamDeltaText(evt);
+          if (delta) {
+            res.write(`data: ${JSON.stringify({ type: "content", text: delta })}\n\n`);
+          }
+        }
+
+        // 工具调度事件 → 转发为 status + tool_call/tool_result
+        if (evt.stream === "tool") {
+          const phase = evt.data?.phase;
+          const toolName = evt.data?.name ?? "";
+          if (phase === "start" && toolName) {
+            res.write(`data: ${JSON.stringify({ type: "status", text: `调用工具: ${toolName}` })}\n\n`);
+            res.write(`data: ${JSON.stringify({ type: "tool_call", name: toolName, toolCallId: evt.data?.toolCallId ?? "" })}\n\n`);
+          } else if (phase === "end" && toolName) {
+            res.write(`data: ${JSON.stringify({ type: "tool_result", name: toolName, toolCallId: evt.data?.toolCallId ?? "" })}\n\n`);
+          }
+        }
+
+        if (evt.stream === "lifecycle") {
+          const phase = evt.data?.phase;
+          if (phase === "end" || phase === "error") {
+            const errMsg = phase === "error" ? String(evt.data?.error ?? "") : undefined;
+            res.write(`data: ${JSON.stringify({ type: phase === "error" ? "error" : "done", text: errMsg ?? "" })}\n\n`);
+            closed = true;
+            unsubscribe();
+            writeDone(res);
+            res.end();
+          }
+        }
+      });
+
+      req.on("close", () => {
+        closed = true;
+        unsubscribe();
+      });
+
+      // Dispatch agent（异步，不阻塞 SSE 流）
+      dispatchAgentHook({
+        ...normalized.value,
+        sessionKey: finalSessionKey,
+        agentId: targetAgentId,
+      });
+
       return true;
     }
 

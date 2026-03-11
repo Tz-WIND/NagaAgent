@@ -4,48 +4,49 @@
  * 由 NagaAgent 的 EmbeddedRuntime 通过 `node gateway_start.mjs` 拉起。
  * 直接调用 startGatewayServer()，跳过 CLI 层，启动更快、日志更干净。
  *
+ * 搜索顺序：
+ *   1. 打包模式 — dist/ 与本脚本同目录（CI 预编译）
+ *   2. 开发模式 — vendor/openclaw/dist/（手动编译或缓存）
+ *   3. 开发模式 — vendor/openclaw/src/（tsx 直接跑源码，需 --import tsx）
+ *
  * 环境变量：
- *   OPENCLAW_GATEWAY_PORT  — 端口号（默认 20789，避免与标准 openclaw 18789 冲突）
+ *   OPENCLAW_GATEWAY_PORT  — 端口号（默认 20789）
  */
 
-import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SERVER_REL = "node_modules/openclaw/dist/gateway/server.js";
 
-// 按优先级查找 openclaw gateway/server.js
+// 按优先级查找 gateway server 入口
 let serverPath = null;
 
 const candidates = [
-  // 打包模式：本脚本被复制到 runtime/gateway_start.mjs
-  join(__dirname, "openclaw", SERVER_REL),
-  // 开发模式：本脚本在 agentserver/openclaw/，runtime 在项目根 runtime/
-  join(__dirname, "..", "..", "runtime", "openclaw", SERVER_REL),
+  // 1. 打包模式：本脚本在 runtime/openclaw/gateway_start.mjs，dist 同目录
+  join(__dirname, "dist", "gateway", "server.js"),
+  // 2. 开发模式（已编译）：vendor/openclaw/dist/
+  join(__dirname, "..", "..", "vendor", "openclaw", "dist", "gateway", "server.js"),
+  // 3. 开发模式（源码）：vendor/openclaw/src/（需要 --import tsx）
+  join(__dirname, "..", "..", "vendor", "openclaw", "src", "gateway", "server.ts"),
 ];
 
 for (const p of candidates) {
   if (existsSync(p)) { serverPath = p; break; }
 }
 
-// 兜底：npm 全局安装
 if (!serverPath) {
-  try {
-    const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf-8" }).trim();
-    const p = join(globalRoot, "openclaw", "dist", "gateway", "server.js");
-    if (existsSync(p)) serverPath = p;
-  } catch {}
-}
-
-if (!serverPath) {
-  process.stderr.write("[gateway_start] fatal: cannot find openclaw package\n");
+  process.stderr.write("[gateway_start] fatal: cannot find openclaw gateway entry\n");
   process.stderr.write(`[gateway_start] searched:\n${candidates.map(p => "  - " + p).join("\n")}\n`);
   process.exit(1);
 }
 
-process.stderr.write(`[gateway_start] using: ${serverPath}\n`);
+const isTsSource = serverPath.endsWith(".ts");
+if (isTsSource) {
+  process.stderr.write(`[gateway_start] using source (tsx): ${serverPath}\n`);
+} else {
+  process.stderr.write(`[gateway_start] using compiled: ${serverPath}\n`);
+}
 
 const { startGatewayServer } = await import(pathToFileURL(serverPath).href);
 

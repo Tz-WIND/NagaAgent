@@ -4,7 +4,7 @@ import API from '@/api/core'
 import { isNagaLoggedIn, refreshUserStats } from '@/composables/useAuth'
 import { handleMusicCommand } from '@/composables/useMusicPlayer'
 import { triggerAction } from '@/utils/live2dController'
-import { MESSAGES } from '@/utils/session'
+import { getNagaTab } from '@/utils/session'
 
 export const toolMessage = ref('')
 export const openclawTasks = ref<Array<Record<string, any>>>([])
@@ -34,8 +34,9 @@ async function poll() {
     }
 
     if (clawdbot.status === 'fulfilled' && clawdbot.value.replies?.length) {
+      const nagaTab = getNagaTab()
       for (const reply of clawdbot.value.replies) {
-        MESSAGES.value.push({
+        nagaTab.messages.push({
           role: 'assistant',
           content: reply,
           sender: 'AgentServer',
