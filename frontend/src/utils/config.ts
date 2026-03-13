@@ -154,6 +154,37 @@ export const DEFAULT_CONFIG = {
     mac_btn_gap: 12, // Mac按钮间距
     animation_duration: 600, // 动画持续时间(毫秒)
   },
+  openclaw: {
+    enabled: false,
+    gateway_port: 20789,
+    gateway_url: 'http://127.0.0.1:20789',
+    token: null as string | null,
+    timeout: 120,
+    default_model: null as string | null,
+    default_channel: 'last',
+    feishu: {
+      enabled: false,
+      app_id: '',
+      app_secret: '',
+      dm_policy: 'open',
+      group_policy: 'allowlist',
+      allow_from: ['*'],
+      doc_owner_open_id: null as string | null,
+    },
+  },
+  notifications: {
+    feishu: {
+      enabled: false,
+      recipient_type: 'open_id',
+      recipient_open_id: '',
+      recipient_chat_id: '',
+      deliver_full_report: true,
+    },
+    qq: {
+      enabled: false,
+      user_qq: '',
+    },
+  },
   naga_portal: {
     portal_url: 'https://naga.furina.chat/', // Naga门户URL
     username: 'your-portal-username', // 门户用户名
@@ -249,6 +280,21 @@ export type Config = typeof DEFAULT_CONFIG
 export const CONFIG = ref<Config>(JSON.parse(JSON.stringify(DEFAULT_CONFIG)))
 export const backendConnected = ref(false)
 
+function sanitizeLegacyNotificationConfig(config: Config) {
+  const qqConfig = config.notifications.qq as typeof config.notifications.qq & {
+    provider?: string
+    server_url?: string
+    token?: string
+    group_id?: string
+    message_template?: string
+  }
+  delete qqConfig.provider
+  delete qqConfig.server_url
+  delete qqConfig.token
+  delete qqConfig.group_id
+  delete qqConfig.message_template
+}
+
 function deepMerge<T extends Record<string, any>>(target: T, source: Record<string, any>): T {
   const result = { ...target }
   for (const key of Object.keys(source)) {
@@ -289,7 +335,9 @@ let connectRetryDelay = 300 // 指数退避起始值
 
 function connectBackend() {
   API.systemConfig().then((res) => {
-    CONFIG.value = deepMerge(JSON.parse(JSON.stringify(DEFAULT_CONFIG)), res.config)
+    const mergedConfig = deepMerge(JSON.parse(JSON.stringify(DEFAULT_CONFIG)), res.config)
+    sanitizeLegacyNotificationConfig(mergedConfig)
+    CONFIG.value = mergedConfig
     backendConnected.value = true
     connectRetryDelay = 300 // 重置
     loadSystemPrompt()

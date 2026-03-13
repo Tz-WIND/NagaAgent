@@ -339,12 +339,18 @@ function closeTab(tab: ChatTab) {
 }
 
 function startRename(tab: ChatTab) {
+  if (tab.type !== 'agent' || !tab.instanceId)
+    return
   renamingTabId.value = tab.id
   renameValue.value = tab.name
   nextTick(() => renameInputRef.value?.focus())
 }
 
 function finishRename(tab: ChatTab) {
+  if (tab.type !== 'agent' || !tab.instanceId) {
+    renamingTabId.value = null
+    return
+  }
   const newName = renameValue.value.trim()
   if (newName && newName !== tab.name) {
     const oldName = tab.name
@@ -355,13 +361,11 @@ function finishRename(tab: ChatTab) {
         msg.sender = newName
     }
     // 同步到后端 + 通讯录
-    if (tab.instanceId) {
-      API.renameAgent(tab.instanceId, newName).then(() => {
-        const contact = agentContacts.value.find(a => a.id === tab.instanceId)
-        if (contact)
-          contact.name = newName
-      }).catch(() => {})
-    }
+    API.renameAgent(tab.instanceId, newName).then(() => {
+      const contact = agentContacts.value.find(a => a.id === tab.instanceId)
+      if (contact)
+        contact.name = newName
+    }).catch(() => {})
   }
   renamingTabId.value = null
 }

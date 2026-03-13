@@ -99,6 +99,9 @@ export function useTravel() {
     wantFriends: boolean
     friendDescription?: string
     goalPrompt?: string
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
   }) {
     loading.value = true
     try {

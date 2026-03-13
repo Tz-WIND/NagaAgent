@@ -8,6 +8,7 @@
 import re
 import time
 import logging
+import httpx
 from datetime import datetime
 from typing import Optional, Tuple, Callable
 
@@ -39,10 +40,9 @@ class HeartbeatExecutor:
         self._last_heartbeat_time: float = 0.0
         self._last_heartbeat_result: Optional[str] = None
         self._heartbeat_count: int = 0
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
 
-    def _get_http_client(self) -> "httpx.AsyncClient":
-        import httpx
+    def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=5.0, proxy=None)
         return self._http_client

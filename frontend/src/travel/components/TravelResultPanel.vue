@@ -4,8 +4,36 @@ import { Button } from 'primevue'
 import { formatDate, statusLabel } from '@/travel/composables/useTravel'
 import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 
-defineProps<{ session: TravelSession }>()
+const props = defineProps<{ session: TravelSession }>()
 defineEmits<{ newTravel: [] }>()
+
+function notificationLabel(key: string) {
+  if (key === 'feishu')
+    return '飞书通知'
+  if (key === 'qq')
+    return 'QQ 通知'
+  return key
+}
+
+function notificationStatusLabel(status: string) {
+  if (status === 'delivered_full_report')
+    return '已通过完整报告回传'
+  if (status === 'delivered_summary')
+    return '已发送完成摘要'
+  if (status === 'accepted')
+    return '已被通知服务接受'
+  if (status === 'skipped:incomplete_config')
+    return '已启用但配置不完整，未发送'
+  if (status === 'skipped:invalid_qq')
+    return 'QQ 号格式不正确，未发送'
+  if (status.startsWith('accepted:'))
+    return `已被通知服务接受（${status.slice('accepted:'.length)}）`
+  if (status.startsWith('skipped:unsupported_provider:'))
+    return `当前提供方未实装（${status.slice('skipped:unsupported_provider:'.length)}）`
+  if (status.startsWith('failed:'))
+    return `发送失败：${status.slice('failed:'.length)}`
+  return status
+}
 </script>
 
 <template>
@@ -33,7 +61,7 @@ defineEmits<{ newTravel: [] }>()
   </div>
 
   <div
-    v-if="session.forumPostStatus || session.fullReportDeliveryStatus"
+    v-if="session.forumPostStatus || session.fullReportDeliveryStatus || Object.keys(props.session.notificationDeliveryStatuses || {}).length"
     class="grid grid-cols-1 gap-2 text-[11px] text-white/45 bg-white/2 rounded-lg p-3"
   >
     <div v-if="session.forumPostStatus">
@@ -41,6 +69,12 @@ defineEmits<{ newTravel: [] }>()
     </div>
     <div v-if="session.fullReportDeliveryStatus">
       完整报告回传：{{ session.fullReportDeliveryStatus }}
+    </div>
+    <div
+      v-for="(status, key) in props.session.notificationDeliveryStatuses || {}"
+      :key="key"
+    >
+      {{ notificationLabel(String(key)) }}：{{ notificationStatusLabel(String(status)) }}
     </div>
   </div>
 

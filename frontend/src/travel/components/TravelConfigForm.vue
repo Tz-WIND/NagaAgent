@@ -2,11 +2,22 @@
 import { Button, InputNumber, Select, Textarea, ToggleSwitch } from 'primevue'
 import { computed, onMounted, ref, watch } from 'vue'
 import ConfigItem from '@/components/ConfigItem.vue'
+import { CONFIG } from '@/utils/config'
 import { agentContacts, loadAgentContacts } from '@/utils/session'
 
 defineProps<{ loading: boolean }>()
 const emit = defineEmits<{
-  start: [params: { agentId?: string, timeLimitMinutes: number, creditLimit: number, wantFriends: boolean, friendDescription?: string, goalPrompt?: string }]
+  start: [params: {
+    agentId?: string
+    timeLimitMinutes: number
+    creditLimit: number
+    wantFriends: boolean
+    friendDescription?: string
+    goalPrompt?: string
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
+  }]
 }>()
 
 const timeLimit = ref(300)
@@ -16,6 +27,42 @@ const friendDescription = ref('')
 const goalPrompt = ref('追踪 AI、技术与互联网的最新热点，优先关注仍在持续发酵的话题和一手来源')
 const selectedAgentId = ref('')
 const openclawAgents = computed(() => agentContacts.value.filter(agent => (agent.engine || 'openclaw') === 'openclaw'))
+const feishuDeliverTarget = computed(() => {
+  const settings = CONFIG.value.notifications.feishu
+  const hasApp = !!CONFIG.value.openclaw.feishu.app_id.trim() && !!CONFIG.value.openclaw.feishu.app_secret.trim()
+  if (!settings.enabled || !CONFIG.value.openclaw.feishu.enabled || !hasApp)
+    return ''
+  return settings.recipient_type === 'chat_id'
+    ? settings.recipient_chat_id.trim()
+    : settings.recipient_open_id.trim()
+})
+const qqNotificationReady = computed(() => {
+  const settings = CONFIG.value.notifications.qq
+  return settings.enabled
+    && /^\d+$/.test(settings.user_qq.trim())
+})
+const travelNotificationSummary = computed(() => {
+  const lines: string[] = []
+  if (feishuDeliverTarget.value) {
+    const reportMode = CONFIG.value.notifications.feishu.deliver_full_report ? '完整报告' : '完成摘要'
+    lines.push(`飞书通知已启用，将回传${reportMode}到 ${CONFIG.value.notifications.feishu.recipient_type}: ${feishuDeliverTarget.value}`)
+  }
+  if (CONFIG.value.notifications.qq.enabled) {
+    if (qqNotificationReady.value) {
+      lines.push(`QQ 通知已启用，探索完成后会通过 Undefined QQ机器人 @${CONFIG.value.notifications.qq.user_qq.trim()}`)
+    }
+    else if (CONFIG.value.notifications.qq.user_qq.trim()) {
+      lines.push('QQ 通知已启用，但 QQ 号格式不正确，需要填写纯数字')
+    }
+    else {
+      lines.push('QQ 通知已启用，但 QQ 号还没填，当前不会生效')
+    }
+  }
+  if (lines.length === 0) {
+    lines.push('未配置外部通知，探索结果会保存在应用内')
+  }
+  return lines
+})
 
 watch(openclawAgents, (agents) => {
   if (!selectedAgentId.value && agents.length > 0) {
@@ -31,6 +78,8 @@ onMounted(() => {
 })
 
 function onStart() {
+  const deliverChannel = feishuDeliverTarget.value ? 'feishu' : undefined
+  const deliverTo = feishuDeliverTarget.value || undefined
   emit('start', {
     agentId: selectedAgentId.value || undefined,
     timeLimitMinutes: timeLimit.value,
@@ -38,6 +87,9 @@ function onStart() {
     wantFriends: wantFriends.value,
     friendDescription: friendDescription.value || undefined,
     goalPrompt: goalPrompt.value || undefined,
+    deliverFullReport: deliverChannel ? CONFIG.value.notifications.feishu.deliver_full_report : false,
+    deliverChannel,
+    deliverTo,
   })
 }
 </script>
@@ -115,6 +167,19 @@ function onStart() {
       class="resize-none"
       placeholder="描述你希望 Naga 认识的朋友类型..."
     />
+  </div>
+
+  <div class="border-t border-white/8 my-1" />
+
+  <div class="flex flex-col gap-2">
+    <div class="text-white/60 text-xs pl-1">
+      通知回传
+    </div>
+    <div class="text-xs text-white/40 pl-1 leading-6">
+      <div v-for="line in travelNotificationSummary" :key="line">
+        {{ line }}
+      </div>
+    </div>
   </div>
 
   <!-- 出发按钮 -->

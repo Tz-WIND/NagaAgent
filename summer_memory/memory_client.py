@@ -158,6 +158,29 @@ _client: Optional[RemoteMemoryClient] = None
 _client_token: Optional[str] = None
 
 
+def should_prefer_remote_memory() -> bool:
+    """
+    是否应优先走远程记忆链路。
+
+    只要存在 Naga 登录态、可用 refresh_token，或显式配置了 memory_server.token，
+    就视为远程记忆优先，不应再自动回退到本地 summer_memory / Neo4j。
+    """
+    try:
+        from apiserver import naga_auth
+
+        if naga_auth.is_authenticated() or naga_auth.has_refresh_token():
+            return True
+    except Exception:
+        pass
+
+    try:
+        from system.config import config
+
+        return bool(config.memory_server.token)
+    except Exception:
+        return False
+
+
 def get_remote_memory_client() -> Optional[RemoteMemoryClient]:
     """
     获取远程记忆客户端单例。

@@ -57,6 +57,7 @@ class _AgentPromptContext:
     system_prompt: str
     extra_sections: list[str]
     skills_prompt: str
+    available_mcp_tools_text: str
     skill_manager: object | None
 
 
@@ -259,7 +260,7 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
         raise HTTPException(status_code=404, detail=f"NagaCore 干员不存在: {agent_id}")
 
     engine = normalize_agent_engine(record.get("engine"))
-    if engine not in _NAGA_CORE_ENGINES:
+    if engine not in NAGA_CORE_ENGINES:
         raise HTTPException(status_code=400, detail=f"干员 [{record.get('name') or agent_id}] 不是 NagaCore 引擎")
 
     from system.skill_manager import SkillManager
@@ -301,6 +302,15 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
 
     skill_manager = SkillManager(skills_dirs=[project_skills_dir, public_skills_dir, private_skills_dir])
     skills_prompt = skill_manager.generate_skills_prompt()
+    available_mcp_tools_text = ""
+    try:
+        from mcpserver.mcp_registry import auto_register_mcp
+        from mcpserver.mcp_manager import get_mcp_manager
+
+        auto_register_mcp()
+        available_mcp_tools_text = get_mcp_manager().format_available_services_for_agent(agent_id) or "（暂无MCP服务注册）"
+    except Exception:
+        available_mcp_tools_text = "（MCP服务未启动）"
 
     return _AgentPromptContext(
         agent_id=agent_id,
@@ -310,6 +320,7 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
         system_prompt=system_prompt,
         extra_sections=extra_sections,
         skills_prompt=skills_prompt,
+        available_mcp_tools_text=available_mcp_tools_text,
         skill_manager=skill_manager,
     )
 
@@ -533,6 +544,7 @@ async def chat(request: ChatRequest):
                 if agent_ctx and request.skill and agent_ctx.skill_manager
                 else None
             ),
+            available_mcp_tools_override=agent_ctx.available_mcp_tools_text if agent_ctx else None,
             extra_sections=agent_ctx.extra_sections if agent_ctx else None,
         )
         messages.append({"role": "system", "content": supplement})
@@ -668,6 +680,7 @@ async def chat_stream(request: ChatRequest):
                     if agent_ctx and request.skill and agent_ctx.skill_manager
                     else None
                 ),
+                available_mcp_tools_override=agent_ctx.available_mcp_tools_text if agent_ctx else None,
                 extra_sections=agent_ctx.extra_sections if agent_ctx else None,
             )
             messages.append({"role": "system", "content": supplement})
@@ -676,7 +689,7 @@ async def chat_stream(request: ChatRequest):
             tools = None
             if supports_fc:
                 from apiserver.tool_schemas import get_all_tool_schemas
-                tools = get_all_tool_schemas()
+                tools = get_all_tool_schemas(agent_id=request.agent_id)
                 logger.info(f"[ChatStream] 使用原生 function calling，工具数: {len(tools) if tools else 0}")
             else:
                 logger.info("[ChatStream] 使用文本解析模式（模型不支持原生 function calling）")

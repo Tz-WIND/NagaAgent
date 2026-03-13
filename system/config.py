@@ -605,6 +605,30 @@ class NagaBusinessConfig(BaseModel):
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 
+class FeishuNotificationConfig(BaseModel):
+    """飞书通知默认配置。"""
+
+    enabled: bool = Field(default=False, description="是否启用飞书通知")
+    recipient_type: str = Field(default="open_id", description="接收对象类型：open_id 或 chat_id")
+    recipient_open_id: str = Field(default="", description="默认接收人的飞书 open_id")
+    recipient_chat_id: str = Field(default="", description="默认接收群聊或会话 chat_id")
+    deliver_full_report: bool = Field(default=True, description="是否发送完整探索报告")
+
+
+class QQNotificationConfig(BaseModel):
+    """QQ群机器人通知默认配置。"""
+
+    enabled: bool = Field(default=False, description="是否启用 QQ 通知")
+    user_qq: str = Field(default="", description="默认被 @ 的 QQ 号")
+
+
+class NotificationsConfig(BaseModel):
+    """外部通知配置。"""
+
+    feishu: FeishuNotificationConfig = Field(default_factory=FeishuNotificationConfig)
+    qq: QQNotificationConfig = Field(default_factory=QQNotificationConfig)
+
+
 class SystemCheckConfig(BaseModel):
     """系统检测状态配置"""
 
@@ -796,6 +820,7 @@ def build_context_supplement(
     search_section: str = "",
     skills_prompt_override: Optional[str] = None,
     skill_instructions_override: Optional[str] = None,
+    available_mcp_tools_override: Optional[str] = None,
     extra_sections: Optional[List[str]] = None,
 ) -> str:
     """
@@ -817,6 +842,7 @@ def build_context_supplement(
         search_section: 前置搜索结果内容（由 api_server 传入）
         skills_prompt_override: 覆盖默认技能列表（用于按干员隔离的技能视图）
         skill_instructions_override: 覆盖默认技能全文（用于按干员隔离的技能加载）
+        available_mcp_tools_override: 覆盖默认 MCP 列表（用于按干员隔离的工具视图）
         extra_sections: 附加到 supplement 末尾的额外上下文块
 
     Returns:
@@ -852,14 +878,15 @@ def build_context_supplement(
         tool_prompt_file = _sys_prompts / "agentic_tool_prompt.txt"
         raw_template = tool_prompt_file.read_text(encoding="utf-8") if tool_prompt_file.exists() else ""
 
-        available_mcp_tools = ""
-        try:
-            from mcpserver.mcp_registry import auto_register_mcp
-            auto_register_mcp()
-            from mcpserver.mcp_manager import get_mcp_manager
-            available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
-        except Exception:
-            available_mcp_tools = "（MCP服务未启动）"
+        available_mcp_tools = available_mcp_tools_override or ""
+        if not available_mcp_tools:
+            try:
+                from mcpserver.mcp_registry import auto_register_mcp
+                auto_register_mcp()
+                from mcpserver.mcp_manager import get_mcp_manager
+                available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
+            except Exception:
+                available_mcp_tools = "（MCP服务未启动）"
 
         tool_instructions = "\n\n" + raw_template.replace("{available_mcp_tools}", available_mcp_tools)
 
@@ -925,6 +952,7 @@ class NagaConfig(BaseModel):
     naga_portal: NagaPortalConfig = Field(default_factory=NagaPortalConfig)
     online_search: OnlineSearchConfig = Field(default_factory=OnlineSearchConfig)
     openclaw: OpenClawConfig = Field(default_factory=OpenClawConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     naga_business: NagaBusinessConfig = Field(default_factory=NagaBusinessConfig)
     system_check: SystemCheckConfig = Field(default_factory=SystemCheckConfig)
     computer_control: ComputerControlConfig = Field(default_factory=ComputerControlConfig)

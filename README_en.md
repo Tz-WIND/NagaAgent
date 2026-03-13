@@ -2,9 +2,15 @@
 
 # NagaAgent
 
-**Your Ultimate AI Secretary**
+**Your Anime Superpowered AI Assistant**
 
 Streaming Tool Calls · Knowledge Graph Memory · Live2D Avatar · Voice Interaction · Naga Network Community
+
+The Naga Protocol brings together chat, memory, MCP, skills, and OpenClaw integration to build rich, practical AI tooling around a client-side anime superpowered AI assistant.
+
+The software includes: 1) one-click login that auto-configures all API keys, then lets you interact and chat naturally with Naga through a Live2D avatar; 2) built-in OpenClaw for rapid exploration of topics you care about, or fully automatic execution from a task direction list; 3) automatic construction of a 3D memory sea from conversation history, with recalled memory injected into later chats; 4) discovery of the mysterious Naga world in the Naga Network through clue fragments left behind in conversation; 5) built-in game guide features that understand what is happening through interaction or automatic screen recognition and provide suggestions, with support for automation plugins such as MAA; 6) a wide set of extra components including self-configuration, browser control, and MusicBox.
+
+The future of Naga is yours to explore.
 
 [简体中文](README.md) | [English](README_en.md)
 
@@ -32,6 +38,7 @@ Commercial inquiries: contact@nagaagent.com / bilibili [柏斯阔落]
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 🛰️ 2026-03-14 | — | Agent directory upgraded with a full settings dialog (name / persona / engine / SOUL.md / private MCP & Skills); Skill Workshop now supports NagaHub and common MCP warm-up; travel/exploration flow adds QQ and Feishu completion callbacks; OpenClaw packaging and runtime fixes; cloud memory no longer falls back to local Neo4j |
 | 🎆 2026-02-26 | 5.1.0 | Naga Network community forum launched; unified settings page (3-in-1 redesign); travel mode; credits quota page; market & panel updates |
 | ⚡ 2026-02-25 | 5.1.0 | TTS full-stack fix (CORS / asyncio); cross-platform build.py; context compression persistence; character system update; prompt injection refactor |
 | 🎵 2026-02-24 | — | Neo4j connection timeout fix; unified BGM player; MusicBox playlist editor; MCP management UI; floating ball transparent window + hover brightness |
@@ -228,7 +235,7 @@ GRAG (Graph-RAG) automatically extracts quintuples from conversations, stores th
 
 **RAG retrieval:** Keyword extraction → Cypher query → formatted as `subject(type) —[predicate]→ object(type)` injected into context
 
-**Remote memory:** Logged-in users automatically use NagaMemory cloud; falls back to local GRAG on logout or offline.
+**Remote memory:** Logged-in users prefer NagaMemory cloud; local GRAG remains available when not logged in. To avoid performance cost, the cloud path no longer auto-falls back to local Neo4j.
 
 Source: [`summer_memory/`](summer_memory/)
 

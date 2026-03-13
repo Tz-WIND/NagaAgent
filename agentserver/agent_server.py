@@ -6,15 +6,18 @@ NagaAgent独立服务 - 通过OpenClaw执行任务
 """
 
 import asyncio
-import shutil
 import logging
+import httpx
+import os
+import sys
 from typing import Dict, Any, Optional
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
-from system.config import config, add_config_listener, logger
+from system.config import config, add_config_listener
 from agentserver.openclaw import get_openclaw_client, set_openclaw_config
 from agentserver.openclaw.embedded_runtime import get_embedded_runtime, EmbeddedRuntime
 
@@ -279,9 +282,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NagaAgent Server", version="1.0.0", lifespan=lifespan)
 
-# 配置 CORS（前端直连 8001 需要）
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -543,7 +543,7 @@ async def create_agent(payload: Dict[str, Any]):
         raise HTTPException(503, "实例管理器未就绪")
 
     name = payload.get("name")
-    character_template = (payload.get("character_template") or "").strip() or None
+    character_template = (payload.get("character_template") or payload.get("characterTemplate") or "").strip() or None
     engine = (payload.get("engine") or "openclaw").strip() or "openclaw"
     try:
         inst = Modules.instance_manager.create_agent(
@@ -561,6 +561,69 @@ async def create_agent(payload: Dict[str, Any]):
     except Exception as e:
         logger.error(f"创建干员失败: {e}")
         raise HTTPException(500, f"创建失败: {e}")
+
+
+@app.get("/openclaw/agents/{agent_id}/settings")
+async def get_agent_settings(agent_id: str):
+    """读取干员设置（名字 / 引擎 / 人设 / SOUL.md）。"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    settings = Modules.instance_manager.get_agent_settings(agent_id)
+    if settings is None:
+        raise HTTPException(404, "干员不存在")
+    return settings
+
+
+@app.put("/openclaw/agents/{agent_id}/settings")
+async def update_agent_settings(agent_id: str, payload: Dict[str, Any]):
+    """更新干员设置（名字 / 引擎 / 人设 / SOUL.md）。"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    name = payload.get("name")
+    if name is not None:
+        name = str(name).strip()
+        if not name:
+            raise HTTPException(400, "name 不能为空")
+
+    engine = payload.get("engine")
+    if engine is not None:
+        engine = str(engine).strip()
+
+    update_character_template = "character_template" in payload or "characterTemplate" in payload
+    character_template = payload.get("character_template")
+    if character_template is None and "characterTemplate" in payload:
+        character_template = payload.get("characterTemplate")
+    if character_template is not None:
+        character_template = str(character_template).strip() or None
+
+    update_soul_content = "soul_content" in payload or "soulContent" in payload
+    soul_content = payload.get("soul_content")
+    if soul_content is None and "soulContent" in payload:
+        soul_content = payload.get("soulContent")
+    if soul_content is not None:
+        soul_content = str(soul_content)
+
+    try:
+        settings = await Modules.instance_manager.update_agent_settings(
+            agent_id,
+            name=name,
+            character_template=character_template,
+            update_character_template=update_character_template,
+            engine=engine,
+            soul_content=soul_content,
+            update_soul_content=update_soul_content,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:
+        logger.error(f"更新干员设置失败: {exc}")
+        raise HTTPException(500, f"更新失败: {exc}")
+
+    if settings is None:
+        raise HTTPException(404, "干员不存在")
+    return settings
 
 
 @app.delete("/openclaw/agents/{agent_id}")
@@ -686,12 +749,11 @@ async def stream_to_agent(agent_id: str, payload: Dict[str, Any]):
 
 # ============ 本地搜索代理（拦截 OpenClaw web_search） ============
 
-_search_http_client: Optional["httpx.AsyncClient"] = None
+_search_http_client: Optional[httpx.AsyncClient] = None
 
 
-def _get_search_client() -> "httpx.AsyncClient":
+def _get_search_client() -> httpx.AsyncClient:
     """搜索代理共享 httpx 客户端"""
-    import httpx
 
     global _search_http_client
     if _search_http_client is None or _search_http_client.is_closed:
@@ -1406,7 +1468,6 @@ async def travel_execute(payload: Dict[str, Any]):
 
 async def _run_travel_session(session_id: str):
     """旅行主循环协程"""
-    import sys, os
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     from apiserver.travel_service import (
@@ -1416,6 +1477,10 @@ async def _run_travel_session(session_id: str):
         build_social_prompt,
         build_travel_prompt,
         build_wrap_up_prompt,
+    )
+    from agentserver.travel_notifications import (
+        build_travel_full_report_message,
+        deliver_travel_completion_notifications,
     )
 
     try:
@@ -1632,19 +1697,8 @@ async def _run_travel_session(session_id: str):
                     session.full_report_delivery_status = "stored_in_app"
                     save_session(session)
                 else:
-                    summary_text = session.summary or "旅行已完成"
-                    lines = [
-                        "🌍 探索完整报告",
-                        summary_text,
-                        "",
-                        f"发现条目：{len(session.discoveries)}",
-                        f"唯一来源：{session.unique_sources}",
-                        f"工具统计：{session.tool_stats or {}}",
-                    ]
-                    if session.forum_post_id:
-                        lines.extend(["", f"论坛精华帖已发布，post_id={session.forum_post_id}"])
                     deliver_kwargs = {
-                        "message": "\n".join(lines),
+                        "message": build_travel_full_report_message(session),
                         "deliver": True,
                         "session_key": session_key,
                         "name": "NagaTravel",
@@ -1661,6 +1715,12 @@ async def _run_travel_session(session_id: str):
                 session.full_report_delivery_status = f"failed:{e}"
                 save_session(session)
                 logger.warning(f"[旅行] 完整报告回传失败: {e}")
+
+        try:
+            session.notification_delivery_statuses = await deliver_travel_completion_notifications(session, travel_client)
+            save_session(session)
+        except Exception as e:
+            logger.warning(f"[旅行] 完成通知发送失败: {e}")
 
     except Exception as e:
         logger.error(f"[旅行] 异常: {e}", exc_info=True)

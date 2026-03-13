@@ -4,6 +4,7 @@
 """
 
 import asyncio
+import httpx
 import time
 import logging
 from typing import Dict, Optional
@@ -18,12 +19,10 @@ class ProactiveVisionTrigger:
 
     def __init__(self):
         self._rule_last_triggered: Dict[str, float] = {}
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
 
-    def _get_http_client(self) -> "httpx.AsyncClient":
+    def _get_http_client(self) -> httpx.AsyncClient:
         """获取或创建共享 httpx 客户端"""
-        import httpx
-
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=5.0, proxy=None)
         return self._http_client

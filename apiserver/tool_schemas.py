@@ -21,29 +21,29 @@ logger = logging.getLogger(__name__)
 # 缓存
 # ---------------------------------------------------------------------------
 
-_schema_cache: Optional[List[Dict[str, Any]]] = None
+_schema_cache: Dict[str, List[Dict[str, Any]]] = {}
 
 
 def invalidate_schema_cache():
     """MCP 注册变更时调用，清除缓存"""
-    global _schema_cache
-    _schema_cache = None
+    _schema_cache.clear()
 
 
-def get_all_tool_schemas() -> List[Dict[str, Any]]:
+def get_all_tool_schemas(agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """返回所有可用工具的 OpenAI function calling schemas"""
-    global _schema_cache
-    if _schema_cache is not None:
-        return _schema_cache
+    cache_key = agent_id or "__public__"
+    cached = _schema_cache.get(cache_key)
+    if cached is not None:
+        return cached
 
     schemas: List[Dict[str, Any]] = []
     schemas.extend(_build_openclaw_tool_schemas())
     schemas.extend(_build_openclaw_agent_schema())
-    schemas.extend(_build_mcp_schemas())
+    schemas.extend(_build_mcp_schemas(agent_id=agent_id))
     schemas.extend(_build_live2d_schema())
     schemas.extend(_build_naga_control_schema())
 
-    _schema_cache = schemas
+    _schema_cache[cache_key] = schemas
     logger.info(f"[ToolSchemas] 生成 {len(schemas)} 个工具 schema")
     return schemas
 
@@ -427,14 +427,17 @@ def _build_openclaw_agent_schema() -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def _build_mcp_schemas() -> List[Dict[str, Any]]:
+def _build_mcp_schemas(agent_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """从 MCP 注册表动态生成 function calling schemas"""
     schemas = []
     try:
-        from mcpserver.mcp_registry import MANIFEST_CACHE, auto_register_mcp
+        from mcpserver.mcp_registry import MANIFEST_CACHE, auto_register_mcp, list_visible_service_names
         auto_register_mcp()
+        visible_services = set(list_visible_service_names(agent_id))
 
         for service_name, manifest in MANIFEST_CACHE.items():
+            if service_name not in visible_services:
+                continue
             tools = manifest.get("capabilities", {}).get("invocationCommands", [])
             for tool in tools:
                 command = tool.get("command", "")
@@ -443,6 +446,19 @@ def _build_mcp_schemas() -> List[Dict[str, Any]]:
 
                 description = tool.get("description", "").split("\n")[0]  # 首行
                 example = tool.get("example", "")
+                declared_parameters = tool.get("parameters")
+
+                if isinstance(declared_parameters, dict):
+                    schema = {
+                        "type": "function",
+                        "function": {
+                            "name": f"mcp__{service_name}__{command}",
+                            "description": f"[MCP/{service_name}] {description}",
+                            "parameters": declared_parameters,
+                        },
+                    }
+                    schemas.append(schema)
+                    continue
 
                 # 从 example JSON 推断参数
                 params_properties = {}

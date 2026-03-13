@@ -199,6 +199,34 @@ def _delete_agent_dir(agent_id: str) -> bool:
     return False
 
 
+def _read_agent_text_file(agent_id: str, relative_path: str) -> str:
+    path = get_agent_dir(agent_id) / relative_path
+    if not path.exists():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _write_agent_text_file(agent_id: str, relative_path: str, content: str) -> None:
+    path = get_agent_dir(agent_id) / relative_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def _render_identity_from_template(character_template: Optional[str]) -> str:
+    if not character_template:
+        return ""
+    try:
+        from system.character_bundle import build_character_identity_bundle
+
+        return build_character_identity_bundle(character_template) or ""
+    except Exception as exc:
+        logger.warning(f"渲染角色模板 [{character_template}] 失败: {exc}")
+        return ""
+
+
 @dataclass
 class AgentInstance:
     """一个干员实例（通讯录条目 + 可选的运行时状态）"""
@@ -395,6 +423,63 @@ class InstanceManager:
 
         logger.info(f"干员 [{old_name}] → [{new_name}]")
         return True
+
+    def get_agent_settings(self, agent_id: str) -> Optional[dict]:
+        inst = self._instances.get(agent_id)
+        if inst is None:
+            return None
+
+        return {
+            "id": inst.id,
+            "name": inst.name,
+            "engine": inst.engine,
+            "character_template": inst.character_template,
+            "soul_content": _read_agent_text_file(agent_id, "SOUL.md"),
+        }
+
+    async def update_agent_settings(
+        self,
+        agent_id: str,
+        *,
+        name: Optional[str] = None,
+        character_template: Optional[str] = None,
+        update_character_template: bool = False,
+        engine: Optional[str] = None,
+        soul_content: Optional[str] = None,
+        update_soul_content: bool = False,
+    ) -> Optional[dict]:
+        inst = self._instances.get(agent_id)
+        if inst is None:
+            return None
+
+        next_name = (name or inst.name).strip() if name is not None else inst.name
+        next_engine = normalize_agent_engine(engine or inst.engine)
+        next_character_template = inst.character_template
+        if update_character_template:
+            next_character_template = character_template
+
+        engine_changed = next_engine != inst.engine
+        if engine_changed and inst.running:
+            await self._stop_instance(inst)
+
+        inst.name = next_name or inst.name
+        inst.engine = next_engine
+        inst.character_template = next_character_template
+
+        _init_agent_dir(inst.id, inst.name, inst.character_template, engine=inst.engine)
+
+        if update_character_template:
+            _write_agent_text_file(
+                inst.id,
+                "IDENTITY.md",
+                _render_identity_from_template(inst.character_template),
+            )
+
+        if update_soul_content:
+            _write_agent_text_file(inst.id, "SOUL.md", soul_content or "")
+
+        self._save_to_manifest()
+        return self.get_agent_settings(agent_id)
 
     def list_agents(self) -> List[dict]:
         """返回通讯录中的所有干员（不管进程是否在跑）。"""
