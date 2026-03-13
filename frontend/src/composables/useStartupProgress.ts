@@ -157,7 +157,8 @@ export function useStartupProgress() {
       catch {
         console.warn('[Startup] 会话获取失败，不阻塞启动')
       }
-      setTarget(95, '准备就绪')
+      setTarget(95, '准备就绪...')
+
       console.log('[Startup] 所有启动任务完成，进入主界面')
 
       // 阶段 95→100：完成

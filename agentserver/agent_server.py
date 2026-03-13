@@ -33,7 +33,7 @@ async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
         return False
 
     if runtime.is_gateway_port_in_use():
-        logger.info("端口 18789 已被占用，跳过 Gateway 启动")
+        logger.info(f"端口 {config.openclaw.gateway_port} 已被占用，跳过 Gateway 启动")
         return False
 
     gw_ok = await runtime.start_gateway()
@@ -44,61 +44,16 @@ async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
     return gw_ok
 
 
-async def _auto_install_openclaw() -> bool:
-    """尝试通过 npm install -g openclaw 自动安装"""
-    npm = shutil.which("npm")
-    if not npm:
-        logger.warning("自动安装 OpenClaw 失败：npm 不可用")
-        return False
-
-    try:
-        logger.info("OpenClaw 未安装，正在执行 npm install -g openclaw，请稍候...")
-        proc = await asyncio.create_subprocess_exec(
-            npm,
-            "install",
-            "-g",
-            "openclaw",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-
-        if proc.returncode != 0:
-            logger.error(f"npm install -g openclaw 失败: {stderr.decode()[:500]}")
-            return False
-
-        # 验证安装成功
-        if shutil.which("openclaw"):
-            logger.info("OpenClaw 自动安装成功")
-            return True
-        else:
-            logger.error("npm install -g openclaw 执行成功但 openclaw 命令未找到")
-            return False
-
-    except asyncio.TimeoutError:
-        logger.error("npm install -g openclaw 超时（120秒）")
-        return False
-    except Exception as e:
-        logger.error(f"自动安装 OpenClaw 失败: {e}")
-        return False
-
-
-def _should_use_embedded_openclaw(runtime: EmbeddedRuntime) -> bool:
-    """是否应优先使用内嵌 OpenClaw（仅打包环境且用户本机未安装）"""
-    return runtime.is_packaged and runtime.openclaw_installed and not runtime.has_global_install
-
-
 def _on_config_changed() -> None:
     """配置变更监听器：自动更新 OpenClaw LLM 配置"""
     try:
         embedded_runtime = get_embedded_runtime()
 
-        # 仅在使用内嵌 OpenClaw 时更新配置
-        if _should_use_embedded_openclaw(embedded_runtime):
+        if embedded_runtime.is_vendor_ready:
             from agentserver.openclaw.llm_config_bridge import inject_naga_llm_config
 
             inject_naga_llm_config()
-            logger.info("配置变更：已更新内嵌 OpenClaw LLM 配置")
+            logger.info("配置变更：已更新 OpenClaw LLM 配置")
     except Exception as e:
         logger.warning(f"配置变更时更新 OpenClaw 配置失败: {e}")
 
@@ -153,123 +108,51 @@ async def lifespan(app: FastAPI):
                 ensure_hooks_allow_request_session_key,
                 ensure_gateway_local_mode,
                 ensure_hooks_path,
+                ensure_gateway_port,
             )
 
             embedded_runtime = get_embedded_runtime()
-            mode = embedded_runtime.runtime_mode
-            logger.info(f"OpenClaw 运行时模式: {mode}")
-            has_global_openclaw: bool = False
-            has_embedded_openclaw: bool = False
+            logger.info(f"OpenClaw 运行时模式: {embedded_runtime.runtime_mode}")
+            logger.info(f"  vendor_root: {embedded_runtime.vendor_root}")
+            logger.info(f"  node_path: {embedded_runtime.node_path}")
+            logger.info(f"  is_vendor_ready: {embedded_runtime.is_vendor_ready}")
 
-            if embedded_runtime.is_packaged:
-                # ── 诊断日志：打印内嵌运行时路径状态 ──
-                logger.info(f"  runtime_root: {embedded_runtime.runtime_root}")
-                logger.info(f"  node_path: {embedded_runtime.node_path}")
-                logger.info(f"  npm_path: {embedded_runtime.npm_path}")
-                logger.info(f"  openclaw_path: {embedded_runtime.openclaw_path}")
-                if embedded_runtime.runtime_root:
-                    import os as _os
-                    try:
-                        _contents = _os.listdir(str(embedded_runtime.runtime_root))
-                        logger.info(f"  runtime_root 内容: {_contents}")
-                        _node_dir = embedded_runtime.runtime_root / "node"
-                        if _node_dir.exists():
-                            logger.info(f"  node/ 内容: {_os.listdir(str(_node_dir))[:20]}")
-                    except Exception as _e:
-                        logger.warning(f"  列出 runtime_root 内容失败: {_e}")
+            # ── Step 1: 确保 vendor 就绪 + 配置 + onboard ──
+            if not embedded_runtime.is_vendor_ready:
+                await embedded_runtime.ensure_vendor_ready()
 
-                has_global_openclaw = shutil.which("openclaw") is not None
-                has_embedded_openclaw = embedded_runtime.openclaw_installed
-                logger.info(f"  has_global_openclaw={has_global_openclaw}, has_embedded_openclaw={has_embedded_openclaw}")
-
-                if has_global_openclaw:
-                    logger.info("打包环境：检测到全局安装 OpenClaw，跳过内嵌 OpenClaw 初始化/启动")
-                else:
-                    logger.info("打包环境：准备启动内嵌 OpenClaw Gateway")
-
-                    # 首次运行时自动执行 onboard 初始化（含 fallback 配置生成）
-                    onboard_ok = await embedded_runtime.ensure_onboarded()
-                    if not onboard_ok:
-                        logger.error("OpenClaw 初始化失败（onboard + fallback 均失败）")
-
-                    # 首次运行时自动 npm install openclaw（内嵌运行时目录中）
-                    if not has_embedded_openclaw and embedded_runtime.node_path:
-                        logger.info("打包环境：内嵌 OpenClaw 尚未安装，执行自动安装...")
-                        install_ok = await embedded_runtime.install_openclaw()
-                        if install_ok:
-                            has_embedded_openclaw = True
-                            logger.info("内嵌 OpenClaw 自动安装成功")
-                        else:
-                            logger.error("内嵌 OpenClaw 自动安装失败")
-                    elif not has_embedded_openclaw:
-                        logger.warning(f"内嵌 OpenClaw 未安装且 node 不可用 (node_path={embedded_runtime.node_path})，跳过自动安装")
-
-                    # 注意：Gateway 启动延后到配置全部完成后（见下方统一启动段）
-
-            # === 打包环境 ===
-            if embedded_runtime.is_packaged:
-                if has_global_openclaw:
-                    logger.info("打包环境：检测到全局安装的 OpenClaw，优先使用")
-                    # 记录使用系统已有，避免卸载时误清理用户目录
-                    state_file = embedded_runtime._get_install_state_file()
-                    if state_file and (not state_file.exists() or embedded_runtime.is_auto_installed):
-                        embedded_runtime._write_install_state(auto_installed=False)
-                elif has_embedded_openclaw:
-                    logger.info("打包环境：未检测到全局 OpenClaw，使用预装内嵌 OpenClaw")
-                    # 记录为自动安装，保证卸载时可清理内嵌运行时相关目录
-                    if not embedded_runtime.is_auto_installed:
-                        embedded_runtime._write_install_state(auto_installed=True)
-                else:
-                    logger.warning("打包环境：未检测到全局 OpenClaw，且内嵌 OpenClaw 不可用")
-
-            # === 开发环境 ===
-            else:
-                if mode == "global":
-                    logger.info("检测到全局安装的 OpenClaw")
-                else:
-                    # 尝试自动安装 openclaw
-                    installed = await _auto_install_openclaw()
-                    if not installed:
-                        logger.warning("OpenClaw 不可用：未全局安装，自动安装也失败")
-                has_global_openclaw = shutil.which("openclaw") is not None
-
-            # === 统一：按运行时来源处理配置与 Gateway ===
-            openclaw_available = has_global_openclaw or has_embedded_openclaw
-            if openclaw_available:
-                use_embedded_openclaw = _should_use_embedded_openclaw(embedded_runtime)
-                # 兼容旧配置：内嵌 Gateway 场景下补齐 gateway.mode=local，避免启动被阻塞
-                if use_embedded_openclaw:
-                    ensure_gateway_local_mode(auto_create=False)
-                    # 兼容 OpenClaw 2026.2.17+：确保 hooks 允许外部 sessionKey
-                    ensure_hooks_allow_request_session_key(auto_create=False)
-                # 确保 hooks.path 显式设置，避免 Gateway 不注册 hooks 路由（405）
-                ensure_hooks_path(auto_create=False)
-
-                # 确保配置文件存在（全局/内嵌均需要）
+            if embedded_runtime.is_vendor_ready:
                 ensure_openclaw_config()
-                # 仅在内嵌 OpenClaw 场景下注入 Naga LLM 配置
-                if use_embedded_openclaw:
-                    inject_naga_llm_config()
-                    logger.info("已自动注入内嵌 OpenClaw 的 Naga LLM 配置")
+                ensure_gateway_port(auto_create=False)
+                ensure_gateway_local_mode(auto_create=False)
+                ensure_hooks_path(auto_create=False)
+                ensure_hooks_allow_request_session_key(auto_create=False)
 
-                if embedded_runtime.is_packaged:
-                    if use_embedded_openclaw:
-                        await _start_gateway_if_port_free(embedded_runtime)
-                    elif has_global_openclaw:
-                        logger.info("打包环境：使用全局 OpenClaw，跳过内嵌 Gateway 启动")
-                else:
-                    await _start_gateway_if_port_free(embedded_runtime)
+                await embedded_runtime.ensure_onboarded()
+                inject_naga_llm_config()
+
+                # ── Step 1.5: 清理端口范围内的残留进程 ──
+                try:
+                    from agentserver.openclaw.instance_manager import cleanup_port_range
+                    cleaned = cleanup_port_range()
+                    if cleaned:
+                        await asyncio.sleep(1)  # 等端口释放
+                except Exception as e:
+                    logger.warning(f"端口清理失败（可忽略）: {e}")
+
+                # ── Step 2: 启动 Gateway ──
+                await _start_gateway_if_port_free(embedded_runtime)
 
             # 检测最终状态并初始化客户端
             openclaw_status = detect_openclaw(check_connection=False)
 
             if openclaw_status.installed:
                 openclaw_config = ClientOpenClawConfig(
-                    gateway_url=openclaw_status.gateway_url or "http://127.0.0.1:18789",
+                    gateway_url=openclaw_status.gateway_url or config.openclaw.gateway_url,
                     gateway_token=openclaw_status.gateway_token,
                     hooks_token=openclaw_status.hooks_token,
                     hooks_path=getattr(openclaw_status, "hooks_path", "/hooks"),
-                    timeout=120,
+                    timeout=config.openclaw.timeout,
                 )
                 logger.info(f"OpenClaw 配置: {openclaw_config.gateway_url}")
                 logger.info(
@@ -280,17 +163,10 @@ async def lifespan(app: FastAPI):
                 )
             else:
                 openclaw_config = ClientOpenClawConfig(
-                    gateway_url=getattr(config.openclaw, "gateway_url", "http://127.0.0.1:18789")
-                    if hasattr(config, "openclaw")
-                    else "http://127.0.0.1:18789",
-                    gateway_token=getattr(config.openclaw, "gateway_token", None)
-                    if hasattr(config, "openclaw")
-                    else None,
-                    hooks_token=getattr(config.openclaw, "hooks_token", None) if hasattr(config, "openclaw") else None,
-                    hooks_path=getattr(config.openclaw, "hooks_path", "/hooks")
-                    if hasattr(config, "openclaw")
-                    else "/hooks",
-                    timeout=120,
+                    gateway_url=config.openclaw.gateway_url,
+                    gateway_token=config.openclaw.token,
+                    hooks_token=config.openclaw.token,
+                    timeout=config.openclaw.timeout,
                 )
                 logger.info(f"OpenClaw 未检测到安装，使用配置文件: {openclaw_config.gateway_url}")
 
@@ -300,6 +176,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"OpenClaw客户端初始化失败（可选功能）: {e}")
             Modules.openclaw_client = None
+
+        # 初始化干员多实例管理器（通讯录模式：只恢复列表，不启动进程）
+        try:
+            from agentserver.openclaw.instance_manager import InstanceManager
+            embedded_runtime = get_embedded_runtime()
+            Modules.instance_manager = InstanceManager(embedded_runtime, primary_client=Modules.openclaw_client)
+            logger.info("干员多实例管理器已初始化")
+            # 从 manifest 恢复通讯录（不启动进程）
+            try:
+                agents = Modules.instance_manager.restore_from_manifest()
+                logger.info(f"通讯录恢复完成，共 {len(agents)} 个干员")
+            except Exception as e:
+                logger.warning(f"恢复通讯录失败（可忽略）: {e}")
+        except Exception as e:
+            logger.warning(f"干员多实例管理器初始化失败（可选功能）: {e}")
+            Modules.instance_manager = None
 
         # 注册配置变更监听器
         add_config_listener(_on_config_changed)
@@ -370,6 +262,11 @@ async def lifespan(app: FastAPI):
         if hb_executor:
             await hb_executor.close()
 
+        # 停止所有干员子实例（主 Gateway 由下方 stop_gateway 处理）
+        if Modules.instance_manager:
+            await Modules.instance_manager.destroy_all()
+            logger.info("干员多实例已全部停止")
+
         # 停止 Gateway 进程（内嵌模式）
         embedded_runtime = get_embedded_runtime()
         if embedded_runtime.gateway_running:
@@ -382,12 +279,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NagaAgent Server", version="1.0.0", lifespan=lifespan)
 
+# 配置 CORS（前端直连 8001 需要）
+from fastapi.middleware.cors import CORSMiddleware
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 class Modules:
     """全局模块管理器"""
 
     openclaw_client = None
     dogtag_scheduler = None  # 军牌系统统一调度器
+    instance_manager = None  # 干员多实例管理器
 
 
 def _now_iso() -> str:
@@ -492,7 +401,7 @@ async def configure_openclaw(payload: Dict[str, Any]):
     """配置 OpenClaw 连接
 
     请求体:
-    - gateway_url: Gateway 地址 (默认 http://localhost:18789)
+    - gateway_url: Gateway 地址 (默认从 config.openclaw.gateway_url 读取)
     - token: 认证 token
     - timeout: 超时时间
     - default_model: 默认模型
@@ -502,10 +411,10 @@ async def configure_openclaw(payload: Dict[str, Any]):
         from agentserver.openclaw import OpenClawConfig as ClientOpenClawConfig
 
         openclaw_config = ClientOpenClawConfig(
-            gateway_url=payload.get("gateway_url", "http://localhost:18789"),
+            gateway_url=payload.get("gateway_url", config.openclaw.gateway_url),
             token=payload.get("token"),
             hooks_path=payload.get("hooks_path", "/hooks"),
-            timeout=payload.get("timeout", 120),
+            timeout=payload.get("timeout", config.openclaw.timeout),
             default_model=payload.get("default_model"),
             default_channel=payload.get("default_channel", "last"),
         )
@@ -604,6 +513,149 @@ async def openclaw_wake(payload: Dict[str, Any]):
     except Exception as e:
         logger.error(f"OpenClaw 触发事件失败: {e}")
         raise HTTPException(500, f"触发失败: {e}")
+
+
+# ============ 干员实例管理 ============
+
+
+@app.get("/openclaw/instances")
+async def list_instances():
+    """列出所有干员（通讯录），不管进程是否在跑"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    return {"instances": Modules.instance_manager.list_agents()}
+
+
+# ── 新通讯录 API ──
+
+@app.get("/openclaw/agents")
+async def list_agents():
+    """列出通讯录中所有干员（不管进程是否在跑）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    return {"agents": Modules.instance_manager.list_agents()}
+
+
+@app.post("/openclaw/agents")
+async def create_agent(payload: Dict[str, Any]):
+    """新建干员（写 manifest + 创建目录，不启动进程）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    name = payload.get("name")
+    character_template = (payload.get("character_template") or "").strip() or None
+    engine = (payload.get("engine") or "openclaw").strip() or "openclaw"
+    try:
+        inst = Modules.instance_manager.create_agent(
+            name,
+            character_template=character_template,
+            engine=engine,
+        )
+        return {
+            "id": inst.id,
+            "name": inst.name,
+            "running": inst.running,
+            "character_template": inst.character_template,
+            "engine": inst.engine,
+        }
+    except Exception as e:
+        logger.error(f"创建干员失败: {e}")
+        raise HTTPException(500, f"创建失败: {e}")
+
+
+@app.delete("/openclaw/agents/{agent_id}")
+async def delete_agent(agent_id: str, delete_data: bool = True):
+    """从通讯录删除干员 + 停止进程 + 可选删数据"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    try:
+        await Modules.instance_manager.destroy_agent_async(agent_id, delete_data=delete_data)
+        return {"success": True}
+    except Exception as e:
+        logger.error(f"删除干员失败: {e}")
+        raise HTTPException(500, f"删除失败: {e}")
+
+
+@app.put("/openclaw/agents/{agent_id}/name")
+async def rename_agent(agent_id: str, payload: Dict[str, Any]):
+    """重命名干员（通讯录 + 目录）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    new_name = (payload.get("name") or "").strip()
+    if not new_name:
+        raise HTTPException(400, "name 不能为空")
+    ok = Modules.instance_manager.rename_agent(agent_id, new_name)
+    if not ok:
+        raise HTTPException(404, "干员不存在")
+    return {"success": True, "name": new_name}
+
+
+@app.get("/openclaw/agents/{agent_id}/history")
+async def get_agent_history(agent_id: str, limit: int = 50):
+    """获取干员对话历史（自动 ensure_running 启动进程）"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+    inst = Modules.instance_manager.get_instance(agent_id)
+    if inst is None:
+        raise HTTPException(404, "干员不存在")
+    if inst.engine != "openclaw":
+        return {"messages": []}
+
+    # 按需启动进程（需要 Gateway 运行才能查询 session 历史）
+    if not inst.running or not inst.client:
+        try:
+            inst = await Modules.instance_manager.ensure_running(agent_id)
+        except Exception as e:
+            logger.warning(f"启动干员 [{agent_id}] 以获取历史失败: {e}")
+            return {"messages": []}
+
+    session_key = inst.client._default_session_key
+    if not session_key:
+        logger.warning(f"干员 [{inst.name}] session_key 为空，无法获取历史")
+        return {"messages": []}
+
+    try:
+        logger.info(f"获取干员 [{inst.name}] 历史: session_key={session_key}, limit={limit}")
+        history = await inst.client.get_sessions_history(
+            session_key=session_key,
+            limit=limit,
+            include_tools=True,
+        )
+        if history.get("success"):
+            messages = [
+                msg for msg in history.get("messages", [])
+                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant")
+            ]
+            logger.info(f"解析后有效消息: {len(messages)} 条")
+            return {"messages": messages}
+        logger.warning(f"获取干员 [{inst.name}] 历史失败: {history.get('error', 'unknown')}")
+        return {"messages": []}
+    except Exception as e:
+        logger.warning(f"获取干员 [{inst.name}] 历史失败: {e}", exc_info=True)
+        return {"messages": []}
+
+
+@app.post("/openclaw/agents/{agent_id}/stream")
+async def stream_to_agent(agent_id: str, payload: Dict[str, Any]):
+    """向干员发送消息（SSE 流式输出），内部自动 ensure_running"""
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    message = payload.get("message", "")
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    timeout = payload.get("timeout_seconds", 120)
+
+    async def event_stream():
+        async for chunk in Modules.instance_manager.send_message_stream(agent_id, message, timeout):
+            yield f"data: {_json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ============ 本地搜索代理（拦截 OpenClaw web_search） ============
@@ -1309,7 +1361,17 @@ async def travel_execute(payload: Dict[str, Any]):
     if not session_id:
         raise HTTPException(400, "session_id 不能为空")
 
-    if not Modules.openclaw_client:
+    from apiserver.travel_service import load_session
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "旅行 session 不存在")
+
+    if session.agent_id:
+        if not Modules.instance_manager:
+            raise HTTPException(503, "实例管理器未就绪")
+    elif not Modules.openclaw_client:
         raise HTTPException(503, "OpenClaw 客户端未就绪")
 
     asyncio.create_task(_run_travel_session(session_id))
@@ -1323,8 +1385,11 @@ async def _run_travel_session(session_id: str):
 
     from apiserver.travel_service import (
         load_session, save_session, TravelStatus,
-        build_travel_prompt, build_social_prompt,
-        parse_discoveries, parse_social,
+        analyze_history,
+        build_forum_post_payload,
+        build_social_prompt,
+        build_travel_prompt,
+        build_wrap_up_prompt,
     )
 
     try:
@@ -1333,17 +1398,32 @@ async def _run_travel_session(session_id: str):
         logger.error(f"旅行 session 不存在: {session_id}")
         return
 
-    session_key = f"travel:{session_id[:12]}"
+    travel_client = Modules.openclaw_client
+    if session.agent_id:
+        if not Modules.instance_manager:
+            raise RuntimeError("实例管理器未就绪，无法使用指定干员执行探索")
+        inst = await Modules.instance_manager.ensure_running(session.agent_id)
+        if not inst.client:
+            raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+        session.agent_name = inst.name
+        travel_client = inst.client
+    elif travel_client is None:
+        raise RuntimeError("OpenClaw 客户端未就绪")
+
+    session_key = f"travel:{session.agent_id or 'main'}:{session_id[:8]}"
     session.openclaw_session_key = session_key
     session.status = TravelStatus.RUNNING
     session.started_at = datetime.now().isoformat()
     save_session(session)
 
-    logger.info(f"[旅行] 开始旅行 session: {session_id}, key={session_key}")
+    logger.info(
+        f"[旅行] 开始旅行 session: {session_id}, key={session_key}, "
+        f"agent={session.agent_name or session.agent_id or 'default'}"
+    )
 
     try:
         # 发送探索指令
-        await Modules.openclaw_client.send_message(
+        await travel_client.send_message(
             message=build_travel_prompt(session),
             session_key=session_key,
             name="NagaTravel",
@@ -1352,7 +1432,7 @@ async def _run_travel_session(session_id: str):
 
         # 如果想社交，额外发送社交指令
         if session.want_friends:
-            await Modules.openclaw_client.send_message(
+            await travel_client.send_message(
                 message=build_social_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
@@ -1365,7 +1445,7 @@ async def _run_travel_session(session_id: str):
         seen_social_keys: set = set()
 
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
             # 检查时间限制
             elapsed = (datetime.now() - start_time).total_seconds() / 60
@@ -1385,38 +1465,88 @@ async def _run_travel_session(session_id: str):
                 logger.info(f"[旅行] session 已被取消: {session_id}")
                 return
 
+            previous_discovery_count = len(session.discoveries)
+
             # 轮询 OpenClaw 获取新消息
             try:
-                history = await Modules.openclaw_client.get_sessions_history(
-                    session_key=session_key, limit=50, include_tools=False,
+                history = await travel_client.get_sessions_history(
+                    session_key=session_key, limit=80, include_tools=True,
                 )
                 messages = history if isinstance(history, list) else history.get("messages", [])
 
-                # 解析发现和社交互动
-                new_discoveries = parse_discoveries(messages)
-                for d in new_discoveries:
-                    if d.url not in seen_discovery_urls:
-                        seen_discovery_urls.add(d.url)
-                        session.discoveries.append(d)
+                # 从工具结果和阶段性文本中提炼发现、社交、预算
+                analysis = analyze_history(messages)
+                session.discoveries = analysis.discoveries
+                session.social_interactions = analysis.social_interactions
+                session.credits_used = analysis.credits_used
+                session.tool_stats = analysis.tool_stats
+                session.unique_sources = len(
+                    {
+                        d.site_name
+                        or (
+                            d.url.split("/")[2]
+                            if isinstance(d.url, str) and d.url.count("/") >= 2
+                            else d.url
+                        )
+                        for d in session.discoveries
+                        if d.url
+                    }
+                )
 
-                new_social = parse_social(messages)
-                for s in new_social:
+                for d in session.discoveries:
+                    seen_discovery_urls.add(d.url)
+
+                for s in session.social_interactions:
                     key = f"{s.type}:{s.post_id}:{s.content_preview[:30]}"
                     if key not in seen_social_keys:
                         seen_social_keys.add(key)
-                        session.social_interactions.append(s)
+                if len(session.discoveries) > previous_discovery_count:
+                    session.idle_polls = 0
+                else:
+                    session.idle_polls += 1
 
             except Exception as e:
                 logger.warning(f"[旅行] 轮询历史失败: {e}")
 
             session.elapsed_minutes = round(elapsed, 1)
+
+            # 预算接近上限或长时间无增量时，要求 OpenClaw 开始收束
+            wrap_up_threshold = int(session.credit_limit * 0.9)
+            hard_stop_threshold = max(session.credit_limit, int(session.credit_limit * 1.1))
+            should_request_wrap_up = (
+                (session.credits_used >= wrap_up_threshold and len(session.discoveries) > 0)
+                or (session.idle_polls >= 2 and len(session.discoveries) > 0)
+            )
+            if should_request_wrap_up and not session.wrap_up_sent:
+                try:
+                    await travel_client.send_message(
+                        message=build_wrap_up_prompt(session),
+                        session_key=session_key,
+                        name="NagaTravel",
+                        timeout_seconds=0,
+                    )
+                    session.wrap_up_sent = True
+                    logger.info(
+                        f"[旅行] 已发送收束指令: {session_id}, credits={session.credits_used}, idle={session.idle_polls}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[旅行] 发送收束指令失败: {e}")
+
+            if session.credits_used >= hard_stop_threshold:
+                logger.info(f"[旅行] 估算积分到达限制 {session.credits_used}/{session.credit_limit}")
+                break
+
+            if session.idle_polls >= 4 and len(session.discoveries) > 0:
+                logger.info(f"[旅行] 长时间无新增发现，准备结束: idle_polls={session.idle_polls}")
+                break
+
             save_session(session)
 
         # 发送收尾指令
         logger.info(f"[旅行] 发送收尾指令: {session_id}")
         try:
-            await Modules.openclaw_client.send_message(
-                message="旅行时间到了，请总结你的发现。列出你访问过的最有趣的内容，以及任何社交互动。",
+            await travel_client.send_message(
+                message=build_wrap_up_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
                 timeout_seconds=300,
@@ -1424,7 +1554,7 @@ async def _run_travel_session(session_id: str):
 
             # 等待并获取最终回复
             await asyncio.sleep(30)
-            history = await Modules.openclaw_client.get_sessions_history(
+            history = await travel_client.get_sessions_history(
                 session_key=session_key, limit=5, include_tools=False,
             )
             messages = history if isinstance(history, list) else history.get("messages", [])
@@ -1446,19 +1576,65 @@ async def _run_travel_session(session_id: str):
             f"[旅行] 完成: {session_id}, 发现={len(session.discoveries)}, 社交={len(session.social_interactions)}"
         )
 
-        # QQ 通知
-        try:
-            summary_text = session.summary or "旅行已完成"
-            await Modules.openclaw_client.send_message(
-                message=f"🌍 旅行报告\n{summary_text}\n\n发现了 {len(session.discoveries)} 个有趣内容。",
-                channel="qq",
-                deliver=True,
-                session_key=session_key,
-                name="NagaTravel",
-                timeout_seconds=30,
-            )
-        except Exception as e:
-            logger.warning(f"[旅行] QQ 通知发送失败: {e}")
+        # 自动产出论坛精华版
+        if session.post_to_forum and session.summary:
+            try:
+                from apiserver.routes.forum import create_forum_post_internal
+
+                forum_payload = build_forum_post_payload(session)
+                session.forum_digest = forum_payload.get("content")
+                post_result = await create_forum_post_internal(forum_payload, timeout_seconds=20.0)
+                if isinstance(post_result, dict):
+                    session.forum_post_id = str(
+                        post_result.get("id")
+                        or post_result.get("postId")
+                        or post_result.get("post", {}).get("id")
+                        or ""
+                    ) or None
+                session.forum_post_status = "posted"
+                save_session(session)
+                logger.info(f"[旅行] 已自动发布论坛精华帖: session={session_id}, post_id={session.forum_post_id}")
+            except Exception as e:
+                session.forum_post_status = f"failed:{e}"
+                save_session(session)
+                logger.warning(f"[旅行] 自动发布论坛精华帖失败: {e}")
+
+        # 完整版报告回传给用户/通道
+        if session.deliver_full_report:
+            try:
+                if not session.deliver_channel and not session.deliver_to:
+                    session.full_report_delivery_status = "stored_in_app"
+                    save_session(session)
+                else:
+                    summary_text = session.summary or "旅行已完成"
+                    lines = [
+                        "🌍 探索完整报告",
+                        summary_text,
+                        "",
+                        f"发现条目：{len(session.discoveries)}",
+                        f"唯一来源：{session.unique_sources}",
+                        f"工具统计：{session.tool_stats or {}}",
+                    ]
+                    if session.forum_post_id:
+                        lines.extend(["", f"论坛精华帖已发布，post_id={session.forum_post_id}"])
+                    deliver_kwargs = {
+                        "message": "\n".join(lines),
+                        "deliver": True,
+                        "session_key": session_key,
+                        "name": "NagaTravel",
+                        "timeout_seconds": 30,
+                    }
+                    if session.deliver_channel:
+                        deliver_kwargs["channel"] = session.deliver_channel
+                    if session.deliver_to:
+                        deliver_kwargs["to"] = session.deliver_to
+                    await travel_client.send_message(**deliver_kwargs)
+                    session.full_report_delivery_status = "delivered"
+                save_session(session)
+            except Exception as e:
+                session.full_report_delivery_status = f"failed:{e}"
+                save_session(session)
+                logger.warning(f"[旅行] 完整报告回传失败: {e}")
 
     except Exception as e:
         logger.error(f"[旅行] 异常: {e}", exc_info=True)

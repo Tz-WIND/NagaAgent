@@ -19,6 +19,10 @@ defineEmits<{ stop: [] }>()
     旅行进行中
   </div>
 
+  <div v-if="session.goalPrompt" class="text-white/35 text-[11px] leading-relaxed bg-white/2 rounded-lg p-3">
+    探索方向：{{ session.goalPrompt }}
+  </div>
+
   <!-- 时间进度 -->
   <div class="flex flex-col gap-1">
     <div class="flex justify-between text-xs text-white/50">

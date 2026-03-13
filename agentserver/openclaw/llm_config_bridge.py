@@ -16,7 +16,7 @@ import shutil
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("openclaw.bridge")
 
 
 def _get_openclaw_paths():
@@ -49,12 +49,14 @@ def _migrate_legacy_config_if_needed() -> None:
 
 
 def _apply_hooks_compat_patch(config_data: Dict[str, Any]) -> bool:
-    """兼容 OpenClaw 新版 hooks 约束，确保允许外部请求携带 sessionKey。"""
-    hooks = config_data.setdefault("hooks", {})
-    if hooks.get("allowRequestSessionKey") is True:
-        return False
-    hooks["allowRequestSessionKey"] = True
-    return True
+    """清理 hooks 中 OpenClaw 不认识的字段，防止配置校验失败。"""
+    hooks = config_data.get("hooks", {})
+    changed = False
+    # allowRequestSessionKey 在新版 OpenClaw 中是 unrecognized key，需删除
+    if "allowRequestSessionKey" in hooks:
+        del hooks["allowRequestSessionKey"]
+        changed = True
+    return changed
 
 
 def _apply_hooks_path_patch(config_data: Dict[str, Any]) -> bool:
@@ -76,6 +78,28 @@ def _apply_gateway_mode_compat_patch(config_data: Dict[str, Any]) -> bool:
     if isinstance(mode, str) and mode.strip():
         return False
     gateway["mode"] = "local"
+    return True
+
+
+NAGA_GATEWAY_PORT = 20789
+
+
+def _get_gateway_port() -> int:
+    """从 system.config 读取端口（单一来源），import 失败则回退常量。"""
+    try:
+        from system.config import config as _cfg
+        return _cfg.openclaw.gateway_port
+    except Exception:
+        return NAGA_GATEWAY_PORT
+
+
+def _apply_gateway_port_patch(config_data: Dict[str, Any]) -> bool:
+    """确保 gateway.port 与 NagaAgent 配置一致。"""
+    port = _get_gateway_port()
+    gateway = config_data.setdefault("gateway", {})
+    if gateway.get("port") == port:
+        return False
+    gateway["port"] = port
     return True
 
 
@@ -187,6 +211,37 @@ def ensure_hooks_path(auto_create: bool = False) -> bool:
         return False
 
 
+def ensure_gateway_port(auto_create: bool = False) -> bool:
+    """确保 openclaw.json 的 gateway.port 与 NagaAgent 配置一致。"""
+    if not OPENCLAW_CONFIG_FILE.exists():
+        if not auto_create:
+            return False
+        if not ensure_openclaw_config():
+            return False
+
+    try:
+        config_data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.error(f"读取 openclaw.json 失败，无法应用 gateway.port 补丁: {e}")
+        return False
+
+    changed = _apply_gateway_port_patch(config_data)
+    if not changed:
+        return True
+
+    port = _get_gateway_port()
+    try:
+        OPENCLAW_CONFIG_FILE.write_text(
+            json.dumps(config_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        logger.info(f"已将 gateway.port 更新为 {port}")
+        return True
+    except Exception as e:
+        logger.error(f"写入 openclaw.json 失败，gateway.port 补丁未生效: {e}")
+        return False
+
+
 def ensure_openclaw_config() -> bool:
     """
     确保 openclaw.json 存在，不存在则自动生成最小可用配置。
@@ -209,7 +264,7 @@ def ensure_openclaw_config() -> bool:
         minimal_config = {
             "gateway": {
                 "mode": "local",
-                "port": 18789,
+                "port": _get_gateway_port(),
                 "bind": "loopback",
                 "auth": {"mode": "token", "token": gateway_token},
             },
@@ -217,7 +272,6 @@ def ensure_openclaw_config() -> bool:
                 "enabled": True,
                 "path": "/hooks",
                 "token": hooks_token,
-                "allowRequestSessionKey": True,
             },
             "tools": {"allow": ["*"]},
             "agents": {
@@ -242,36 +296,59 @@ def ensure_openclaw_config() -> bool:
 
 def inject_naga_llm_config() -> bool:
     """
-    将 Naga 的 LLM 配置注入 openclaw.json。
+    将 Naga 的 LLM + 搜索 配置注入 openclaw.json。
 
-    读取 Naga 的 api_key / base_url / model，写入 openclaw.json 的
-    models.providers 和 agents.defaults.model.primary。
+    - LLM: api_key / base_url / model → models.providers + agents.defaults.model
+    - 搜索: online_search.search_api_key → env.BRAVE_API_KEY
 
     Returns:
         是否注入成功
     """
     if not OPENCLAW_CONFIG_FILE.exists():
-        logger.warning("openclaw.json 不存在，无法注入 LLM 配置")
+        logger.warning("openclaw.json 不存在，无法注入配置")
         return False
 
     try:
-        from system.config import config as naga_config
+        from system.config import config as naga_config, get_data_dir
 
         config_data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
         _apply_hooks_compat_patch(config_data)
         _apply_gateway_mode_compat_patch(config_data)
+        _apply_gateway_port_patch(config_data)
 
-        # 构建 naga provider
-        provider_name = "naga"
+        # ── LLM Provider ──
+        # 使用本地 API Server 的 OpenAI 兼容代理端点（统一计费）
+        from system.config import get_server_port
+        api_port = get_server_port("api_server")
+        base_url = f"http://127.0.0.1:{api_port}/v1"
+        api_key = ""  # 代理端点内部处理认证
+        logger.info(f"OpenClaw 使用 Naga 代理端点: {base_url}/chat/completions")
+
+        # 根据模型 ID 判断 provider 类型（让 OpenClaw 识别特殊模型）
         model_id = naga_config.api.model
+        model_id_lower = model_id.lower()
+        if "kimi" in model_id_lower or "moonshot" in model_id_lower:
+            provider_name = "moonshot"
+        elif "deepseek" in model_id_lower:
+            provider_name = "deepseek"
+        elif "glm" in model_id_lower:
+            provider_name = "zhipu"
+        elif "qwen" in model_id_lower:
+            provider_name = "alibaba"
+        elif "minimax" in model_id_lower:
+            provider_name = "minimax"
+        else:
+            provider_name = "naga"
         full_model_id = f"{provider_name}/{model_id}"
 
         models_config = config_data.setdefault("models", {})
         models_config["mode"] = "merge"
-        providers = models_config.setdefault("providers", {})
+        # 清空旧 providers 避免遗留无效配置导致校验失败
+        providers = {}
+        models_config["providers"] = providers
         providers[provider_name] = {
-            "baseUrl": naga_config.api.base_url.rstrip("/"),
-            "apiKey": naga_config.api.api_key,
+            "baseUrl": base_url,
+            "apiKey": "naga-proxy-placeholder",
             "auth": "api-key",
             "api": "openai-completions",
             "models": [
@@ -293,13 +370,92 @@ def inject_naga_llm_config() -> bool:
         model = defaults.setdefault("model", {})
         model["primary"] = full_model_id
 
+        # ── 搜索 API Key（Brave Search）──
+        # 同步到 env.BRAVE_API_KEY + tools.web.search.apiKey 两处
+        # 注：OpenClaw 不支持自定义 Brave base URL，但主路径搜索走 NagaAgent 本地执行
+        search_key = getattr(naga_config.online_search, "search_api_key", "")
+        env_section = config_data.setdefault("env", {})
+        channels_section = config_data.setdefault("channels", {})
+        tools_section = config_data.setdefault("tools", {})
+        tools_section["loopDetection"] = {
+            "enabled": True,
+            "historySize": 20,
+            "warningThreshold": 4,
+            "criticalThreshold": 6,
+            "globalCircuitBreakerThreshold": 8,
+            "detectors": {
+                "genericRepeat": True,
+                "knownPollNoProgress": True,
+                "pingPong": True,
+            },
+        }
+        web_section = tools_section.setdefault("web", {})
+        search_section = web_section.setdefault("search", {})
+        search_section["enabled"] = True
+        search_section["provider"] = "brave"
+        # OpenClaw 只检查“有没有 key”，实际请求会被 BRAVE_SEARCH_BASE_URL 重定向到本地统一搜索代理。
+        search_section["apiKey"] = "naga-search-proxy"
+        env_section["BRAVE_API_KEY"] = "naga-search-proxy"
+
+        # ── 公有技能目录共享给 OpenClaw ──
+        shared_public_skills_dir = get_data_dir() / "skills" / "public"
+        shared_public_skills_dir.mkdir(parents=True, exist_ok=True)
+        skills_section = config_data.setdefault("skills", {})
+        skills_load_section = skills_section.setdefault("load", {})
+        extra_dirs = skills_load_section.setdefault("extraDirs", [])
+        shared_public_path = str(shared_public_skills_dir)
+        if shared_public_path not in extra_dirs:
+            extra_dirs.append(shared_public_path)
+
+        # ── 飞书通道注入（可选）──
+        feishu_cfg = getattr(naga_config.openclaw, "feishu", None)
+        if feishu_cfg and getattr(feishu_cfg, "enabled", False):
+            app_id = getattr(feishu_cfg, "app_id", "").strip()
+            app_secret = getattr(feishu_cfg, "app_secret", "").strip()
+            if app_id and app_secret:
+                feishu_channel = {
+                    "enabled": True,
+                    "appId": app_id,
+                    "appSecret": app_secret,
+                    "dmPolicy": getattr(feishu_cfg, "dm_policy", "open"),
+                    "groupPolicy": getattr(feishu_cfg, "group_policy", "allowlist"),
+                }
+                allow_from = getattr(feishu_cfg, "allow_from", None) or []
+                if allow_from:
+                    feishu_channel["allowFrom"] = [str(item).strip() for item in allow_from if str(item).strip()]
+                doc_owner_open_id = getattr(feishu_cfg, "doc_owner_open_id", None)
+                if doc_owner_open_id:
+                    feishu_channel["docOwnerOpenId"] = str(doc_owner_open_id).strip()
+                channels_section["feishu"] = feishu_channel
+            else:
+                logger.warning("OpenClaw 飞书已启用，但缺少 app_id/app_secret，跳过通道注入")
+
         OPENCLAW_CONFIG_FILE.write_text(
             json.dumps(config_data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        logger.info(f"已注入 Naga LLM 配置: provider={provider_name}, model={full_model_id}")
+
+        # 创建 auth-profiles.json 让 OpenClaw 能找到 API key
+        auth_profiles_path = OPENCLAW_CONFIG_DIR / "agents" / "main" / "agent" / "auth-profiles.json"
+        auth_profiles_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_profiles = {
+            f"{provider_name}:default": {
+                "provider": provider_name,
+                "mode": "api_key",
+                "apiKey": "naga-proxy-placeholder"
+            }
+        }
+        auth_profiles_path.write_text(
+            json.dumps(auth_profiles, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        logger.info(
+            f"已注入 Naga 配置: model={full_model_id}, search_key={'已配置' if search_key else '未配置'}, "
+            f"feishu={'已启用' if (feishu_cfg and getattr(feishu_cfg, 'enabled', False)) else '未启用'}"
+        )
         return True
 
     except Exception as e:
-        logger.error(f"注入 LLM 配置失败: {e}")
+        logger.error(f"注入配置失败: {e}")
         return False

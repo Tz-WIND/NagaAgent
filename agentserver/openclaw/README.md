@@ -152,3 +152,39 @@ async def wake_agent():
 1. 确保 OpenClaw Gateway 已启动并运行在 `localhost:18789`
 2. 如果启用了认证，需要配置正确的 token
 3. OpenClaw 的 Cron 任务通过 Gateway 内部管理，不通过 HTTP API
+
+## 渠道接入建议
+
+### 飞书
+
+飞书应优先走 OpenClaw 原生渠道能力，而不是在 Naga 外层模拟消息通道。
+
+- Naga 侧配置入口：`config.openclaw.feishu`
+- 启动时会由 [`llm_config_bridge.py`](/Users/qr/Documents/NagaAgentNew/NagaSkill/agentserver/openclaw/llm_config_bridge.py) 注入到 OpenClaw 的 `channels.feishu`
+- 建议在从飞书触发探索/长任务时，同时记录：
+  - `deliver_channel = "feishu"`
+  - `deliver_to = <open_id 或 chat_id>`
+
+这样探索完成后的完整版报告可以直接按飞书会话回传。
+
+### QQ
+
+QQ 暂不建议作为 OpenClaw 原生渠道接入。
+
+- vendored OpenClaw 没有明显的一等 QQ channel 实现
+- 更稳的做法是：QQ 入站和出站继续由 Naga 自己负责
+- Naga 只把任务执行委托给 OpenClaw，结果再由 Naga 发回 QQ
+
+### 探索任务回传字段
+
+旅行/探索 session 现在支持这些字段：
+
+- `post_to_forum`
+- `deliver_full_report`
+- `deliver_channel`
+- `deliver_to`
+
+其中：
+
+- `post_to_forum=true` 时，探索完成后会尝试自动发布论坛精华帖
+- `deliver_full_report=true` 时，探索完成后会尝试将完整版报告按 `deliver_channel / deliver_to` 回传

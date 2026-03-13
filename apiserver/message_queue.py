@@ -30,7 +30,7 @@ class MessageQueue:
     def __init__(self):
         self._queue: List[QueuedMessage] = []
         self._lock = threading.Lock()
-        self._conversation_active: bool = False
+        self._active_conversation_count: int = 0
         self._ephemeral_screen: Optional[QueuedMessage] = None
 
     # ------------------------------------------------------------------
@@ -71,11 +71,20 @@ class MessageQueue:
     # ------------------------------------------------------------------
 
     def set_conversation_active(self, active: bool):
-        self._conversation_active = active
-        logger.info(f"[MessageQueue] conversation_active = {active}")
+        with self._lock:
+            if active:
+                self._active_conversation_count += 1
+            else:
+                self._active_conversation_count = max(0, self._active_conversation_count - 1)
+            logger.info(
+                "[MessageQueue] conversation_active = %s (count=%s)",
+                self._active_conversation_count > 0,
+                self._active_conversation_count,
+            )
 
     def is_conversation_active(self) -> bool:
-        return self._conversation_active
+        with self._lock:
+            return self._active_conversation_count > 0
 
     # ------------------------------------------------------------------
     # 临时屏幕消息槽

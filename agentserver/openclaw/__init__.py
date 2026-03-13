@@ -45,6 +45,12 @@ from .embedded_runtime import (
     get_embedded_runtime
 )
 
+from .instance_manager import (
+    InstanceManager,
+    AgentInstance,
+    cleanup_port_range,
+)
+
 from .llm_config_bridge import (
     ensure_openclaw_config,
     inject_naga_llm_config
@@ -80,6 +86,10 @@ __all__ = [
     # Embedded Runtime
     "EmbeddedRuntime",
     "get_embedded_runtime",
+    # Instance Manager
+    "InstanceManager",
+    "AgentInstance",
+    "cleanup_port_range",
     # LLM Config Bridge
     "ensure_openclaw_config",
     "inject_naga_llm_config",

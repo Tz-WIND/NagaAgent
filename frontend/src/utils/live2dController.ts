@@ -576,9 +576,15 @@ export async function setEmotion(emotion: EmotionCategory) {
   }
 }
 
-/** 清除情绪表情，平滑回归中性 */
+/** 清除情绪表情，平滑回归 normal 表情（而非归零，避免看起来像哭脸） */
 export function clearEmotion() {
-  currentEmotionName = null
+  if (expressionDefs.has('normal')) {
+    currentEmotionName = 'normal'
+    _emotionFadeStartTime = performance.now()
+  }
+  else {
+    currentEmotionName = null
+  }
 }
 
 // 情绪动作名 → EmotionCategory 映射

@@ -4,7 +4,7 @@
 将 MCP manifests + OpenClaw 工具表 + Live2D + naga_control 转换为 OpenAI function calling 格式。
 
 命名约定：{agentType}__{service_name}__{tool_name}
-  - openclaw_tool__web_search
+  - tool__web_search
   - mcp__weather_time__today_weather
   - openclaw__agent
   - live2d__action
@@ -375,7 +375,7 @@ def _build_openclaw_tool_schemas() -> List[Dict[str, Any]]:
         schemas.append({
             "type": "function",
             "function": {
-                "name": f"openclaw_tool__{tool['name']}",
+                "name": f"tool__{tool['name']}",
                 "description": tool["description"],
                 "parameters": tool["parameters"],
             },

@@ -40,6 +40,17 @@ const captchaQuestion = ref('')
 const captchaAnswer = ref('')
 const captchaLoading = ref(false)
 
+function isImeComposing(event: KeyboardEvent) {
+  return event.isComposing || (event as any).keyCode === 229
+}
+
+function handleSubmitByEnter(event: KeyboardEvent, action: () => void) {
+  if (isImeComposing(event))
+    return
+  event.preventDefault()
+  action()
+}
+
 function resetForm() {
   // username 持久化在 localStorage，不清空
   email.value = ''
@@ -231,14 +242,14 @@ const stopWatch = watch(backendConnected, (connected) => {
               v-model="username"
               placeholder="用户名"
               class="login-input"
-              @keyup.enter="handleLogin"
+              @keydown.enter="handleSubmitByEnter($event, handleLogin)"
             />
             <InputText
               v-model="password"
               type="password"
               placeholder="密码"
               class="login-input"
-              @keyup.enter="handleLogin"
+              @keydown.enter="handleSubmitByEnter($event, handleLogin)"
             />
             <!-- 验证码 -->
             <div class="captcha-row">
@@ -247,7 +258,7 @@ const stopWatch = watch(backendConnected, (connected) => {
                 v-model="captchaAnswer"
                 placeholder="答案"
                 class="captcha-input"
-                @keyup.enter="handleLogin"
+                @keydown.enter="handleSubmitByEnter($event, handleLogin)"
               />
               <span class="captcha-refresh" title="换一题" @click="fetchCaptcha">&#x21bb;</span>
             </div>
@@ -291,18 +302,21 @@ const stopWatch = watch(backendConnected, (connected) => {
               v-model="username"
               placeholder="用户名"
               class="login-input"
+              @keydown.enter="handleSubmitByEnter($event, handleRegister)"
             />
             <InputText
               v-model="email"
               type="email"
               placeholder="邮箱"
               class="login-input"
+              @keydown.enter="handleSubmitByEnter($event, handleRegister)"
             />
             <InputText
               v-model="password"
               type="password"
               placeholder="密码"
               class="login-input"
+              @keydown.enter="handleSubmitByEnter($event, handleRegister)"
             />
             <!-- 验证码 -->
             <div class="captcha-row">
@@ -311,7 +325,7 @@ const stopWatch = watch(backendConnected, (connected) => {
                 v-model="captchaAnswer"
                 placeholder="答案"
                 class="captcha-input"
-                @keyup.enter="sendCode"
+                @keydown.enter="handleSubmitByEnter($event, sendCode)"
               />
               <span class="captcha-refresh" title="换一题" @click="fetchCaptcha">&#x21bb;</span>
             </div>
@@ -320,7 +334,7 @@ const stopWatch = watch(backendConnected, (connected) => {
                 v-model="verificationCode"
                 placeholder="邮箱验证码"
                 class="login-input flex-1"
-                @keyup.enter="handleRegister"
+                @keydown.enter="handleSubmitByEnter($event, handleRegister)"
               />
               <Button
                 :label="codeSent ? `${countdown}s` : '发送验证码'"

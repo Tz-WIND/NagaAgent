@@ -221,4 +221,11 @@ tmp/
 .cursorrules
 
 # MAA 游戏脚本代理 MCP（用户私有配置，不提交）
-mcpserver/agent_auto_game/
+mcpserver/agent_auto_game/openclaw-runtime/
+
+# 内嵌运行时（Node.js + OpenClaw + uv，首次运行自动安装）
+/runtime/
+
+# vendor/openclaw 编译产物和依赖（源码跟踪，产物不跟踪）
+vendor/openclaw/dist/
+vendor/openclaw/node_modules/

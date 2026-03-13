@@ -1,343 +1,310 @@
-# comprehensive_app_scanner.py # 综合应用扫描器（注册表+快捷方式）
-import platform  # 平台检测 #
-import os  # 操作系统 #
-import glob  # 文件匹配 #
-import asyncio  # 异步 #
-from typing import List, Dict, Optional  # 类型 #
-import json  # JSON #
+# comprehensive_app_scanner.py — 综合应用扫描器（注册表 + 快捷方式 + macOS）
+import asyncio
+import glob
+import json
+import logging
+import os
+import platform
+import subprocess
+from typing import Dict, List, Optional
+
+logger = logging.getLogger("AppScanner")
 
 # 平台特定导入
-if platform.system() == 'Windows':
-    import winreg  # Windows注册表 #
+if platform.system() == "Windows":
+    try:
+        import winreg
+    except ImportError:
+        winreg = None
 else:
-    # 在非Windows平台上，winreg模块不可用
     winreg = None
 
+
+def _resolve_path(raw: str) -> Optional[str]:
+    """清理并解析注册表中的路径：去引号、展开环境变量、验证存在性"""
+    if not raw:
+        return None
+    # 去掉首尾引号
+    p = raw.strip().strip('"').strip("'")
+    # 展开环境变量（如 %ProgramFiles%）
+    p = os.path.expandvars(p)
+    p = os.path.expanduser(p)
+    if p and os.path.exists(p):
+        return p
+    return None
+
+
 class ComprehensiveAppScanner:
-    """综合应用扫描器：结合注册表扫描和快捷方式扫描 #"""
-    
+    """综合应用扫描器：Windows 注册表 + 快捷方式 + macOS Applications"""
+
     def __init__(self):
-        self.apps_cache = []  # 应用缓存 #
-        self._scan_completed = False  # 扫描完成标志 #
-        self._scan_lock = asyncio.Lock()  # 扫描锁 #
-    
+        self.apps_cache: List[Dict] = []
+        self._scan_completed = False
+        self._scan_lock = asyncio.Lock()
+
     async def ensure_scan_completed(self):
-        """确保扫描已完成，如果未完成则异步执行扫描 #"""
         if not self._scan_completed:
             async with self._scan_lock:
                 if not self._scan_completed:
                     await self._scan_all_sources_async()
                     self._scan_completed = True
-    
-    async def _scan_all_sources_async(self):
-        """异步扫描所有应用来源 #"""
-        apps = []
-        
-        # 1. 异步扫描注册表 #
-        registry_apps = await self._scan_registry_async()
-        apps.extend(registry_apps)
-        
-        # 2. 异步扫描快捷方式 #
-        shortcut_apps = await self._scan_shortcuts_async()
-        apps.extend(shortcut_apps)
-        
-        # 3. 去重并合并，优先选择快捷方式 #
-        unique_apps = self._merge_and_deduplicate(apps)
-        
-        self.apps_cache = unique_apps
-        print(f"✅ 综合扫描完成，共找到 {len(self.apps_cache)} 个应用")
-    
-    async def _scan_registry_async(self) -> List[Dict]:
-        """异步扫描Windows注册表获取应用信息 #"""
-        # 在线程池中执行同步的注册表扫描 #
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._scan_registry_sync)
-    
-    def _scan_registry_sync(self) -> List[Dict]:
-        """同步扫描Windows注册表获取应用信息 #"""
-        apps = []
 
-        # 非Windows平台直接返回空列表
-        if platform.system() != 'Windows' or winreg is None:
-            print(f"注册表扫描功能仅在Windows平台上可用，当前平台: {platform.system()}")
+    async def _scan_all_sources_async(self):
+        apps: List[Dict] = []
+        system = platform.system()
+
+        if system == "Windows":
+            registry_apps = await asyncio.get_running_loop().run_in_executor(
+                None, self._scan_registry_sync
+            )
+            apps.extend(registry_apps)
+
+            shortcut_apps = await asyncio.get_running_loop().run_in_executor(
+                None, self._scan_shortcuts_sync
+            )
+            apps.extend(shortcut_apps)
+
+        elif system == "Darwin":
+            mac_apps = await asyncio.get_running_loop().run_in_executor(
+                None, self._scan_macos_sync
+            )
+            apps.extend(mac_apps)
+
+        unique_apps = self._merge_and_deduplicate(apps)
+        self.apps_cache = unique_apps
+        logger.info(f"综合扫描完成，共找到 {len(self.apps_cache)} 个应用")
+
+    # ─── Windows: 注册表扫描 ───────────────────────────────
+
+    def _scan_registry_sync(self) -> List[Dict]:
+        apps: List[Dict] = []
+        if winreg is None:
             return apps
 
-        # 扫描HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths
+        # 1. App Paths（chrome.exe, msedge.exe 等）
         try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths") as key:
+            with winreg.OpenKey(
+                winreg.HKEY_LOCAL_MACHINE,
+                r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths",
+            ) as key:
                 for i in range(winreg.QueryInfoKey(key)[0]):
                     try:
                         app_name = winreg.EnumKey(key, i)
-                        if app_name.endswith('.exe'):
-                            app_key_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{app_name}"
-                            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, app_key_path) as app_key:
+                        if not app_name.lower().endswith(".exe"):
+                            continue
+                        subkey_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{app_name}"
+                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey_path) as app_key:
+                            raw_path, _ = winreg.QueryValueEx(app_key, "")
+                            exe_path = _resolve_path(raw_path)
+                            if not exe_path:
+                                continue
+                            display_name = app_name[:-4]
+                            try:
+                                friendly, _ = winreg.QueryValueEx(app_key, "FriendlyAppName")
+                                if friendly:
+                                    display_name = friendly
+                            except OSError:
+                                pass
+                            apps.append({
+                                "name": display_name,
+                                "path": exe_path,
+                                "source": "registry",
+                            })
+                    except OSError:
+                        continue
+        except OSError as e:
+            logger.debug(f"扫描 App Paths 失败: {e}")
+
+        # 2. Uninstall 注册表（HKLM + HKCU）
+        for hive, hive_name in [
+            (winreg.HKEY_LOCAL_MACHINE, "HKLM"),
+            (winreg.HKEY_CURRENT_USER, "HKCU"),
+        ]:
+            try:
+                with winreg.OpenKey(
+                    hive, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+                ) as key:
+                    for i in range(winreg.QueryInfoKey(key)[0]):
+                        try:
+                            subkey_name = winreg.EnumKey(key, i)
+                            with winreg.OpenKey(key, subkey_name) as subkey:
                                 try:
-                                    # 获取默认值（通常是可执行文件路径）
-                                    exe_path, _ = winreg.QueryValueEx(app_key, "")
-                                    if exe_path and os.path.exists(exe_path):
-                                        # 获取应用名称（去掉.exe后缀）
-                                        display_name = app_name[:-4] if app_name.endswith('.exe') else app_name
-
-                                        # 尝试从注册表获取更友好的显示名称
-                                        try:
-                                            friendly_name, _ = winreg.QueryValueEx(app_key, "FriendlyAppName")
-                                            if friendly_name:
-                                                display_name = friendly_name
-                                        except:
-                                            pass
-
-                                        apps.append({
-                                            "name": display_name,
-                                            "path": exe_path,
-                                            "type": "registry",
-                                            "source": "registry",
-                                            "description": f"从注册表扫描到的应用: {display_name}"
-                                        })
-                                except:
-                                    pass
-                    except:
-                        continue
-        except Exception as e:
-            print(f"扫描App Paths注册表失败: {e}")
-
-        # 扫描HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall
-        try:
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") as key:
-                for i in range(winreg.QueryInfoKey(key)[0]):
-                    try:
-                        subkey_name = winreg.EnumKey(key, i)
-                        subkey_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{subkey_name}"
-                        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, subkey_path) as subkey:
-                            try:
-                                # 获取显示名称
-                                display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
-                                # 获取安装位置
-                                install_location, _ = winreg.QueryValueEx(subkey, "InstallLocation")
-
-                                if display_name and install_location:
-                                    # 查找可执行文件
-                                    exe_files = self._find_exe_files(install_location)
-                                    for exe_path in exe_files:
-                                        apps.append({
-                                            "name": display_name,
-                                            "path": exe_path,
-                                            "type": "uninstall_registry",
-                                            "source": "registry",
-                                            "description": f"从卸载注册表扫描到的应用: {display_name}"
-                                        })
-                            except:
-                                pass
-                    except:
-                        continue
-        except Exception as e:
-            print(f"扫描Uninstall注册表失败: {e}")
-
-        # 扫描HKEY_CURRENT_USER\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall
-        try:
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall") as key:
-                for i in range(winreg.QueryInfoKey(key)[0]):
-                    try:
-                        subkey_name = winreg.EnumKey(key, i)
-                        subkey_path = f"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{subkey_name}"
-                        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, subkey_path) as subkey:
-                            try:
-                                # 获取显示名称
-                                display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
-                                # 获取安装位置
-                                install_location, _ = winreg.QueryValueEx(subkey, "InstallLocation")
-
-                                if display_name and install_location:
-                                    # 查找可执行文件
-                                    exe_files = self._find_exe_files(install_location)
-                                    for exe_path in exe_files:
-                                        apps.append({
-                                            "name": display_name,
-                                            "path": exe_path,
-                                            "type": "user_uninstall_registry",
-                                            "source": "registry",
-                                            "description": f"从用户卸载注册表扫描到的应用: {display_name}"
-                                        })
-                            except:
-                                pass
-                    except:
-                        continue
-        except Exception as e:
-            print(f"扫描用户Uninstall注册表失败: {e}")
+                                    display_name, _ = winreg.QueryValueEx(subkey, "DisplayName")
+                                except OSError:
+                                    continue
+                                # 优先用 DisplayIcon（通常是 exe 路径）
+                                exe_path = None
+                                for val_name in ("DisplayIcon", "InstallLocation"):
+                                    try:
+                                        raw, _ = winreg.QueryValueEx(subkey, val_name)
+                                        resolved = _resolve_path(raw.split(",")[0] if "," in raw else raw)
+                                        if resolved and resolved.lower().endswith(".exe"):
+                                            exe_path = resolved
+                                            break
+                                        elif resolved and os.path.isdir(resolved):
+                                            # InstallLocation 是目录，找 exe
+                                            for f in os.listdir(resolved):
+                                                if f.lower().endswith(".exe"):
+                                                    candidate = os.path.join(resolved, f)
+                                                    if os.path.isfile(candidate):
+                                                        exe_path = candidate
+                                                        break
+                                            if exe_path:
+                                                break
+                                    except OSError:
+                                        continue
+                                if display_name and exe_path:
+                                    apps.append({
+                                        "name": display_name,
+                                        "path": exe_path,
+                                        "source": "registry",
+                                    })
+                        except OSError:
+                            continue
+            except OSError as e:
+                logger.debug(f"扫描 {hive_name} Uninstall 失败: {e}")
 
         return apps
-    
-    async def _scan_shortcuts_async(self) -> List[Dict]:
-        """异步扫描快捷方式获取应用信息 #"""
-        # 在线程池中执行同步的快捷方式扫描 #
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._scan_shortcuts_sync)
-    
+
+    # ─── Windows: 快捷方式扫描 ─────────────────────────────
+
     def _scan_shortcuts_sync(self) -> List[Dict]:
-        """同步扫描快捷方式获取应用信息 #"""
-        apps = []
-        
-        # 扫描开始菜单快捷方式
+        apps: List[Dict] = []
         start_menu_paths = [
-            os.path.expanduser(r"~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs"),
-            os.path.expanduser(r"~\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"),
+            os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs"),
             r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs",
-            os.path.expanduser(r"~\Desktop")
+            os.path.expanduser("~/Desktop"),
         ]
-        
-        for start_menu_path in start_menu_paths:
-            if os.path.exists(start_menu_path):
-                lnk_files = self._find_lnk_files(start_menu_path)
-                for lnk_path in lnk_files:
-                    try:
-                        app_info = self._parse_shortcut(lnk_path)
-                        if app_info:
-                            apps.append(app_info)
-                    except Exception as e:
-                        print(f"解析快捷方式失败 {lnk_path}: {e}")
-        
-        return apps
-    
-    def _find_lnk_files(self, directory: str) -> List[str]:
-        """在指定目录中查找.lnk文件 #"""
-        lnk_files = []
-        try:
-            # 递归查找所有.lnk文件
-            pattern = os.path.join(directory, "**", "*.lnk")
-            lnk_files = glob.glob(pattern, recursive=True)
-        except Exception as e:
-            print(f"查找快捷方式失败 {directory}: {e}")
-        
-        return lnk_files
-    
-    def _parse_shortcut(self, lnk_path: str) -> Optional[Dict]:
-        """解析快捷方式文件 #"""
+
+        # 尝试用 win32com 解析 .lnk
         try:
             import win32com.client
-            
-            # 使用WScript.Shell解析快捷方式
             shell = win32com.client.Dispatch("WScript.Shell")
-            shortcut = shell.CreateShortCut(lnk_path)
-            target_path = shortcut.TargetPath
-            
-            if target_path and os.path.exists(target_path) and target_path.lower().endswith('.exe'):
-                # 获取应用名称（从快捷方式文件名）
-                app_name = os.path.splitext(os.path.basename(lnk_path))[0]
-                
-                # 尝试获取更友好的显示名称
-                try:
-                    description = shortcut.Description
-                    if description:
-                        app_name = description
-                except:
-                    pass
-                
-                return {
-                    "name": app_name,
-                    "path": target_path,
-                    "type": "shortcut",
-                    "source": "shortcut",
-                    "shortcut_path": lnk_path,
-                    "description": f"从快捷方式扫描到的应用: {app_name}"
-                }
-        except ImportError:
-            print("win32com模块未安装，跳过快捷方式解析")
-        except Exception as e:
-            print(f"解析快捷方式失败 {lnk_path}: {e}")
-        
-        return None
-    
-    def _find_exe_files(self, directory: str) -> List[str]:
-        """在指定目录中查找可执行文件 #"""
-        exe_files = []
-        if not os.path.exists(directory):
-            return exe_files
-        
+            use_com = True
+        except Exception:
+            shell = None
+            use_com = False
+            logger.debug("win32com 不可用，快捷方式用 PowerShell 兜底")
+
+        for base in start_menu_paths:
+            if not os.path.isdir(base):
+                continue
+            for lnk_path in glob.glob(os.path.join(base, "**", "*.lnk"), recursive=True):
+                info = None
+                if use_com:
+                    info = self._parse_lnk_com(shell, lnk_path)
+                if info is None:
+                    info = self._parse_lnk_powershell(lnk_path)
+                if info:
+                    apps.append(info)
+        return apps
+
+    @staticmethod
+    def _parse_lnk_com(shell, lnk_path: str) -> Optional[Dict]:
         try:
-            for root, dirs, files in os.walk(directory):
-                for file in files:
-                    if file.lower().endswith('.exe'):
-                        exe_path = os.path.join(root, file)
-                        if os.path.exists(exe_path):
-                            exe_files.append(exe_path)
-        except:
+            shortcut = shell.CreateShortCut(lnk_path)
+            target = shortcut.TargetPath
+            if target and os.path.isfile(target) and target.lower().endswith(".exe"):
+                name = os.path.splitext(os.path.basename(lnk_path))[0]
+                return {"name": name, "path": target, "source": "shortcut", "shortcut_path": lnk_path}
+        except Exception:
             pass
-        
-        return exe_files
-    
+        return None
+
+    @staticmethod
+    def _parse_lnk_powershell(lnk_path: str) -> Optional[Dict]:
+        """win32com 不可用时用 PowerShell 解析 .lnk"""
+        try:
+            cmd = (
+                f'(New-Object -ComObject WScript.Shell)'
+                f'.CreateShortcut("{lnk_path}").TargetPath'
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", cmd],
+                capture_output=True, text=True, timeout=5,
+            )
+            target = result.stdout.strip()
+            if target and os.path.isfile(target) and target.lower().endswith(".exe"):
+                name = os.path.splitext(os.path.basename(lnk_path))[0]
+                return {"name": name, "path": target, "source": "shortcut", "shortcut_path": lnk_path}
+        except Exception:
+            pass
+        return None
+
+    # ─── macOS: /Applications 扫描 ─────────────────────────
+
+    def _scan_macos_sync(self) -> List[Dict]:
+        apps: List[Dict] = []
+        app_dirs = ["/Applications", os.path.expanduser("~/Applications")]
+        for app_dir in app_dirs:
+            if not os.path.isdir(app_dir):
+                continue
+            for entry in os.listdir(app_dir):
+                if not entry.endswith(".app"):
+                    continue
+                app_path = os.path.join(app_dir, entry)
+                name = entry[:-4]  # 去 .app 后缀
+                # macOS 用 open 命令启动
+                apps.append({
+                    "name": name,
+                    "path": app_path,
+                    "source": "macos_app",
+                })
+        return apps
+
+    # ─── 公共方法 ──────────────────────────────────────────
+
     def _merge_and_deduplicate(self, apps: List[Dict]) -> List[Dict]:
-        """合并和去重应用列表，优先选择快捷方式 #"""
-        unique_apps = {}
-        
+        unique: Dict[str, Dict] = {}
         for app in apps:
-            name = app["name"]
-            
-            # 如果应用不存在，直接添加
-            if name not in unique_apps:
-                unique_apps[name] = app
-            else:
-                # 如果已存在，优先选择快捷方式
-                existing_app = unique_apps[name]
-                if app["source"] == "shortcut" and existing_app["source"] == "registry":
-                    unique_apps[name] = app
-        
-        # 转换为列表并排序
-        result = list(unique_apps.values())
+            key = app["name"].lower()
+            if key not in unique:
+                unique[key] = app
+            elif app["source"] == "shortcut" and unique[key]["source"] != "shortcut":
+                unique[key] = app
+        result = list(unique.values())
         result.sort(key=lambda x: x["name"].lower())
-        
         return result
-    
+
     async def get_apps(self) -> List[Dict]:
-        """异步获取扫描到的应用列表 #"""
         await self.ensure_scan_completed()
         return self.apps_cache.copy()
-    
+
     async def find_app_by_name(self, name: str) -> Optional[Dict]:
-        """异步根据名称查找应用，支持智能匹配 #"""
         await self.ensure_scan_completed()
         name_lower = name.lower()
-        
         # 精确匹配
         for app in self.apps_cache:
             if app["name"].lower() == name_lower:
                 return app
-        
-        # 模糊匹配（包含关系）
+        # 模糊匹配
         for app in self.apps_cache:
             if name_lower in app["name"].lower() or app["name"].lower() in name_lower:
                 return app
-        
         return None
-    
+
     async def refresh_apps(self):
-        """异步刷新应用列表 #"""
         async with self._scan_lock:
             self._scan_completed = False
             await self._scan_all_sources_async()
             self._scan_completed = True
-    
-    async def get_app_info_for_llm(self) -> Dict:
-        """异步获取供LLM选择的应用信息格式 #"""
-        await self.ensure_scan_completed()
-        
-        # 直接返回应用名称列表，简化格式
-        app_names = [app["name"] for app in self.apps_cache]
-        
-        return {
-            "total_count": len(app_names),
-            "apps": app_names
-        }
 
-# 全局实例 #
-_comprehensive_scanner = None
+    async def get_app_info_for_llm(self) -> Dict:
+        await self.ensure_scan_completed()
+        app_names = [app["name"] for app in self.apps_cache]
+        return {"total_count": len(app_names), "apps": app_names}
+
+
+_comprehensive_scanner: Optional[ComprehensiveAppScanner] = None
+
 
 def get_comprehensive_scanner() -> ComprehensiveAppScanner:
-    """获取全局综合扫描器实例 #"""
     global _comprehensive_scanner
     if _comprehensive_scanner is None:
         _comprehensive_scanner = ComprehensiveAppScanner()
     return _comprehensive_scanner
 
+
 async def refresh_comprehensive_apps():
-    """异步刷新综合应用列表 #"""
     scanner = get_comprehensive_scanner()
     await scanner.refresh_apps()

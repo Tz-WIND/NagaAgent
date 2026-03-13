@@ -1,14 +1,31 @@
 <script setup lang="ts">
-import { Button, InputText, Textarea } from 'primevue'
+import { Button, InputText, Select, Textarea } from 'primevue'
 import { computed, ref, watch } from 'vue'
 
-defineProps<{ visible: boolean }>()
-const emit = defineEmits<{ confirm: [data: { name: string, content: string }], cancel: [] }>()
+interface AgentOption {
+  id: string
+  name: string
+  engine?: string
+}
+
+const props = defineProps<{
+  visible: boolean
+  agents?: AgentOption[]
+  initialScope?: 'cache' | 'public' | 'private'
+}>()
+const emit = defineEmits<{ confirm: [data: { name: string, content: string, scope: 'cache' | 'public' | 'private', agentId?: string }], cancel: [] }>()
 
 const name = ref('')
 const textContent = ref('')
 const selectedFile = ref<File | null>(null)
+const scope = ref<'cache' | 'public' | 'private'>('public')
+const selectedAgentId = ref('')
 const errorMsg = ref('')
+const scopeOptions = [
+  { label: '本地缓存', value: 'cache', description: '用于本地缓存和待整理技能，不直接视为共用能力。' },
+  { label: '公有技能', value: 'public', description: '娜迦与多个干员可共用。' },
+  { label: '私有技能', value: 'private', description: '只绑定单一干员，通常强依赖该干员的工具。' },
+] as const
 
 const mode = computed<'text' | 'file' | null>(() => {
   if (textContent.value.trim())
@@ -23,6 +40,17 @@ const canSubmit = computed(() => name.value.trim() && mode.value)
 watch(() => textContent.value, (v) => {
   if (v.trim())
     selectedFile.value = null
+})
+
+watch(() => props.visible, (visible) => {
+  if (visible) {
+    name.value = ''
+    textContent.value = ''
+    selectedFile.value = null
+    scope.value = props.initialScope ?? 'public'
+    selectedAgentId.value = ''
+    errorMsg.value = ''
+  }
 })
 
 function onFileSelect(e: Event) {
@@ -50,7 +78,16 @@ function handleConfirm() {
     errorMsg.value = '请输入技能内容或选择文件'
     return
   }
-  emit('confirm', { name: name.value.trim(), content: textContent.value })
+  if (scope.value === 'private' && !selectedAgentId.value) {
+    errorMsg.value = '私有技能必须选择一个干员'
+    return
+  }
+  emit('confirm', {
+    name: name.value.trim(),
+    content: textContent.value,
+    scope: scope.value,
+    agentId: scope.value === 'private' ? selectedAgentId.value : undefined,
+  })
   errorMsg.value = ''
 }
 
@@ -58,6 +95,7 @@ function handleCancel() {
   name.value = ''
   textContent.value = ''
   selectedFile.value = null
+  selectedAgentId.value = ''
   errorMsg.value = ''
   emit('cancel')
 }
@@ -80,6 +118,37 @@ function handleCancel() {
             placeholder="技能名称（将作为目录名）"
             class="dialog-input"
           />
+
+          <label class="dialog-label">
+            技能范围 <span class="required">*</span>
+          </label>
+          <Select
+            v-model="scope"
+            :options="scopeOptions"
+            option-label="label"
+            option-value="value"
+            class="dialog-input"
+          />
+          <div class="dialog-hint-block">
+            {{ scopeOptions.find(item => item.value === scope)?.description }}
+          </div>
+
+          <template v-if="scope === 'private'">
+            <label class="dialog-label">
+              绑定干员 <span class="required">*</span>
+            </label>
+            <Select
+              v-model="selectedAgentId"
+              :options="agents || []"
+              option-label="name"
+              option-value="id"
+              class="dialog-input"
+              placeholder="选择一个干员"
+            />
+            <div class="dialog-hint-block">
+              私有技能会写入该干员在 <code>~/.naga</code> 下的专属目录。
+            </div>
+          </template>
 
           <!-- 内容区：框起来 -->
           <div class="content-section">
@@ -193,6 +262,12 @@ function handleCancel() {
   font-size: 0.65rem;
   color: rgba(255, 255, 255, 0.3);
   margin-left: 0.25rem;
+}
+
+.dialog-hint-block {
+  margin-top: -0.2rem;
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.36);
 }
 
 .required {

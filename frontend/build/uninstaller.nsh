@@ -2,12 +2,12 @@
 ; 在卸载时检查是否是自动安装的 OpenClaw，如果是则清理相关文件
 
 !macro customUnInstall
-  ; 检查 openclaw-runtime/.openclaw_install_state 文件
-  IfFileExists "$INSTDIR\resources\openclaw-runtime\.openclaw_install_state" 0 SkipOpenClawCleanup
+  ; 检查 runtime/.openclaw_install_state 文件
+  IfFileExists "$INSTDIR\resources\runtime\.openclaw_install_state" 0 SkipOpenClawCleanup
 
   ; 读取状态文件内容
   ClearErrors
-  FileOpen $0 "$INSTDIR\resources\openclaw-runtime\.openclaw_install_state" r
+  FileOpen $0 "$INSTDIR\resources\runtime\.openclaw_install_state" r
   IfErrors SkipOpenClawCleanup
 
   ; 逐行读取文件，查找 auto_installed 标记
@@ -35,13 +35,13 @@ ReadInstallStateDone:
   DetailPrint "检测到自动安装的 OpenClaw，正在清理..."
 
   ; 0. 先尝试停止内嵌 OpenClaw Gateway
-  IfFileExists "$INSTDIR\resources\openclaw-runtime\openclaw\node_modules\.bin\openclaw.cmd" 0 SkipGatewayStop
+  IfFileExists "$INSTDIR\resources\runtime\openclaw\node_modules\.bin\openclaw.cmd" 0 SkipGatewayStop
   DetailPrint "正在停止内嵌 OpenClaw Gateway..."
 
   ; 最多重试 3 次
   StrCpy $5 "3"
 StopGatewayRetry:
-  ExecWait '"$SYSDIR\cmd.exe" /C ""$INSTDIR\resources\openclaw-runtime\openclaw\node_modules\.bin\openclaw.cmd" gateway stop"' $4
+  ExecWait '"$SYSDIR\cmd.exe" /C ""$INSTDIR\resources\runtime\openclaw\node_modules\.bin\openclaw.cmd" gateway stop"' $4
   StrCmp $4 "0" GatewayStopOk ContinueGatewayRetry
 
 ContinueGatewayRetry:
@@ -63,13 +63,13 @@ GatewayStopFailed:
 
   ; 1. 删除 openclaw 目录
 SkipGatewayStop:
-  RMDir /r "$INSTDIR\resources\openclaw-runtime\openclaw"
+  RMDir /r "$INSTDIR\resources\runtime\openclaw"
 
   ; 2. 删除用户配置目录 ~/.openclaw
   RMDir /r "$PROFILE\.openclaw"
 
   ; 3. 删除状态文件
-  Delete "$INSTDIR\resources\openclaw-runtime\.openclaw_install_state"
+  Delete "$INSTDIR\resources\runtime\.openclaw_install_state"
 
   DetailPrint "OpenClaw 清理完成"
 

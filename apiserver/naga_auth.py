@@ -136,6 +136,14 @@ async def login(username: str, password: str, captcha_id: str = "", captcha_answ
         _user_info = {"username": username}
 
     # 不返回 refresh_token 给前端
+    # 登录成功后同步 LLM 配置到 OpenClaw（切换到 NagaBusiness 网关）
+    try:
+        from agentserver.openclaw.llm_config_bridge import inject_naga_llm_config
+        inject_naga_llm_config()
+        logger.info("登录后已同步 OpenClaw LLM 配置")
+    except Exception as e:
+        logger.debug(f"登录后同步 OpenClaw 配置跳过: {e}")
+
     return {
         "success": True,
         "user": _user_info,
@@ -193,6 +201,13 @@ async def refresh(refresh_token_override: Optional[str] = None) -> dict:
         if new_rt:
             _refresh_token = new_rt
             _save_refresh_token()
+
+        # refresh 成功后同步 OpenClaw LLM 配置
+        try:
+            from agentserver.openclaw.llm_config_bridge import inject_naga_llm_config
+            inject_naga_llm_config()
+        except Exception:
+            pass
 
         return {"access_token": _access_token}
 

@@ -7,7 +7,7 @@
 **正确示例**（工具会真实执行）：
 我来帮你搜索一下。
 ```tool
-{"agentType": "openclaw_tool", "tool_name": "web_search", "args": {"query": "上海迪士尼攻略"}}
+{"agentType": "tool", "tool_name": "web_search", "args": {"query": "上海迪士尼攻略"}}
 ```
 
 **错误示例**（工具不会执行，这是在编造）：
@@ -17,11 +17,11 @@
 
 如果你需要使用工具，必须输出 ```tool``` 代码块。如果没有合适的工具，直接说"我目前无法完成这个任务"。
 
-### OpenClaw 工具（联网搜索、网页浏览、代码执行等）
+### 工具（联网搜索、网页浏览、代码执行、文件操作等）
 
 **直接调用（优先使用，速度快）**— 已知工具名和参数时直接调用：
 ```tool
-{"agentType": "openclaw_tool", "tool_name": "工具名", "args": {"参数名": "参数值"}}
+{"agentType": "tool", "tool_name": "工具名", "args": {"参数名": "参数值"}}
 ```
 
 可用工具:
@@ -56,12 +56,12 @@
 
 示例 — 搜索：
 ```tool
-{"agentType": "openclaw_tool", "tool_name": "web_search", "args": {"query": "2026年春节是几号"}}
+{"agentType": "tool", "tool_name": "web_search", "args": {"query": "2026年春节是几号"}}
 ```
 
 示例 — 获取网页内容：
 ```tool
-{"agentType": "openclaw_tool", "tool_name": "web_fetch", "args": {"url": "https://example.com"}}
+{"agentType": "tool", "tool_name": "web_fetch", "args": {"url": "https://example.com"}}
 ```
 
 **Agent 模式（复杂多步任务使用）**— 需要多步推理、多工具协作时：
@@ -92,7 +92,7 @@
 - 工具执行完成后，结果会以 [工具结果] 格式注入对话，你将看到结果并继续回复
 - 如果不需要工具，正常回复即可，不要输出 ```tool``` 代码块
 - 闲聊、情感交流、简单问答不需要工具调用
-- **联网搜索、查资料、获取网页内容优先使用 openclaw_tool 直接调用**
+- **联网搜索、查资料、获取网页内容优先使用 tool 直接调用**
 - 当用户要求你「看屏幕」「截屏」「截图」等请求时，调用 `service_name=screen_vision` 的 `look_screen` 工具
 - 当用户询问游戏攻略、配队、角色强度等问题时，**必须**调用 `service_name=game_guide` 的 `ask_guide` 工具（`auto_screenshot`: 需要看画面时传true）
 

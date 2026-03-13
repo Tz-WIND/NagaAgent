@@ -2,9 +2,32 @@ import type { TravelSession } from '@/travel/types'
 import type { Config } from '@/utils/config'
 import type { StreamChunk } from '@/utils/encoding'
 import { aiter } from 'iterator-helper'
+import axios from 'axios'
+import camelcaseKeys from 'camelcase-keys'
 import snakecaseKeys from 'snakecase-keys'
 import { decodeStreamChunk, readerToMessageStream } from '@/utils/encoding'
 import { ACCESS_TOKEN, ApiClient } from './index'
+
+// Agent Server (port 8001) 的 axios 实例
+const agentAxios = (() => {
+  const instance = axios.create({
+    baseURL: 'http://localhost:8001',
+    timeout: 180 * 1000, // 干员实例操作可能较慢
+    headers: { 'Content-Type': 'application/json' },
+    transformResponse: [(data: string) => {
+      try { return camelcaseKeys(JSON.parse(data), { deep: true }) }
+      catch { return data }
+    }],
+  })
+  instance.interceptors.request.use((config) => {
+    if (ACCESS_TOKEN.value) {
+      config.headers.Authorization = `Bearer ${ACCESS_TOKEN.value}`
+    }
+    return config
+  })
+  instance.interceptors.response.use(response => response.data)
+  return instance
+})()
 
 export interface OpenClawStatus {
   found: boolean
@@ -12,6 +35,39 @@ export interface OpenClawStatus {
   skills_dir: string
   config_path: string
   skills_error?: string
+}
+
+export interface CharacterTemplate {
+  name: string
+  aiName?: string
+  bio?: string
+  voice?: string
+  promptFile?: string
+  portrait?: string
+  live2dModel?: string
+  live2dModelUrl?: string
+  active?: boolean
+}
+
+export type AgentEngine = 'openclaw' | 'naga-core'
+
+export interface SkillCatalogItem {
+  name: string
+  description: string
+  version?: string
+  tags?: string[]
+  scope: 'cache' | 'public' | 'private'
+  source: string
+  path: string
+  ownerAgentId?: string
+  ownerAgentName?: string
+  ownerEngine?: AgentEngine
+}
+
+export interface SkillCatalogSection {
+  skills: SkillCatalogItem[]
+  baseDir?: string
+  baseDirs?: string[]
 }
 
 export interface MarketItem {
@@ -119,8 +175,17 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get('/system/character')
   }
 
+  listCharacterTemplates(): Promise<{
+    status: 'success'
+    activeCharacter?: string
+    characters: CharacterTemplate[]
+  }> {
+    return this.instance.get('/system/characters')
+  }
+
   chat(message: string, options?: {
     sessionId?: string
+    agentId?: string
     useSelfGame?: boolean
     skipIntentAnalysis?: boolean
   }): Promise<{
@@ -133,6 +198,7 @@ export class CoreApiClient extends ApiClient {
 
   async chatStream(message: string, options?: {
     sessionId?: string
+    agentId?: string
     returnAudio?: boolean
     disableTTS?: boolean
     skipIntentAnalysis?: boolean
@@ -356,6 +422,32 @@ export class CoreApiClient extends ApiClient {
     return this.instance.post('/skills/import', { name, content })
   }
 
+  getSkillCatalog(): Promise<{
+    status: 'success'
+    catalog: {
+      remoteHub: { status: string, message: string }
+      localCache: SkillCatalogSection
+      publicSkills: SkillCatalogSection
+      privateSkills: SkillCatalogSection
+    }
+  }> {
+    return this.instance.get('/skills/catalog')
+  }
+
+  importScopedSkill(params: {
+    name: string
+    content: string
+    scope: 'cache' | 'public' | 'private'
+    agentId?: string
+  }): Promise<{
+    status: string
+    message: string
+    scope: string
+    path: string
+  }> {
+    return this.instance.post('/skills/import', params)
+  }
+
   getContextStats(days?: number) {
     return this.instance.get(`/logs/context/statistics?days=${days}`)
   }
@@ -458,10 +550,16 @@ export class CoreApiClient extends ApiClient {
   // ── 旅行 ──
 
   startTravel(params: {
+    agentId?: string
     timeLimitMinutes?: number
     creditLimit?: number
     wantFriends?: boolean
     friendDescription?: string
+    goalPrompt?: string
+    postToForum?: boolean
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
   }): Promise<{ status: 'success', sessionId: string }> {
     return this.instance.post('/travel/start', params)
   }
@@ -483,6 +581,109 @@ export class CoreApiClient extends ApiClient {
     sessions: TravelSession[]
   }> {
     return this.instance.get('/travel/history')
+  }
+
+  // ── 干员通讯录 API（Agent Server 8001） ──
+
+  /** 列出通讯录中所有干员 */
+  listAgents(): Promise<{ agents: Array<{ id: string, name: string, running: boolean, createdAt?: number, created_at?: number, characterTemplate?: string, engine?: AgentEngine }> }> {
+    return agentAxios.get('/openclaw/agents')
+  }
+
+  /** 新建干员（写 manifest + 创建目录，不启动进程） */
+  createAgent(name?: string, characterTemplate?: string, engine: AgentEngine = 'openclaw'): Promise<{ id: string, name: string, running: boolean, characterTemplate?: string, engine?: AgentEngine }> {
+    return agentAxios.post('/openclaw/agents', { name, characterTemplate, engine })
+  }
+
+  /** 从通讯录删除干员 */
+  deleteAgent(id: string, deleteData = true): Promise<{ success: boolean }> {
+    return agentAxios.delete(`/openclaw/agents/${id}?delete_data=${deleteData}`)
+  }
+
+  /** 重命名干员 */
+  renameAgent(id: string, name: string): Promise<{ success: boolean, name: string }> {
+    return agentAxios.put(`/openclaw/agents/${id}/name`, { name })
+  }
+
+  /** 获取干员对话历史 */
+  getAgentHistory(id: string, limit = 50): Promise<{ messages: Array<{ role: string, content: string, toolEvents?: any[] }> }> {
+    return agentAxios.get(`/openclaw/agents/${id}/history`, { params: { limit } })
+  }
+
+  /** 流式发送消息到干员（SSE，内部自动 ensure_running） */
+  async *streamToAgent(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{
+    type: string
+    text: string
+    name?: string
+    toolCallId?: string
+    args?: any
+    result?: any
+    isError?: boolean
+  }> {
+    const resp = await fetch(`http://localhost:8001/openclaw/agents/${id}/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify({ message, timeout_seconds: timeoutSeconds }),
+    })
+
+    if (!resp.ok || !resp.body)
+      throw new Error(`Stream failed: ${resp.status}`)
+
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done)
+        break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            yield JSON.parse(line.slice(6))
+          }
+          catch { /* skip malformed */ }
+        }
+      }
+    }
+  }
+
+  // ── 旧干员实例 API（兼容，逐步废弃） ──
+
+  createAgentInstance(name?: string): Promise<{ id: string, name: string, port: number, primary: boolean }> {
+    return agentAxios.post('/openclaw/instances', { name })
+  }
+
+  destroyAgentInstance(id: string): Promise<{ success: boolean }> {
+    return agentAxios.delete(`/openclaw/instances/${id}`)
+  }
+
+  listAgentInstances(): Promise<{ instances: Array<{ id: string, name: string, port: number, primary: boolean }> }> {
+    return agentAxios.get('/openclaw/instances')
+  }
+
+  sendToAgentInstance(id: string, message: string, timeoutSeconds = 120): Promise<{ success: boolean, reply?: string, replies?: string[], error?: string, retry?: boolean }> {
+    return agentAxios.post(`/openclaw/instances/${id}/send`, {
+      message,
+      timeout_seconds: timeoutSeconds,
+    })
+  }
+
+  async *streamToAgentInstance(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{ type: string, text: string }> {
+    yield* this.streamToAgent(id, message, timeoutSeconds)
+  }
+
+  renameAgentInstance(id: string, name: string): Promise<{ success: boolean, name: string }> {
+    return agentAxios.put(`/openclaw/agents/${id}/name`, { name })
+  }
+
+  getAgentInstanceHistory(id: string, limit = 50): Promise<{ messages: Array<{ role: string, content: string }> }> {
+    return this.getAgentHistory(id, limit)
   }
 }
 

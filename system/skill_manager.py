@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
+from system.config import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -89,45 +90,54 @@ class SkillManager:
     # YAML 前置内容正则表达式
     FRONTMATTER_PATTERN = re.compile(r'^---\s*\n(.*?)\n---\s*\n', re.DOTALL)
 
-    def __init__(self, skills_dir: Optional[Path] = None):
+    def __init__(self, skills_dir: Optional[Path] = None, skills_dirs: Optional[List[Path]] = None):
         """
         初始化 Skill 管理器
 
         Args:
             skills_dir: skills 目录路径，默认为项目根目录下的 skills/
         """
-        if skills_dir is None:
-            # 默认路径：项目根目录/skills
-            project_root = Path(__file__).parent.parent
-            skills_dir = project_root / "skills"
+        if skills_dirs is None:
+            resolved_dirs: List[Path] = []
+            if skills_dir is not None:
+                resolved_dirs.append(Path(skills_dir))
+            else:
+                project_root = Path(__file__).parent.parent
+                resolved_dirs.extend([
+                    project_root / "skills",
+                    get_data_dir() / "skills" / "public",
+                ])
+            skills_dirs = resolved_dirs
 
-        self.skills_dir = Path(skills_dir)
+        self.skills_dirs = [Path(path) for path in skills_dirs]
         self._skills: Dict[str, Skill] = {}
         self._metadata_cache: Dict[str, SkillMetadata] = {}
 
         # 确保目录存在
-        self.skills_dir.mkdir(parents=True, exist_ok=True)
+        for directory in self.skills_dirs:
+            directory.mkdir(parents=True, exist_ok=True)
 
         # 初始加载所有技能元数据
         self._scan_skills()
 
     def _scan_skills(self):
         """扫描 skills 目录，加载所有技能元数据（Level 1）"""
-        if not self.skills_dir.exists():
-            logger.warning(f"Skills 目录不存在: {self.skills_dir}")
-            return
+        for skills_dir in self.skills_dirs:
+            if not skills_dir.exists():
+                logger.warning(f"Skills 目录不存在: {skills_dir}")
+                continue
 
-        for skill_path in self.skills_dir.iterdir():
-            if skill_path.is_dir() and not skill_path.name.startswith('.'):
-                skill_file = skill_path / "SKILL.md"
-                if skill_file.exists():
-                    try:
-                        metadata = self._parse_metadata(skill_file, skill_path)
-                        if metadata:
-                            self._metadata_cache[metadata.name] = metadata
-                            logger.info(f"加载技能元数据: {metadata.name}")
-                    except Exception as e:
-                        logger.error(f"解析技能 {skill_path.name} 失败: {e}")
+            for skill_path in skills_dir.iterdir():
+                if skill_path.is_dir() and not skill_path.name.startswith('.'):
+                    skill_file = skill_path / "SKILL.md"
+                    if skill_file.exists():
+                        try:
+                            metadata = self._parse_metadata(skill_file, skill_path)
+                            if metadata:
+                                self._metadata_cache[metadata.name] = metadata
+                                logger.info(f"加载技能元数据: {metadata.name} ({skills_dir})")
+                        except Exception as e:
+                            logger.error(f"解析技能 {skill_path.name} 失败: {e}")
 
     def _parse_metadata(self, skill_file: Path, skill_path: Path) -> Optional[SkillMetadata]:
         """

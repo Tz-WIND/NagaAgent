@@ -71,10 +71,10 @@ class LLMService:
         model = model or cfg.api.model
         base_url = (base_url or cfg.api.base_url or "").lower()
 
-        # NagaModel 网关：模型名称统一为 default，由服务端路由
+        # NagaModel 网关：使用用户选择的模型名，由服务端路由
         # 需要 openai/ 前缀让 LiteLLM 识别为 OpenAI 兼容提供商
         if naga_auth.is_authenticated():
-            return "openai/default"
+            return f"openai/{model or 'default'}"
 
         # 根据 base_url 判断提供商，添加正确的前缀
         if "deepseek" in base_url:

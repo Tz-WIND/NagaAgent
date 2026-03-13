@@ -193,6 +193,52 @@ async def get_active_character():
         raise HTTPException(status_code=500, detail=f"获取角色信息失败: {str(e)}")
 
 
+@router.get("/system/characters")
+async def list_characters():
+    """列出所有角色模板"""
+    try:
+        from system.config import CHARACTERS_DIR, load_character
+        from urllib.parse import quote
+
+        active_name = get_config().system.active_character
+        port = get_config().api_server.port
+        characters = []
+        if CHARACTERS_DIR.exists():
+            for char_dir in sorted(CHARACTERS_DIR.iterdir()):
+                if not char_dir.is_dir() or char_dir.name.startswith("."):
+                    continue
+                try:
+                    data = load_character(char_dir.name)
+                except Exception as char_err:
+                    logger.warning(f"读取角色模板失败 [{char_dir.name}]: {char_err}")
+                    continue
+
+                characters.append({
+                    "name": char_dir.name,
+                    "ai_name": data.get("ai_name"),
+                    "bio": data.get("bio"),
+                    "voice": data.get("voice"),
+                    "prompt_file": data.get("prompt_file"),
+                    "portrait": data.get("portrait"),
+                    "live2d_model": data.get("live2d_model"),
+                    "live2d_model_url": (
+                        f"http://localhost:{port}/characters/{quote(char_dir.name, safe='')}/{quote(data.get('live2d_model') or '', safe='/')}"
+                        if data.get("live2d_model") else None
+                    ),
+                    "active": char_dir.name == active_name,
+                })
+
+        return {
+            "status": "success",
+            "active_character": active_name,
+            "characters": characters,
+        }
+    except Exception as e:
+        logger.error(f"获取角色模板列表失败: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"获取角色模板列表失败: {str(e)}")
+
+
 # ============ 更新检查 ============
 
 

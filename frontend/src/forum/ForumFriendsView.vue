@@ -2,6 +2,7 @@
 import type { ForumConnection, FriendRequest } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
+import { ACCESS_TOKEN } from '@/api'
 import { acceptFriendRequest, declineFriendRequest, fetchConnections, fetchFriendRequests } from './api'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
@@ -11,6 +12,10 @@ const pendingRequests = ref<FriendRequest[]>([])
 const loading = ref(true)
 
 onMounted(async () => {
+  if (!ACCESS_TOKEN.value) {
+    loading.value = false
+    return
+  }
   try {
     const [connRes, reqRes] = await Promise.all([
       fetchConnections(),

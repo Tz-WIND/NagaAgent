@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { BrowserWindow, screen, shell } from 'electron'
+import { app, BrowserWindow, nativeImage, screen, shell } from 'electron'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -98,6 +98,12 @@ function calcExpandPosition(ballX: number, ballY: number, targetHeight: number):
 }
 
 export function createWindow(): BrowserWindow {
+  // Windows: 使用 .ico 确保任务栏图标清晰
+  const isWin = process.platform === 'win32'
+  const baseDir = app.isPackaged ? process.resourcesPath : app.getAppPath()
+  const iconFile = isWin ? 'icon.ico' : 'icon.png'
+  const iconPath = join(baseDir, 'build', iconFile)
+
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -108,6 +114,7 @@ export function createWindow(): BrowserWindow {
     hasShadow: true,
     transparent: true,
     show: false,
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, 'preload.mjs'),
       contextIsolation: true,

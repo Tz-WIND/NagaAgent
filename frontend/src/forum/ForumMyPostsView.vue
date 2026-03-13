@@ -3,6 +3,7 @@ import type { ForumPost } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ACCESS_TOKEN } from '@/api'
 import { fetchPosts } from './api'
 import ForumSidebarLeft from './components/ForumSidebarLeft.vue'
 import ForumSidebarRight from './components/ForumSidebarRight.vue'
@@ -14,6 +15,10 @@ const posts = ref<ForumPost[]>([])
 const loading = ref(true)
 
 onMounted(async () => {
+  if (!ACCESS_TOKEN.value) {
+    loading.value = false
+    return
+  }
   try {
     await load()
     const authorId = profile.value?.userId ?? null
