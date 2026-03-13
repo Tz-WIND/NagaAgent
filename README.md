@@ -39,7 +39,20 @@
 
 | 日期 | 版本 | 内容 |
 |------|------|------|
-| 🛰️ 2026-03-14 | — | 干员通讯录升级为设置弹窗（名称 / 人设 / 引擎 / 灵魂文档 / 专有 MCP·Skill）；技能工坊接入 NagaHub 与通用 MCP 预热；探索链路新增 QQ / 飞书完成通知；OpenClaw 打包与运行时修复；云端记忆优先时不再回退本地 Neo4j |
+| 🛰️ 2026-03-14 | — | 干员通讯录升级为设置弹窗（名称 / 人设 / 引擎 / 灵魂文档 / 专有 MCP·Skill）；技能工坊接入 NagaHub 与通用 MCP 预热；探索链路新增 QQ / 飞书完成通知；云端记忆优先时不再回退本地 Neo4j |
+| 🧩 2026-03-13 | — | OpenClaw 编排链路与打包集成继续扩展；后端 spec 修复 Windows 控制台 Unicode 输出报错 |
+| 🧱 2026-03-11 | — | OpenClaw Skill 自动执行；干员独立 workspace；模型选择器与定价显示接入 Default / Deepseek-V3.2 / Kimi-K2.5 |
+| 🛠️ 2026-03-09 | — | 深度集成 OpenClaw vendor 源码编译与统一配置；论坛未登录 401 风暴修复；Windows 托盘图标修复 |
+| 📦 2026-03-08 | — | naga-backend.spec 持续修正；应用扫描器支持环境变量与 macOS；工具结果默认折叠；枢机集市移除记忆云迁 / MCP 工具 / 智能体技能三板块 |
+| 🚦 2026-03-07 | — | Node.js 与 uv 运行时随包分发；MCP 命令解析器统一；OpenClaw Gateway 启动诊断增强；打包版音乐 / 唤醒语音 / 记忆云海等问题修复 |
+| 🧰 2026-03-06 | — | GitHub Actions 构建发布流水线；Electron 自动更新替换旧补丁系统；CI 构建资源与 charset_normalizer 打包修复；论坛与积分轮询细节优化 |
+| 🔊 2026-03-05 | — | TTS 开关、消息队列与串行发送重构；RAG 记忆召回增强；Gemini / 自动 Function Calling 支持；充值界面与远程记忆稳定性修复 |
+| 🧠 2026-03-04 | — | 迁移到原生 Function Calling；DogTag 接管 heartbeat / proactive vision；前后端热补丁系统与 4 层安全防护；流式文本与渐进式 TTS 优化 |
+| 🔎 2026-03-03 | — | web_search 直接接入 NagaBusiness 搜索代理；论坛连接、TTS 流式播放与 OpenClaw 轮询降级修复；Live2D 与 Electron 稳定性修复 |
+| ❤️ 2026-03-02 | — | Heartbeat v3 事件驱动重构；naga_control 自编排工具；打包时嵌入 agent-browser；启动诊断、健康检查与 OpenClaw 配置路径修复 |
+| 🌐 2026-03-01 | — | 已登录走 NagaBusiness、未登录走 Brave / OpenClaw 的搜索代理成型；OpenClaw 工具直调与自动启动完善；游戏攻略与角色音色配置更新 |
+| 🗂️ 2026-02-28 | — | 持久化存储统一迁移到 `~/.naga` 用户目录；ForumQuotaView 网络探索控制中心；旅行模块与语音交互全面升级 |
+| 🎙️ 2026-02-27 | — | 接入 ASR 语音识别（MediaRecorder + NagaBusiness 代理）；会话风格、Electron 背景、MCP vision 与服务器配置整理 |
 | 🎆 2026-02-26 | 5.1.0 | 娜迦网络社区论坛上线；设置三合一重构；旅行模式；积分配额页；枢机集市与主面板更新 |
 | ⚡ 2026-02-25 | 5.1.0 | TTS 全链路修复（CORS / asyncio）；build.py 跨平台构建；上下文压缩持久化；角色系统更新；提示词注入架构重构 |
 | 🎵 2026-02-24 | — | Neo4j 连接超时修复；统一 BGM 播放器；音律坊歌单编辑；MCP 管理 UI；悬浮球透明窗口 + 悬停亮度 |
