@@ -312,7 +312,10 @@ function computeMouth(now: number, dt: number): Record<string, number> {
     let idx = 0
     for (let i = 0; i < VISEMES.length; i++) {
       roll -= VISEMES[i]!.w
-      if (roll <= 0) { idx = i; break }
+      if (roll <= 0) {
+        idx = i
+        break
+      }
     }
 
     // 中文语速约 4-6 音节/秒，每音节 170-250ms
@@ -658,10 +661,18 @@ export async function initController(modelInstance: Live2DModel, modelSource: st
     // 加载身体/头部动作数据（加 cache-busting 防止缓存旧版本）
     const cacheBust = `?_t=${Date.now()}`
     const response = await fetch(`${basePath}/naga-actions.json${cacheBust}`)
-    actionsData = await response.json() as ActionsData
+    if (response.ok) {
+      actionsData = await response.json() as ActionsData
+    }
+    else {
+      actionsData = null
+      console.warn(`[Live2D] naga-actions.json unavailable (${response.status}), continue without controller actions`)
+    }
 
     // 加载 .exp3.json 表情文件
-    await loadExpressions(basePath, modelSource, cacheBust)
+    if (response.ok) {
+      await loadExpressions(basePath, modelSource, cacheBust)
+    }
 
     originalUpdate = model.update.bind(model)
     model.update = function (dt: number) {
@@ -672,7 +683,14 @@ export async function initController(modelInstance: Live2DModel, modelSource: st
     console.log('[Live2D] Controller initialized for:', modelSource)
   }
   catch (e) {
-    console.error('[Live2D] Controller initialization failed:', e)
+    actionsData = null
+    originalUpdate = model.update.bind(model)
+    model.update = function (dt: number) {
+      const now = performance.now()
+      originalUpdate!(dt)
+      tick(now)
+    }
+    console.warn('[Live2D] Controller assets unavailable during startup, using degraded mode:', e)
   }
 }
 

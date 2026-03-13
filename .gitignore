@@ -165,7 +165,10 @@ dmypy.json
 /models/
 
 # Frontend premium assets (paid backgrounds / music etc.)
-frontend/premium-assets/
+frontend/premium-assets/*
+!frontend/premium-assets/backgrounds/
+frontend/premium-assets/backgrounds/*
+!frontend/premium-assets/backgrounds/.gitkeep
 
 # Pyre type checker
 .pyre/

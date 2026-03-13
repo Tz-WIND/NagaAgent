@@ -29,7 +29,7 @@ class EmbeddedRuntime:
     """
     内嵌运行时管理器
 
-    打包环境：从 resources/openclaw-runtime/ 加载 Node.js + 预编译 dist
+    打包环境：从 resources/runtime/ 加载 Node.js + 预编译 dist
     开发环境：vendor/openclaw/ 源码 + tsx 直接执行
     """
 
@@ -58,13 +58,23 @@ class EmbeddedRuntime:
             backend/
               naga-backend.exe
               _internal/          <- sys._MEIPASS
-            openclaw-runtime/
+            runtime/
               node/
+              uv/
               openclaw/
+
+        兼容历史包结构：若存在旧版 resources/openclaw-runtime/，也允许回退使用。
         """
         meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-        # _internal -> backend -> resources -> openclaw-runtime
-        return meipass.parent.parent / "openclaw-runtime"
+        resources_dir = meipass.parent.parent
+        candidates = [
+            resources_dir / "runtime",
+            resources_dir / "openclaw-runtime",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     @property
     def is_packaged(self) -> bool:
@@ -76,6 +86,10 @@ class EmbeddedRuntime:
 
     # ============ Vendor 路径 ============
 
+    @staticmethod
+    def _project_root() -> Path:
+        return Path(__file__).resolve().parent.parent.parent
+
     def _get_vendor_root(self) -> Path:
         """获取 vendor/openclaw 目录。
 
@@ -85,6 +99,28 @@ class EmbeddedRuntime:
         if self.is_packaged and self._runtime_root:
             return self._runtime_root / "openclaw"
         return Path(__file__).resolve().parent.parent.parent / "vendor" / "openclaw"
+
+    def _get_project_runtime_root(self) -> Path:
+        """开发态本地 runtime 目录。"""
+        return self._project_root() / "frontend" / "backend-dist" / "runtime"
+
+    def _project_runtime_bin(self, subdir: str, name: str) -> Optional[str]:
+        """优先使用项目内已准备好的 runtime/<subdir> 可执行文件。"""
+        runtime_root = self._get_project_runtime_root()
+        if not runtime_root.exists():
+            return None
+        is_win = platform.system() == "Windows"
+        if is_win:
+            for ext in (".cmd", ".exe", ""):
+                p = runtime_root / subdir / f"{name}{ext}"
+                if p.exists():
+                    return str(p)
+        else:
+            for prefix in ("bin/", ""):
+                p = runtime_root / subdir / f"{prefix}{name}"
+                if p.exists():
+                    return str(p)
+        return None
 
     @property
     def vendor_root(self) -> Path:
@@ -117,14 +153,18 @@ class EmbeddedRuntime:
         return False
 
     @property
+    def _prefer_source_runtime(self) -> bool:
+        return (not self.is_packaged) and self._has_ts_source() and self._has_tsx()
+
+    @property
     def runtime_mode(self) -> str:
         """返回当前运行时模式描述"""
         if self.is_packaged:
             return "packaged"
+        if self._prefer_source_runtime:
+            return "vendor-source"
         if self._has_compiled_dist():
             return "vendor-compiled"
-        if self._has_ts_source() and self._has_tsx():
-            return "vendor-source"
         if self._has_ts_source():
             return "vendor-needs-deps"
         return "unavailable"
@@ -152,6 +192,9 @@ class EmbeddedRuntime:
         """Node.js 可执行文件路径"""
         if self.is_packaged:
             return self._platform_bin("node", "node")
+        project_node = self._project_runtime_bin("node", "node")
+        if project_node:
+            return project_node
         return shutil.which("node")
 
     @property
@@ -159,6 +202,9 @@ class EmbeddedRuntime:
         """npm 可执行文件路径"""
         if self.is_packaged:
             return self._platform_bin("node", "npm")
+        project_npm = self._project_runtime_bin("node", "npm")
+        if project_npm:
+            return project_npm
         return shutil.which("npm")
 
     @property
@@ -166,6 +212,9 @@ class EmbeddedRuntime:
         """npx 可执行文件路径"""
         if self.is_packaged:
             return self._platform_bin("node", "npx")
+        project_npx = self._project_runtime_bin("node", "npx")
+        if project_npx:
+            return project_npx
         return shutil.which("npx")
 
     @property
@@ -173,6 +222,9 @@ class EmbeddedRuntime:
         """uv 可执行文件路径"""
         if self.is_packaged:
             return self._platform_bin("uv", "uv")
+        project_uv = self._project_runtime_bin("uv", "uv")
+        if project_uv:
+            return project_uv
         return shutil.which("uv")
 
     @property
@@ -180,7 +232,42 @@ class EmbeddedRuntime:
         """uvx 可执行文件路径"""
         if self.is_packaged:
             return self._platform_bin("uv", "uvx")
+        project_uvx = self._project_runtime_bin("uv", "uvx")
+        if project_uvx:
+            return project_uvx
         return shutil.which("uvx")
+
+    @property
+    def python_path(self) -> Optional[str]:
+        """内部 Python 可执行文件路径。打包模式下不允许回落到系统 Python。"""
+        if self.is_packaged:
+            return None
+        project_root = self._project_root()
+        candidates = [
+            project_root / ".venv" / "Scripts" / "python.exe",
+            project_root / ".venv" / "bin" / "python",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        if "python" in Path(sys.executable).name.lower():
+            return sys.executable
+        return None
+
+    @property
+    def pip_path(self) -> Optional[str]:
+        """内部 pip 可执行文件路径。"""
+        if self.is_packaged:
+            return None
+        project_root = self._project_root()
+        candidates = [
+            project_root / ".venv" / "Scripts" / "pip.exe",
+            project_root / ".venv" / "bin" / "pip",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return None
 
     @property
     def openclaw_path(self) -> Optional[str]:
@@ -206,9 +293,20 @@ class EmbeddedRuntime:
             "npx": self.npx_path,
             "uv": self.uv_path,
             "uvx": self.uvx_path,
+            "python": self.python_path,
+            "python3": self.python_path,
+            "pip": self.pip_path,
+            "pip3": self.pip_path,
             "openclaw": self.openclaw_path,
             "clawhub": self.clawhub_path,
         }
+        if cmd in mapping:
+            resolved = mapping.get(cmd)
+            if resolved:
+                return resolved
+            if self.is_packaged:
+                logger.warning(f"打包模式下请求内部命令 [{cmd}]，但内置运行时缺失对应可执行文件")
+            return None
         resolved = mapping.get(cmd)
         if resolved:
             return resolved
@@ -386,8 +484,8 @@ class EmbeddedRuntime:
             logger.error(f"gateway_start.mjs 不存在: {entry}")
             return None
 
-        # 开发模式且无编译产物 → 用 tsx 跑源码
-        if not self.is_packaged and not self._has_compiled_dist() and self._has_tsx():
+        # 开发模式优先用 tsx 跑源码，避免过期 dist 污染本地调试。
+        if self._prefer_source_runtime:
             return [node, "--import", "tsx", str(entry)]
         return [node, str(entry)]
 
@@ -396,7 +494,7 @@ class EmbeddedRuntime:
 
         tsx 需要能从 cwd 解析 node_modules，所以 dev 源码模式下设为 vendor root。
         """
-        if not self.is_packaged and not self._has_compiled_dist() and self._has_tsx():
+        if self._prefer_source_runtime:
             return str(self._get_vendor_root())
         return None
 
@@ -438,6 +536,7 @@ class EmbeddedRuntime:
 
             gw_env = self.env
             gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
+            gw_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source" if self._prefer_source_runtime else "compiled"
             try:
                 from system.config import get_server_port
                 api_port = get_server_port("api_server")
@@ -504,6 +603,7 @@ class EmbeddedRuntime:
 
         gw_env = self.env.copy()
         gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
+        gw_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source" if self._prefer_source_runtime else "compiled"
         try:
             from system.config import get_server_port
             api_port = get_server_port("api_server")

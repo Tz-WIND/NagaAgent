@@ -1,13 +1,5 @@
 <script lang="ts">
 import * as PIXI from 'pixi.js'
-
-declare global {
-  interface Window {
-    PIXI: typeof PIXI
-  }
-}
-
-window.PIXI = PIXI
 </script>
 
 <script setup lang="ts">
@@ -29,6 +21,8 @@ const { source, width, height, x, y, scale, ssaa } = defineProps<{
 const emit = defineEmits<{
   modelReady: [pos: { faceX: number, faceY: number }]
 }>()
+
+;(window as Window & typeof globalThis & { PIXI: typeof PIXI }).PIXI = PIXI
 
 let app: PIXI.Application
 

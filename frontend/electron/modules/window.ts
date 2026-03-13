@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
-import { app, BrowserWindow, nativeImage, screen, shell } from 'electron'
+import { app, BrowserWindow, screen, shell } from 'electron'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)

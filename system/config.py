@@ -766,7 +766,7 @@ def save_prompt(name: str, content: str):
 
 def build_system_prompt() -> str:
     """
-    构建纯人格系统提示词（仅 conversation_style_prompt）
+    构建角色第一层系统提示词（人格模板 + 角色自带技能）
 
     附加知识（时间、技能、工具指令、RAG、压缩摘要等）
     由 build_context_supplement() 生成，在 api_server.py 中
@@ -776,6 +776,14 @@ def build_system_prompt() -> str:
     Returns:
         纯人格提示词
     """
+    try:
+        from system.character_bundle import build_character_identity_bundle
+
+        bundle = build_character_identity_bundle(config.system.active_character)
+        if bundle:
+            return bundle
+    except Exception as e:
+        print(f"警告：加载角色 bundle 失败，回退到 conversation_style_prompt: {e}")
     return get_prompt("conversation_style_prompt", ai_name=config.system.ai_name)
 
 

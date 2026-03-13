@@ -83,7 +83,14 @@ _OPENCLAW_WORKSPACE_FILES = {
     "HEARTBEAT.md": "",
     "IDENTITY.md": "",
     "SOUL.md": "",
-    "TOOLS.md": "",
+    "TOOLS.md": (
+        "# 干员工具补充\n\n"
+        "## 跨干员协作\n\n"
+        "- 查看干员通讯录：`GET http://127.0.0.1:8000/agents/directory`\n"
+        "- 转发任务给另一名干员：`POST http://127.0.0.1:8000/agents/relay`\n"
+        "- 推荐请求体字段：`target_agent_id` 或 `target_agent_name`、`message`、`purpose`、`context`\n"
+        "- 若要调用本地 HTTP 接口，优先使用你现有的命令执行能力发起请求，不要伪造协作结果。\n"
+    ),
     "USER.md": "",
 }
 
@@ -114,25 +121,9 @@ def _load_character_identity_content(character_template: Optional[str]) -> str:
         return ""
 
     try:
-        from system.config import CHARACTERS_DIR, load_character
+        from system.character_bundle import build_character_identity_bundle
 
-        char_data = load_character(character_template)
-        prompt_file = char_data.get("prompt_file") or "conversation_style_prompt.txt"
-        prompt_path = CHARACTERS_DIR / character_template / prompt_file
-        if not prompt_path.exists():
-            logger.warning(f"角色模板 [{character_template}] 缺少提示词文件: {prompt_path}")
-            return ""
-
-        prompt_text = prompt_path.read_text(encoding="utf-8").strip()
-        if not prompt_text:
-            return ""
-
-        return (
-            f"# 人格模板：{character_template}\n\n"
-            "以下内容从 characters 模板初始化，用作该干员的人格基底。\n"
-            "后续个性化发展请写入 SOUL.md 等实例文件，不要改回模板源。\n\n"
-            f"{prompt_text}\n"
-        )
+        return build_character_identity_bundle(character_template)
     except Exception as e:
         logger.warning(f"加载角色模板 [{character_template}] 失败: {e}")
         return ""
@@ -181,6 +172,21 @@ def _init_agent_dir(
         if not fp.exists():
             content = identity_content if filename == "IDENTITY.md" and identity_content else default_content
             fp.write_text(content, encoding="utf-8")
+        elif filename == "IDENTITY.md" and identity_content and character_template:
+            try:
+                from system.character_bundle import is_legacy_character_identity
+
+                current_text = fp.read_text(encoding="utf-8")
+                if is_legacy_character_identity(current_text, character_template):
+                    fp.write_text(identity_content, encoding="utf-8")
+            except Exception:
+                pass
+        elif filename == "TOOLS.md" and default_content:
+            try:
+                if not fp.read_text(encoding="utf-8").strip():
+                    fp.write_text(default_content, encoding="utf-8")
+            except Exception:
+                pass
     return agent_dir
 
 
@@ -627,7 +633,14 @@ class InstanceManager:
 
     # ── 消息发送 ──
 
-    async def send_message(self, instance_id: str, message: str, timeout: int = 120) -> dict:
+    async def send_message(
+        self,
+        instance_id: str,
+        message: str,
+        timeout: int = 120,
+        session_key: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> dict:
         """通过指定实例发送消息。自动 ensure_running。"""
         try:
             inst = await self.ensure_running(instance_id)
@@ -658,8 +671,12 @@ class InstanceManager:
                 }
 
         try:
+            agent_workspace = str(_get_agents_dir() / instance_id)
             task = await inst.client.send_message(
                 message=message,
+                session_key=session_key,
+                workspace=agent_workspace,
+                name=name,
                 wake_mode="now",
                 deliver=False,
                 timeout_seconds=timeout,

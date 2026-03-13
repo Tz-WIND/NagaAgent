@@ -5,7 +5,7 @@ import { formatDate, statusLabel } from '@/travel/composables/useTravel'
 import TravelDiscoveryItem from './TravelDiscoveryItem.vue'
 
 defineProps<{ session: TravelSession }>()
-defineEmits<{ 'new-travel': [] }>()
+defineEmits<{ newTravel: [] }>()
 </script>
 
 <template>
@@ -89,7 +89,7 @@ defineEmits<{ 'new-travel': [] }>()
       label="开始新旅行"
       outlined
       class="px-6!"
-      @click="$emit('new-travel')"
+      @click="$emit('newTravel')"
     />
   </div>
 </template>

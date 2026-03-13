@@ -6,12 +6,12 @@ NagaAgent 跨平台构建脚本（Windows / macOS / Linux）
 流程：
   1. 环境检查（Python, uv, Node.js, npm）
   2. 同步 Python 依赖 + build 组（pyinstaller）
-  3. 准备 OpenClaw 运行时（下载 Node.js 便携版 + 预装 OpenClaw）
+  3. 准备 OpenClaw 运行时（下载 Node.js 便携版 + 预装 OpenClaw/Agent Browser）
   4. PyInstaller 编译 Python 后端
   5. Electron 前端构建 + 打包
   6. 输出汇总
 
-默认在构建阶段预装 OpenClaw，用户安装后首次启动可直接使用。
+默认在构建阶段预装 OpenClaw 与 Agent Browser，用户安装后首次启动可直接使用。
 
 用法:
   python scripts/build.py                  # 完整构建（自动检测平台）
@@ -58,6 +58,7 @@ RUNTIME_DIR = BACKEND_DIST_DIR / "runtime"
 NODE_RUNTIME_DIR = RUNTIME_DIR / "node"
 OPENCLAW_RUNTIME_DIR = RUNTIME_DIR / "openclaw"
 SPEC_FILE = PROJECT_ROOT / "naga-backend.spec"
+AGENT_BROWSER_NPM_SPEC = "agent-browser"
 
 # 最低版本要求
 MIN_NODE_MAJOR = 22
@@ -394,6 +395,107 @@ def preinstall_openclaw(force: bool = False) -> None:
     log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
 
 
+def _agent_browser_bin_name() -> str:
+    return "agent-browser.cmd" if IS_WINDOWS else "agent-browser"
+
+
+def _runtime_node_path_prefix() -> str:
+    return str(NODE_RUNTIME_DIR if IS_WINDOWS else NODE_RUNTIME_DIR / "bin")
+
+
+def _agent_browser_browser_cache_dirs() -> list[Path]:
+    return [
+        OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / ".local-browsers",
+        OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / ".local-browsers",
+    ]
+
+
+def _has_agent_browser_browser_cache() -> bool:
+    for candidate in _agent_browser_browser_cache_dirs():
+        if candidate.exists():
+            try:
+                if any(candidate.iterdir()):
+                    return True
+            except Exception:
+                return True
+    return False
+
+
+def preinstall_agent_browser(force: bool = False) -> None:
+    """在内嵌运行时目录中预装 agent-browser，并预下载浏览器内核"""
+    npm_bin = NODE_RUNTIME_DIR / NPM_BIN
+    node_bin = NODE_RUNTIME_DIR / NODE_BIN
+    if not npm_bin.exists():
+        raise FileNotFoundError(f"npm 不存在: {npm_bin}")
+    if not node_bin.exists():
+        raise FileNotFoundError(f"node 不存在: {node_bin}")
+
+    agent_browser_cmd = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin" / _agent_browser_bin_name()
+    agent_browser_pkg = OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "package.json"
+    playwright_core_cli = OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / "cli.js"
+
+    installed_version: Optional[str] = None
+    if agent_browser_pkg.exists():
+        try:
+            installed_version = json.loads(agent_browser_pkg.read_text(encoding="utf-8")).get("version")
+        except Exception:
+            installed_version = None
+
+    if not force and agent_browser_cmd.exists() and _has_agent_browser_browser_cache():
+        log(f"agent-browser 已预装: {installed_version or 'unknown'}，跳过安装")
+        return
+    if agent_browser_cmd.exists() and not _has_agent_browser_browser_cache():
+        log("检测到 agent-browser 命令已存在，但浏览器缓存缺失，继续补装 chromium")
+
+    env = os.environ.copy()
+    env["PATH"] = f"{_runtime_node_path_prefix()}{os.pathsep}{env.get('PATH', '')}"
+    env["NPM_CONFIG_AUDIT"] = "false"
+    env["NPM_CONFIG_FUND"] = "false"
+    env["NPM_CONFIG_GLOBAL"] = "false"
+    # 将浏览器二进制放进 node_modules，避免首次运行再下载到用户目录。
+    env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    env["CI"] = "1"
+
+    log(f"预装 Agent Browser（npm install {AGENT_BROWSER_NPM_SPEC}）...")
+    run(
+        [
+            str(npm_bin),
+            "install",
+            AGENT_BROWSER_NPM_SPEC,
+            "--global=false",
+            "--location=project",
+            "--prefix",
+            str(OPENCLAW_RUNTIME_DIR),
+        ],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+    )
+
+    if not agent_browser_cmd.exists():
+        raise FileNotFoundError(f"agent-browser 预装失败，未找到命令: {agent_browser_cmd}")
+    if not playwright_core_cli.exists():
+        raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {playwright_core_cli}")
+
+    log("预下载 Agent Browser 浏览器依赖（playwright-core install chromium）...")
+    run(
+        [
+            str(node_bin),
+            str(playwright_core_cli),
+            "install",
+            "chromium",
+        ],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+    )
+
+    browsers_dirs = [str(path) for path in _agent_browser_browser_cache_dirs() if path.exists()]
+    if browsers_dirs:
+        log(f"Agent Browser 浏览器缓存已写入: {', '.join(browsers_dirs)}")
+    elif not _has_agent_browser_browser_cache():
+        raise FileNotFoundError("playwright-core install chromium 执行完成，但未找到浏览器缓存目录")
+    log(f"Agent Browser 预装完成: {agent_browser_cmd}")
+
+
 def download_uv_runtime() -> Path:
     """下载 uv standalone 二进制包，返回本地缓存路径"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -451,15 +553,16 @@ def extract_uv_runtime(archive_path: Path) -> None:
 
 
 def prepare_openclaw_runtime(force: bool = False) -> None:
-    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw 预装 + uv standalone"""
+    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw/Agent Browser 预装 + uv standalone"""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = download_node_runtime()
     extract_node_runtime(archive_path)
     preinstall_openclaw(force=force)
+    preinstall_agent_browser(force=force)
     # 下载并解压 uv standalone（用于 MCP uvx 服务）
     uv_archive = download_uv_runtime()
     extract_uv_runtime(uv_archive)
-    log("OpenClaw 运行时准备完成（已预装 Node.js + OpenClaw + uv）")
+    log("OpenClaw 运行时准备完成（已预装 Node.js + OpenClaw + Agent Browser + uv）")
 
 
 # ============ Step 4: PyInstaller 编译后端 ============

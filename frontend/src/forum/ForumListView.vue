@@ -60,7 +60,10 @@ async function loadPosts() {
           resolve()
         }
       })
-      setTimeout(() => { stop(); resolve() }, 5000)
+      setTimeout(() => {
+        stop()
+        resolve()
+      }, 5000)
     })
   }
 
@@ -84,7 +87,8 @@ async function loadPosts() {
       if (status === 500 || status === 503) {
         await new Promise(resolve => setTimeout(resolve, 600))
         res = await fetchPosts(sortMode.value, 1, 20, timeOrder.value, yearMonth.value)
-      } else {
+      }
+      else {
         throw e
       }
     }
@@ -108,7 +112,9 @@ async function loadPosts() {
   }
 }
 
-watch([sortMode, timeOrder, yearMonth], () => { void loadPosts() })
+watch([sortMode, timeOrder, yearMonth], () => {
+  void loadPosts()
+})
 watch([backendConnected, sessionRestored, ACCESS_TOKEN], ([connected, restored, token]) => {
   if (connected && restored && token) {
     void loadPosts()

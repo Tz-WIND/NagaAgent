@@ -50,6 +50,7 @@
 | `sessions_send` | 向会话发消息 | `message`; 可选: `sessionKey`, `label` |
 | `session_status` | 会话状态 | 可选: `sessionKey` |
 | `agents_list` | 列出可用Agent | 无参数 |
+| `agent_relay` | 转发给另一名干员并等待回复 | `message`; 可选: `target_agent_id`, `target_agent_name`, `purpose`, `context`, `timeout_seconds` |
 | `canvas` | 节点画布控制 | `action`(present/hide/navigate/eval/snapshot等), `node` |
 | `nodes` | 节点发现与控制 | `action`(status/describe/notify/camera_snap/run等) |
 | `gateway` | 网关管理 | `action`(restart/config.get/config.patch等) |
@@ -79,6 +80,7 @@
 ```tool
 {"agentType": "live2d", "action": "normal或happy或enjoy或sad或surprise"}
 ```
+- Live2D 动作只通过工具调用触发，不要在正文输出任何情绪控制标记。
 
 ### Naga 自身控制
 当需要控制自身功能（语音开关、模型切换、音乐播放等）时，使用 `agentType: "naga_control"`。详细动作表见注入的技能文档。

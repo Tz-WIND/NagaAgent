@@ -636,6 +636,32 @@ async def get_agent_history(agent_id: str, limit: int = 50):
         return {"messages": []}
 
 
+@app.post("/openclaw/agents/{agent_id}/send")
+async def send_to_agent(agent_id: str, payload: Dict[str, Any]):
+    """向指定干员发送消息（同步等待结果），内部自动 ensure_running。"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    message = payload.get("message", "")
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    timeout = int(payload.get("timeout_seconds", 120) or 120)
+    session_key = payload.get("session_key")
+    name = payload.get("name")
+
+    result = await Modules.instance_manager.send_message(
+        agent_id,
+        message,
+        timeout=timeout,
+        session_key=session_key,
+        name=name,
+    )
+    if not result.get("success", False) and "error" in result:
+        logger.warning(f"发送消息到干员 [{agent_id}] 失败: {result.get('error')}")
+    return result
+
+
 @app.post("/openclaw/agents/{agent_id}/stream")
 async def stream_to_agent(agent_id: str, payload: Dict[str, Any]):
     """向干员发送消息（SSE 流式输出），内部自动 ensure_running"""

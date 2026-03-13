@@ -1,9 +1,9 @@
 import type { TravelSession } from '@/travel/types'
 import type { Config } from '@/utils/config'
 import type { StreamChunk } from '@/utils/encoding'
-import { aiter } from 'iterator-helper'
 import axios from 'axios'
 import camelcaseKeys from 'camelcase-keys'
+import { aiter } from 'iterator-helper'
 import snakecaseKeys from 'snakecase-keys'
 import { decodeStreamChunk, readerToMessageStream } from '@/utils/encoding'
 import { ACCESS_TOKEN, ApiClient } from './index'
@@ -15,8 +15,12 @@ const agentAxios = (() => {
     timeout: 180 * 1000, // 干员实例操作可能较慢
     headers: { 'Content-Type': 'application/json' },
     transformResponse: [(data: string) => {
-      try { return camelcaseKeys(JSON.parse(data), { deep: true }) }
-      catch { return data }
+      try {
+        return camelcaseKeys(JSON.parse(data), { deep: true })
+      }
+      catch {
+        return data
+      }
     }],
   })
   instance.interceptors.request.use((config) => {
@@ -610,8 +614,40 @@ export class CoreApiClient extends ApiClient {
     return agentAxios.get(`/openclaw/agents/${id}/history`, { params: { limit } })
   }
 
+  relayAgentMessage(params: {
+    message: string
+    targetAgentId?: string
+    targetAgentName?: string
+    sourceAgentId?: string
+    sourceAgentName?: string
+    purpose?: string
+    context?: string
+    timeoutSeconds?: number
+    sessionId?: string
+  }): Promise<{
+    success: boolean
+    status: string
+    reply?: string
+    error?: string
+    session_id?: string
+    session_key?: string
+    target?: { id: string, name: string, engine: string, character_template?: string, builtin?: boolean }
+  }> {
+    return this.instance.post('/agents/relay', {
+      message: params.message,
+      target_agent_id: params.targetAgentId,
+      target_agent_name: params.targetAgentName,
+      source_agent_id: params.sourceAgentId,
+      source_agent_name: params.sourceAgentName,
+      purpose: params.purpose,
+      context: params.context,
+      timeout_seconds: params.timeoutSeconds,
+      session_id: params.sessionId,
+    })
+  }
+
   /** 流式发送消息到干员（SSE，内部自动 ensure_running） */
-  async *streamToAgent(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{
+  async* streamToAgent(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{
     type: string
     text: string
     name?: string
@@ -674,7 +710,7 @@ export class CoreApiClient extends ApiClient {
     })
   }
 
-  async *streamToAgentInstance(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{ type: string, text: string }> {
+  async* streamToAgentInstance(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{ type: string, text: string }> {
     yield* this.streamToAgent(id, message, timeoutSeconds)
   }
 

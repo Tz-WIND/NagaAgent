@@ -138,7 +138,16 @@ export class ApiClient {
     const url = error.config?.url || ''
     const isExpectedMissingSession = status === 404 && !!url.match(/\/sessions\/[^/]+$/)
     const isTransientForumError = !!url.startsWith('/forum/api/') && (status === 500 || status === 503)
-    if (!isExpectedMissingSession && !isTransientForumError) {
+    const isTransientOpenclawWarmup = url === '/openclaw/tasks' && status === 503
+    const isExpectedHealthNetworkError = !status && url.startsWith('/health')
+    const isExpectedBootstrapConfigNetworkError = !status && url.startsWith('/system/config')
+    if (
+      !isExpectedMissingSession
+      && !isTransientForumError
+      && !isTransientOpenclawWarmup
+      && !isExpectedHealthNetworkError
+      && !isExpectedBootstrapConfigNetworkError
+    ) {
       console.error('API Error:', error)
     }
     return Promise.reject(error)

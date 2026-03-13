@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import type { ForumPostDetail } from './types'
 import ScrollPanel from 'primevue/scrollpanel'
-import { useToast } from 'primevue/usetoast'
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Markdown from '@/components/Markdown.vue'
@@ -13,7 +12,6 @@ import ForumSidebarRight from './components/ForumSidebarRight.vue'
 
 const route = useRoute()
 const router = useRouter()
-const toast = useToast()
 
 const post = ref<ForumPostDetail | null>(null)
 const previewSrc = ref<string | null>(null)

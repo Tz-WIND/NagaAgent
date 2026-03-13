@@ -10,6 +10,7 @@ import { useToast } from 'primevue/usetoast'
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ACCESS_TOKEN, authExpired, setAuthExpiredSuppressed } from '@/api'
+import API from '@/api/core'
 import BackendErrorDialog from '@/components/BackendErrorDialog.vue'
 import Live2dModel from '@/components/Live2dModel.vue'
 import LoginDialog from '@/components/LoginDialog.vue'
@@ -26,7 +27,6 @@ import { useParallax } from '@/composables/useParallax'
 import { useStartupProgress } from '@/composables/useStartupProgress'
 import { startToolPolling, stopToolPolling } from '@/composables/useToolStatus'
 import { checkForUpdate, showUpdateDialog, updateInfo } from '@/composables/useVersionCheck'
-import API from '@/api/core'
 import { backendConnected, CONFIG } from '@/utils/config'
 import { clearExpression, setExpression } from '@/utils/live2dController'
 import { destroyParallax, initParallax } from '@/utils/parallax'
@@ -38,6 +38,62 @@ let _splashDismissed = false
 const isElectron = !!window.electronAPI
 const { isMaximized } = useElectron()
 const isMac = window.electronAPI?.platform === 'darwin'
+const LIVE2D_SOURCE_CACHE_KEY = 'naga-startup-live2d-source'
+const DEFAULT_STARTUP_LIVE2D_SOURCE = isElectron
+  ? 'naga-char://娜杰日达/NagaTest2/NagaTest2.model3.json'
+  : './models/naga-test/naga-test.model3.json'
+
+function normalizeRuntimeLive2dSource(source?: string | null): string {
+  const trimmed = source?.trim() ?? ''
+  if (!trimmed) {
+    return ''
+  }
+  if (!isElectron || trimmed.startsWith('naga-char://')) {
+    return trimmed
+  }
+  try {
+    const url = new URL(trimmed)
+    const isLocalCharactersUrl = (url.protocol === 'http:' || url.protocol === 'https:')
+      && ['localhost', '127.0.0.1'].includes(url.hostname)
+      && url.pathname.startsWith('/characters/')
+    if (!isLocalCharactersUrl) {
+      return trimmed
+    }
+    const match = url.pathname.match(/^\/characters\/([^/]+)\/(.+)$/)
+    if (!match) {
+      return trimmed
+    }
+    const characterName = decodeURIComponent(match[1] ?? '')
+    const modelPath = decodeURIComponent(match[2] ?? '')
+    if (!characterName || !modelPath) {
+      return trimmed
+    }
+    return `naga-char://${characterName}/${modelPath}`
+  }
+  catch {
+    return trimmed
+  }
+}
+
+function readCachedStartupLive2dSource(): string {
+  try {
+    return normalizeRuntimeLive2dSource(localStorage.getItem(LIVE2D_SOURCE_CACHE_KEY)) || DEFAULT_STARTUP_LIVE2D_SOURCE
+  }
+  catch {
+    return DEFAULT_STARTUP_LIVE2D_SOURCE
+  }
+}
+
+function persistStartupLive2dSource(source?: string | null) {
+  const normalized = normalizeRuntimeLive2dSource(source) || DEFAULT_STARTUP_LIVE2D_SOURCE
+  startupLive2dSource.value = normalized
+  try {
+    localStorage.setItem(LIVE2D_SOURCE_CACHE_KEY, normalized)
+  }
+  catch {
+    // ignore storage errors
+  }
+}
 
 const showResizeHandles = computed(() => isElectron && !isFloatingMode.value && !isMaximized.value)
 // macOS hiddenInset title bar is 28px, Windows/Linux custom title bar is 32px
@@ -58,6 +114,8 @@ const { width, height } = useWindowSize()
 const scale = computed(() => height.value / (10000 - CONFIG.value.web_live2d.model.size))
 const characterModelMap = ref<Record<string, string>>({})
 const live2dRenderKey = ref(0)
+const startupLive2dSource = ref(readCachedStartupLive2dSource())
+const activeLive2dSource = ref(startupLive2dSource.value)
 const activeAgentCharacterTemplate = computed(() => {
   const tab = tabs.value.find(item => item.id === activeTabId.value)
   if (!tab || tab.type !== 'agent' || !tab.instanceId)
@@ -67,9 +125,15 @@ const activeAgentCharacterTemplate = computed(() => {
 const resolvedLive2dSource = computed(() => {
   const template = activeAgentCharacterTemplate.value
   if (template && characterModelMap.value[template]) {
-    return characterModelMap.value[template]
+    return normalizeRuntimeLive2dSource(characterModelMap.value[template])
   }
-  return CONFIG.value.web_live2d.model.source
+  return normalizeRuntimeLive2dSource(CONFIG.value.web_live2d.model.source)
+})
+const effectiveLive2dSource = computed(() => {
+  if (backendConnected.value) {
+    return resolvedLive2dSource.value || startupLive2dSource.value || DEFAULT_STARTUP_LIVE2D_SOURCE
+  }
+  return startupLive2dSource.value || DEFAULT_STARTUP_LIVE2D_SOURCE
 })
 
 async function loadCharacterModelMap() {
@@ -78,7 +142,7 @@ async function loadCharacterModelMap() {
     characterModelMap.value = Object.fromEntries(
       (res.characters || [])
         .filter(item => item.name && item.live2dModelUrl)
-        .map(item => [item.name, item.live2dModelUrl!]),
+        .map(item => [item.name, normalizeRuntimeLive2dSource(item.live2dModelUrl!)]),
     )
   }
   catch {
@@ -139,6 +203,8 @@ function onModelReady(pos: { faceX: number, faceY: number }) {
     modelReady.value = true
     notifyModelReady()
   }
+
+  persistStartupLive2dSource(activeLive2dSource.value)
 
   // splash 阶段：将 Live2D 面部居中到矩形框中央
   if (splashVisible.value && !initialPositionSet) {
@@ -270,7 +336,11 @@ watch(sessionRestored, (restored) => {
   }
 })
 
-watch([activeTabId, activeAgentCharacterTemplate, resolvedLive2dSource], () => {
+watch(effectiveLive2dSource, (source) => {
+  activeLive2dSource.value = source || DEFAULT_STARTUP_LIVE2D_SOURCE
+}, { immediate: true })
+
+watch([activeTabId, activeAgentCharacterTemplate, effectiveLive2dSource], () => {
   live2dRenderKey.value += 1
 })
 
@@ -389,7 +459,7 @@ onUnmounted(() => {
         <img src="/assets/light.png" alt="" class="absolute right-0 bottom-0 w-80vw h-60vw op-40 -z-1 will-change-transform" :style="{ transform: `translate(${lightTx}px, ${lightTy}px)` }">
         <Live2dModel
           :key="live2dRenderKey"
-          :source="resolvedLive2dSource"
+          :source="effectiveLive2dSource"
           :x="CONFIG.web_live2d.model.x"
           :y="CONFIG.web_live2d.model.y"
           :width="width" :height="height"

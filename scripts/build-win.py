@@ -289,11 +289,15 @@ def preinstall_openclaw(force: bool = False) -> None:
 def preinstall_agent_browser(force: bool = False) -> None:
     """在内嵌运行时目录中预装 agent-browser，并预下载浏览器内核"""
     npm_cmd = NODE_RUNTIME_DIR / "npm.cmd"
+    node_exe = NODE_RUNTIME_DIR / "node.exe"
     if not npm_cmd.exists():
         raise FileNotFoundError(f"npm.cmd 不存在: {npm_cmd}")
+    if not node_exe.exists():
+        raise FileNotFoundError(f"node.exe 不存在: {node_exe}")
 
     agent_browser_cmd = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin" / "agent-browser.cmd"
     agent_browser_pkg = OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "package.json"
+    playwright_core_cli = OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / "cli.js"
 
     installed_version: Optional[str] = None
     if agent_browser_pkg.exists():
@@ -302,9 +306,27 @@ def preinstall_agent_browser(force: bool = False) -> None:
         except Exception:
             installed_version = None
 
-    if not force and agent_browser_cmd.exists():
+    def _browser_cache_dirs() -> list[Path]:
+        return [
+            OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / ".local-browsers",
+            OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / ".local-browsers",
+        ]
+
+    def _has_browser_cache() -> bool:
+        for candidate in _browser_cache_dirs():
+            if candidate.exists():
+                try:
+                    if any(candidate.iterdir()):
+                        return True
+                except Exception:
+                    return True
+        return False
+
+    if not force and agent_browser_cmd.exists() and _has_browser_cache():
         log(f"agent-browser 已预装: {installed_version or 'unknown'}，跳过安装")
         return
+    if agent_browser_cmd.exists() and not _has_browser_cache():
+        log("检测到 agent-browser 命令已存在，但浏览器缓存缺失，继续补装 chromium")
 
     env = os.environ.copy()
     env["PATH"] = f"{NODE_RUNTIME_DIR}{os.pathsep}{env.get('PATH', '')}"
@@ -313,6 +335,7 @@ def preinstall_agent_browser(force: bool = False) -> None:
     env["NPM_CONFIG_GLOBAL"] = "false"
     # 将浏览器二进制放进 node_modules，避免首次运行再下载到用户目录。
     env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    env["CI"] = "1"
 
     log(f"预装 Agent Browser（npm install {AGENT_BROWSER_NPM_SPEC}）...")
     run(
@@ -331,20 +354,26 @@ def preinstall_agent_browser(force: bool = False) -> None:
 
     if not agent_browser_cmd.exists():
         raise FileNotFoundError(f"agent-browser 预装失败，未找到命令: {agent_browser_cmd}")
+    if not playwright_core_cli.exists():
+        raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {playwright_core_cli}")
 
-    log("预下载 Agent Browser 浏览器依赖（agent-browser install）...")
-    run([str(agent_browser_cmd), "install"], cwd=OPENCLAW_RUNTIME_DIR, env=env)
-
-    browsers_dir = (
-        OPENCLAW_RUNTIME_DIR
-        / "node_modules"
-        / "agent-browser"
-        / "node_modules"
-        / "playwright-core"
-        / ".local-browsers"
+    log("预下载 Agent Browser 浏览器依赖（playwright-core install chromium）...")
+    run(
+        [
+            str(node_exe),
+            str(playwright_core_cli),
+            "install",
+            "chromium",
+        ],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
     )
-    if browsers_dir.exists():
-        log(f"Agent Browser 浏览器缓存已写入: {browsers_dir}")
+
+    browsers_dirs = [str(path) for path in _browser_cache_dirs() if path.exists()]
+    if browsers_dirs:
+        log(f"Agent Browser 浏览器缓存已写入: {', '.join(browsers_dirs)}")
+    elif not _has_browser_cache():
+        raise FileNotFoundError("playwright-core install chromium 执行完成，但未找到浏览器缓存目录")
     log(f"Agent Browser 预装完成: {agent_browser_cmd}")
 
 

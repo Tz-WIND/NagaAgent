@@ -102,8 +102,8 @@ excludes = [
     'pyspark', 'ray', 'distributed',
     # Google / Cloud（不需要）
     'googleapiclient', 'google.cloud', 'google.auth', 'google_auth_httplib2',
-    # 音视频处理（MCP可选）
-    'av', 'librosa', 'soundfile', 'pyaudio',
+    # 音视频处理（MCP可选；语音运行时所需依赖不排除）
+    'av',
     # Web 工具（不需要）
     'gradio', 'streamlit', 'dash',
     # Jupyter / 开发工具
@@ -126,15 +126,14 @@ excludes = [
     'pyautogui', 'pytesseract', 'pycaw', 'screen_brightness_control',
     # 图可视化（pyvis 未使用；neo4j/py2neo 项目有用到，不排除）
     'pyvis',
-    # 游戏 / 音频播放
-    'pygame',
+    # 游戏 / 音频播放（pygame 项目有用到，不排除）
     # 爬虫（MCP可选）
     'crawl4ai',
     # 压缩（MCP可选）
     'py7zr', 'pyzipper',
     # 其他可选
     'gevent', 'flask', 'docx2pdf', 'img2pdf', 'msoffcrypto', 'pikepdf',
-    'dashscope', 'Crypto', 'pycryptodome',
+    'Crypto', 'pycryptodome',
     'agents',
     'jieba',
 ]
@@ -177,6 +176,20 @@ hiddenimports = [
     'tiktoken',
     'tiktoken_ext',
     'tiktoken_ext.openai_public',
+    # 语音运行时 / 实时语音
+    'dashscope',
+    'dashscope.audio',
+    'dashscope.audio.qwen_omni',
+    'pygame',
+    'pygame.mixer',
+    'pyaudio',
+    'soundfile',
+    'librosa',
+    'voice.output.voice_integration',
+    'voice.input.voice_realtime',
+    'voice.input.voice_realtime.adapters.qwen_adapter',
+    'voice.input.voice_realtime.adapters.qwen.client',
+    'voice.input.voice_realtime.adapters.local',
     # 图数据库（项目实际使用，try-except 容错）
     'neo4j',
     'py2neo',

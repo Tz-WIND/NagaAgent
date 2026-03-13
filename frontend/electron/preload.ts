@@ -1,5 +1,25 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
+function detectPlatform(): 'darwin' | 'win32' | 'linux' | 'unknown' {
+  const uaDataPlatform = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform
+  const parts = [
+    uaDataPlatform,
+    navigator.platform,
+    navigator.userAgent,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase()
+
+  if (parts.includes('mac'))
+    return 'darwin'
+  if (parts.includes('win'))
+    return 'win32'
+  if (parts.includes('linux'))
+    return 'linux'
+  return 'unknown'
+}
+
 const electronAPI = {
   // Window controls
   minimize: () => ipcRenderer.send('window:minimize'),
@@ -140,7 +160,7 @@ const electronAPI = {
   },
 
   // Platform info
-  platform: process.platform,
+  platform: detectPlatform(),
 }
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI)

@@ -2,9 +2,9 @@ import type { BrowserWindow } from 'electron'
 
 let autoUpdater: any = null
 
-export function setupAutoUpdater(win: BrowserWindow): void {
+export async function setupAutoUpdater(win: BrowserWindow): Promise<void> {
   try {
-    const pkg = require('electron-updater')
+    const pkg = await import('electron-updater')
     autoUpdater = pkg.autoUpdater
   }
   catch (err) {

@@ -21,11 +21,15 @@ const selectedFile = ref<File | null>(null)
 const scope = ref<'cache' | 'public' | 'private'>('public')
 const selectedAgentId = ref('')
 const errorMsg = ref('')
-const scopeOptions = [
+const scopeOptions: Array<{
+  label: string
+  value: 'cache' | 'public' | 'private'
+  description: string
+}> = [
   { label: '本地缓存', value: 'cache', description: '用于本地缓存和待整理技能，不直接视为共用能力。' },
   { label: '公有技能', value: 'public', description: '娜迦与多个干员可共用。' },
   { label: '私有技能', value: 'private', description: '只绑定单一干员，通常强依赖该干员的工具。' },
-] as const
+]
 
 const mode = computed<'text' | 'file' | null>(() => {
   if (textContent.value.trim())

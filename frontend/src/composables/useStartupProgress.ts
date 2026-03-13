@@ -29,7 +29,6 @@ export function useStartupProgress() {
   let unsubProgress: (() => void) | undefined
   let lastProgressValue = 0
   let lastProgressChangeTime = Date.now()
-  let healthPollTimer: ReturnType<typeof setInterval> | undefined
 
   // 停滞检测：进度 3 秒无变化 → 显示提示
   function checkStall() {
@@ -80,41 +79,7 @@ export function useStartupProgress() {
   function notifyModelReady() {
     modelReady = true
     console.log('[Startup] Live2D 模型就绪')
-    setTarget(25, '连接后端...')
-  }
-
-  // 轮询后端健康检查，确保不会卡在 50%
-  function startHealthPolling() {
-    if (healthPollTimer)
-      return
-    let pollCount = 0
-    console.log('[Startup] 开始轮询后端健康状态...')
-    healthPollTimer = setInterval(async () => {
-      pollCount++
-      try {
-        await API.health()
-        // 健康检查成功 → 确保 backendConnected 置位（供 config sync 使用）
-        if (!backendConnected.value) {
-          console.log(`[Startup] 健康轮询成功 (第 ${pollCount} 次)，置位 backendConnected`)
-          backendConnected.value = true
-        }
-        // 直接触发 postConnect（幂等，重复调用安全）
-        runPostConnect()
-      }
-      catch {
-        // 后端尚未就绪，继续轮询
-        if (pollCount % 3 === 0) {
-          console.log(`[Startup] 等待后端就绪... 已轮询 ${pollCount} 次`)
-        }
-      }
-    }, 1000)
-  }
-
-  function stopHealthPolling() {
-    if (healthPollTimer) {
-      clearInterval(healthPollTimer)
-      healthPollTimer = undefined
-    }
+    setTarget(25, '等待后端...')
   }
 
   async function runPostConnect() {
@@ -130,10 +95,9 @@ export function useStartupProgress() {
     }, 15000)
 
     try {
-      // 取消后端进度监听和健康轮询
+      // 取消后端进度监听
       unsubProgress?.()
       unsubProgress = undefined
-      stopHealthPolling()
 
       // 阶段 25→50：后端已连接
       console.log('[Startup] 后端已连接，开始后连接任务')
@@ -190,10 +154,7 @@ export function useStartupProgress() {
       return
     }
 
-    // 立即开始轮询后端健康状态（不再等待 progress >= 25，避免动画延迟导致卡死）
-    startHealthPolling()
-
-    // 监听后端连接（由 config.ts connectBackend 或健康轮询触发）
+    // 监听后端连接（由 config.ts connectBackend 触发）
     const stopWatch = watch(backendConnected, (connected) => {
       if (!connected)
         return
@@ -206,7 +167,6 @@ export function useStartupProgress() {
     if (rafId)
       cancelAnimationFrame(rafId)
     unsubProgress?.()
-    stopHealthPolling()
   }
 
   return {

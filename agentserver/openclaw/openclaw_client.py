@@ -15,6 +15,7 @@ API 端点:
 import logging
 import json
 import uuid
+import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
@@ -235,6 +236,7 @@ class OpenClawClient:
         self,
         message: str,
         session_key: Optional[str] = None,
+        workspace: Optional[str] = None,
         name: Optional[str] = None,
         channel: Optional[str] = None,
         to: Optional[str] = None,
@@ -255,6 +257,7 @@ class OpenClawClient:
         Args:
             message: 消息内容 (必需)
             session_key: 会话标识，用于多轮对话
+            workspace: 工作区目录（可选）
             name: hook 名称，用于会话摘要前缀 (如 "GitHub", "Naga")
             channel: 输出通道 (last, whatsapp, telegram, discord, slack 等)
             to: 接收者标识
@@ -297,6 +300,8 @@ class OpenClawClient:
 
         # 可选参数
         payload["sessionKey"] = actual_session_key
+        if workspace:
+            payload["workspace"] = workspace
         if name:
             payload["name"] = name
         if channel:
@@ -403,6 +408,11 @@ class OpenClawClient:
                                     "reply_preview": (reply[:200] if reply else ""),
                                 },
                             )
+                        elif timeout_seconds <= 0:
+                            # 调用方选择异步投递，不等待最终 reply。
+                            task.status = TaskStatus.COMPLETED
+                            task.completed_at = datetime.now().isoformat()
+                            logger.info(f"[OpenClaw] 任务已异步接受: {task.task_id}, runId: {task.run_id}")
                         else:
                             # 202 异步接受，需要轮询 sessions_history 获取回复
                             task.status = TaskStatus.RUNNING
@@ -434,9 +444,21 @@ class OpenClawClient:
                                     },
                                 )
                             else:
-                                task.status = TaskStatus.COMPLETED
+                                task.status = TaskStatus.FAILED
                                 task.completed_at = datetime.now().isoformat()
-                                logger.warning("[OpenClaw] 轮询超时，未获取到回复")
+                                last_error = f"OpenClaw 在 {timeout_seconds}s 内未返回可用回复"
+                                task.error = last_error
+                                logger.warning(f"[OpenClaw] {last_error}")
+
+                                self._emit_task_event(
+                                    task,
+                                    kind="state",
+                                    message="task_failed",
+                                    data={
+                                        "run_id": task.run_id,
+                                        "error": last_error,
+                                    },
+                                )
                     except Exception:
                         task.result = {"raw": response.text}
                         task.status = TaskStatus.RUNNING
@@ -452,7 +474,8 @@ class OpenClawClient:
                         )
 
                     # 更新会话信息
-                    self._update_session_info(actual_session_key, task.run_id, "active")
+                    session_status = "error" if task.status == TaskStatus.FAILED else "active"
+                    self._update_session_info(actual_session_key, task.run_id, session_status)
                     # 成功，跳出重试循环
                     break
                 else:
@@ -659,14 +682,17 @@ class OpenClawClient:
                 if response.status_code == 200:
                     data = response.json()
                     replies = self._extract_all_assistant_replies(data)
+                    if not replies:
+                        replies = self._extract_local_assistant_replies(session_key)
                     current_count = len(replies)
 
                     if current_count > last_count:
+                        delta = current_count - last_count
                         all_replies = replies
                         last_count = current_count
                         stable_count = 0
                         logger.info(
-                            f"[OpenClaw] 轮询第{attempt}次: 发现{current_count}条assistant消息 (新增{current_count - last_count})"
+                            f"[OpenClaw] 轮询第{attempt}次: 发现{current_count}条assistant消息 (新增{delta})"
                         )
                     else:
                         stable_count += 1
@@ -722,6 +748,108 @@ class OpenClawClient:
                         replies.append(text)
         except Exception:
             pass
+        return replies
+
+    @staticmethod
+    def _openclaw_home() -> Path:
+        home_override = os.environ.get("OPENCLAW_HOME", "").strip()
+        return Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
+
+    @classmethod
+    def _resolve_local_session_file(cls, session_key: str) -> Optional[Path]:
+        sessions_dir = cls._openclaw_home() / "agents" / "main" / "sessions"
+        sessions_index = sessions_dir / "sessions.json"
+        if not sessions_index.exists():
+            return None
+
+        try:
+            index_data = json.loads(sessions_index.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+        candidate_keys = [session_key]
+        if not session_key.startswith("agent:main:"):
+            candidate_keys.append(f"agent:main:{session_key}")
+
+        record: Optional[Dict[str, Any]] = None
+        for key in candidate_keys:
+            value = index_data.get(key)
+            if isinstance(value, dict):
+                record = value
+                break
+        if not record:
+            return None
+
+        session_file = record.get("sessionFile")
+        if isinstance(session_file, str) and session_file.strip():
+            path = Path(session_file).expanduser()
+            if path.exists():
+                return path
+
+        session_id = str(record.get("sessionId") or "").strip()
+        if not session_id:
+            return None
+
+        derived = sessions_dir / f"{session_id}.jsonl"
+        return derived if derived.exists() else None
+
+    @staticmethod
+    def _extract_local_text_from_message(message: Dict[str, Any]) -> str:
+        content = message.get("content", "")
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: List[str] = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "text":
+                    text = item.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            return "\n".join(parts).strip()
+        return ""
+
+    @classmethod
+    def _read_local_session_messages(cls, session_key: str) -> List[Dict[str, Any]]:
+        session_file = cls._resolve_local_session_file(session_key)
+        if not session_file:
+            return []
+
+        messages: List[Dict[str, Any]] = []
+        try:
+            for line in session_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                if entry.get("type") != "message":
+                    continue
+                message = entry.get("message")
+                if not isinstance(message, dict):
+                    continue
+                messages.append(
+                    {
+                        "role": str(message.get("role") or "unknown"),
+                        "content": cls._extract_local_text_from_message(message),
+                        "type": "message",
+                        "toolEvents": [],
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"[OpenClaw] 读取本地会话历史失败: {e}")
+            return []
+        return messages
+
+    @classmethod
+    def _extract_local_assistant_replies(cls, session_key: str) -> List[str]:
+        replies: List[str] = []
+        for message in cls._read_local_session_messages(session_key):
+            if message.get("role") != "assistant":
+                continue
+            text = str(message.get("content") or "").strip()
+            if text:
+                replies.append(text)
         return replies
 
     async def wake(self, text: str, mode: str = "now") -> Dict[str, Any]:
@@ -892,12 +1020,32 @@ class OpenClawClient:
                 # 解析返回的消息
                 raw_result = result.get("result", {})
                 messages = self._parse_history_messages(raw_result)
+                if not messages:
+                    messages = self._read_local_session_messages(actual_session_key)
                 return {"success": True, "session_key": actual_session_key, "messages": messages, "raw": raw_result}
             else:
+                fallback_messages = self._read_local_session_messages(actual_session_key)
+                if fallback_messages:
+                    return {
+                        "success": True,
+                        "session_key": actual_session_key,
+                        "messages": fallback_messages,
+                        "raw": {},
+                        "note": "local_session_fallback",
+                    }
                 return {"success": False, "error": result.get("error", "unknown"), "messages": []}
 
         except Exception as e:
             logger.error(f"[OpenClaw] 获取会话历史失败: {e}")
+            fallback_messages = self._read_local_session_messages(actual_session_key)
+            if fallback_messages:
+                return {
+                    "success": True,
+                    "session_key": actual_session_key,
+                    "messages": fallback_messages,
+                    "raw": {},
+                    "note": "local_session_fallback_after_exception",
+                }
             return {"success": False, "error": str(e), "messages": []}
 
     def _parse_history_messages(self, raw_result: Dict[str, Any]) -> List[Dict[str, Any]]:

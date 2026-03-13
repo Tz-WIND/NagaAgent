@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import process from 'node:process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { domainToUnicode, fileURLToPath, pathToFileURL } from 'node:url'
 import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, protocol, shell, systemPreferences } from 'electron'
 import { startBackend, stopBackend } from './modules/backend'
 import { registerHotkeys, unregisterHotkeys } from './modules/hotkeys'
@@ -73,6 +73,52 @@ app.whenReady().then(async () => {
     mp4: 'video/mp4',
     mkv: 'video/x-matroska',
   }
+  const FILE_MIME: Record<string, string> = {
+    ...MEDIA_MIME,
+    json: 'application/json; charset=utf-8',
+    txt: 'text/plain; charset=utf-8',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+    moc3: 'application/octet-stream',
+  }
+
+  function resolveCustomProtocolPath(requestUrl: string, baseDir: string): string | null {
+    try {
+      const url = new URL(requestUrl)
+      const host = domainToUnicode(url.hostname || '')
+      const pathname = decodeURIComponent(url.pathname).replace(/^\/+/, '')
+      const relativePath = [host, pathname].filter(Boolean).join('/')
+      const filePath = resolve(baseDir, relativePath)
+      if (!filePath.startsWith(baseDir)) {
+        return null
+      }
+      return filePath
+    }
+    catch {
+      return null
+    }
+  }
+
+  function serveLocalFile(filePath: string, notFoundMessage = 'Not Found'): Response {
+    try {
+      const data = readFileSync(filePath)
+      const ext = filePath.split('.').pop()?.toLowerCase() ?? ''
+      const mime = FILE_MIME[ext] || 'application/octet-stream'
+      return new Response(data, {
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': data.length.toString(),
+          'Cache-Control': 'no-cache',
+        },
+      })
+    }
+    catch {
+      return new Response(notFoundMessage, { status: 404 })
+    }
+  }
 
   // naga-app://路径 → 加载 dist/ 目录文件
   // 仅打包模式生效，开发模式走 Vite dev server
@@ -110,22 +156,20 @@ app.whenReady().then(async () => {
 
   // naga-char://角色名/文件名 → characters/角色名/文件名
   protocol.handle('naga-char', (request) => {
-    const relativePath = decodeURIComponent(request.url.slice('naga-char://'.length))
-    const filePath = resolve(CHARACTERS_DIR, relativePath)
-    if (!filePath.startsWith(CHARACTERS_DIR)) {
+    const filePath = resolveCustomProtocolPath(request.url, CHARACTERS_DIR)
+    if (!filePath) {
       return new Response('Forbidden', { status: 403 })
     }
-    return net.fetch(pathToFileURL(filePath).toString())
+    return serveLocalFile(filePath, 'Character Asset Not Found')
   })
 
   // naga-bg://文件名 → premium-assets/backgrounds/文件名
   protocol.handle('naga-bg', (request) => {
-    const relativePath = decodeURIComponent(request.url.slice('naga-bg://'.length))
-    const filePath = resolve(BACKGROUNDS_DIR, relativePath)
-    if (!filePath.startsWith(BACKGROUNDS_DIR)) {
+    const filePath = resolveCustomProtocolPath(request.url, BACKGROUNDS_DIR)
+    if (!filePath) {
       return new Response('Forbidden', { status: 403 })
     }
-    return net.fetch(pathToFileURL(filePath).toString())
+    return serveLocalFile(filePath, 'Background Asset Not Found')
   })
 
   // 强制暗色主题（确保原生菜单等 UI 为深色）
@@ -147,7 +191,7 @@ app.whenReady().then(async () => {
   registerHotkeys()
 
   // Setup auto-updater (checks GitHub Releases for new versions)
-  setupAutoUpdater(win)
+  void setupAutoUpdater(win)
 
   // --- IPC Handlers ---
 

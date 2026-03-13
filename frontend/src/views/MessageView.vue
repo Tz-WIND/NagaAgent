@@ -1,4 +1,5 @@
 <script lang="ts">
+import type { ChatTab, Message } from '@/utils/session'
 import { useEventListener } from '@vueuse/core'
 import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ACCESS_TOKEN, authExpired } from '@/api'
@@ -8,8 +9,8 @@ import BoxContainer from '@/components/BoxContainer.vue'
 import MessageItem from '@/components/MessageItem.vue'
 import { toolMessage } from '@/composables/useToolStatus'
 import { CONFIG } from '@/utils/config'
-import { live2dState, setEmotion } from '@/utils/live2dController'
-import { type ChatTab, type Message, activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
+import { live2dState } from '@/utils/live2dController'
+import { activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
 const isSending = ref(false)
@@ -72,20 +73,6 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
       CURRENT_SESSION_ID.value = sessionId
     }
 
-    // 情感解析函数
-    function parseEmotionFromText(text: string): 'normal' | 'positive' | 'negative' | 'surprise' {
-      if (text.includes('【正面情感】')) {
-        return 'positive'
-      }
-      else if (text.includes('【负面情感】')) {
-        return 'negative'
-      }
-      else if (text.includes('【惊讶情感】')) {
-        return 'surprise'
-      }
-      return 'normal'
-    }
-
     for await (const chunk of response) {
       if (chunk.type === 'reasoning') {
         message.reasoning = (message.reasoning || '') + chunk.text
@@ -93,11 +80,6 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
       else if (chunk.type === 'content') {
         pushContent(chunk.text || '')
         spokenContent += chunk.text
-        // 检测情感标记并设置表情
-        const emotion = parseEmotionFromText(chunk.text || '')
-        if (emotion !== 'normal') {
-          void setEmotion(emotion)
-        }
         // 逐句 TTS：检测句子边界（。！？）并入队
         if (voiceSync) {
           ttsSentenceBuf += chunk.text || ''
@@ -127,8 +109,8 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
         // 显示工具调用状态
         const calls = chunk.calls || []
         const callDesc = calls.map((c: any) => {
-          const name = c.service_name || c.agentType || 'tool'
-          return `🔧 ${name}`
+          const service = c.service_name || c.agentType || 'tool'
+          return c.tool_name ? `🔧 ${service}:${c.tool_name}` : `🔧 ${service}`
         }).join(', ')
         pushContent(`\n\n> 正在执行工具: ${callDesc}...\n`)
         // OpenClaw 工具可能耗时较长，添加提示
@@ -145,7 +127,8 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
         const results = chunk.results || []
         for (const r of results) {
           const status = r.status === 'success' ? '✅' : '❌'
-          const label = r.tool_name ? `${r.service_name}: ${r.tool_name}` : r.service_name
+          const service = r.service_name || 'tool'
+          const label = r.tool_name ? `${service}: ${r.tool_name}` : service
           const resultText = (r.result || '').trim()
           pushContent(`\n\`\`\`tool-result\n${status} ${label}\n${resultText}\n\`\`\`\n`)
         }
@@ -368,13 +351,15 @@ function finishRename(tab: ChatTab) {
     tab.name = newName
     // 同步消息中的 sender
     for (const msg of tab.messages) {
-      if (msg.sender === oldName) msg.sender = newName
+      if (msg.sender === oldName)
+        msg.sender = newName
     }
     // 同步到后端 + 通讯录
     if (tab.instanceId) {
       API.renameAgent(tab.instanceId, newName).then(() => {
         const contact = agentContacts.value.find(a => a.id === tab.instanceId)
-        if (contact) contact.name = newName
+        if (contact)
+          contact.name = newName
       }).catch(() => {})
     }
   }
@@ -412,7 +397,8 @@ function sendMessage() {
 }
 
 function saveAgentTabMessages(tab: ChatTab) {
-  if (!tab.instanceId) return
+  if (!tab.instanceId)
+    return
   const storageKey = `agent_history_${tab.instanceId}`
   localStorage.setItem(storageKey, JSON.stringify(tab.messages))
 }
@@ -423,7 +409,8 @@ function pushSystemMessage(content: string): Message {
   if (tab.type === 'agent') {
     tab.messages.push(message)
     saveAgentTabMessages(tab)
-  } else {
+  }
+  else {
     MESSAGES.value.push(message)
   }
   nextTick().then(scrollToBottom)
@@ -480,17 +467,21 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
       for await (const chunk of response) {
         if (chunk.type === 'reasoning') {
           assistantMsg.reasoning = (assistantMsg.reasoning || '') + (chunk.text || '')
-        } else if (chunk.type === 'content') {
+        }
+        else if (chunk.type === 'content') {
           contentBuf += chunk.text || ''
           assistantMsg.content = contentBuf
-        } else if (chunk.type === 'content_clean') {
+        }
+        else if (chunk.type === 'content_clean') {
           contentBuf = contentBuf.substring(0, roundContentStart) + (chunk.text || '')
           assistantMsg.content = contentBuf
-        } else if (chunk.type === 'round_start' && (chunk.round ?? 0) > 1) {
+        }
+        else if (chunk.type === 'round_start' && (chunk.round ?? 0) > 1) {
           contentBuf += '\n---\n\n'
           assistantMsg.content = contentBuf
           roundContentStart = contentBuf.length
-        } else if (chunk.type === 'tool_calls') {
+        }
+        else if (chunk.type === 'tool_calls') {
           const calls = chunk.calls || []
           assistantMsg.status = calls.length > 0
             ? `调度工具: ${calls.map(c => c.tool_name || c.service_name || c.agentType || 'tool').join(', ')}`
@@ -503,7 +494,8 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
               args: call,
             })
           }
-        } else if (chunk.type === 'tool_results') {
+        }
+        else if (chunk.type === 'tool_results') {
           assistantMsg.toolEvents = assistantMsg.toolEvents || []
           for (const result of chunk.results || []) {
             assistantMsg.toolEvents.push({
@@ -514,19 +506,23 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
             })
           }
           roundContentStart = contentBuf.length
-        } else if (chunk.type === 'status') {
+        }
+        else if (chunk.type === 'status') {
           assistantMsg.status = chunk.text || ''
-        } else if (chunk.type === 'compress_info') {
+        }
+        else if (chunk.type === 'compress_info') {
           const idx = tab.messages.indexOf(assistantMsg)
           if (idx > 0) {
             tab.messages.splice(idx, 0, { role: 'info', content: chunk.text || '【已压缩上下文】' })
           }
-        } else if (chunk.type === 'auth_expired') {
+        }
+        else if (chunk.type === 'auth_expired') {
           assistantMsg.content = chunk.text || '登录已过期，请重新登录'
         }
         nextTick().then(scrollToBottom)
       }
-    } catch (e: any) {
+    }
+    catch (e: any) {
       const detail = e?.response?.data?.detail || e?.message || e
       assistantMsg.content = `发送失败: ${detail}`
     }
@@ -555,13 +551,17 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
     for await (const chunk of API.streamToAgent(tab.instanceId, msg)) {
       if (chunk.type === 'status') {
         assistantMsg.status = chunk.text
-      } else if (chunk.type === 'content') {
+      }
+      else if (chunk.type === 'content') {
         assistantMsg.content += chunk.text
-      } else if (chunk.type === 'done') {
-        assistantMsg.content = chunk.text  // 用完整文本覆盖，防止拼接偏差
-      } else if (chunk.type === 'error') {
+      }
+      else if (chunk.type === 'done') {
+        assistantMsg.content = chunk.text // 用完整文本覆盖，防止拼接偏差
+      }
+      else if (chunk.type === 'error') {
         assistantMsg.content = `错误: ${chunk.text}`
-      } else if (chunk.type === 'tool_call') {
+      }
+      else if (chunk.type === 'tool_call') {
         assistantMsg.status = `🔧 ${chunk.name || '工具调用中'}...`
         assistantMsg.toolEvents = assistantMsg.toolEvents || []
         assistantMsg.toolEvents.push({
@@ -570,7 +570,8 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
           toolCallId: chunk.toolCallId,
           args: chunk.args,
         })
-      } else if (chunk.type === 'tool_result') {
+      }
+      else if (chunk.type === 'tool_result') {
         assistantMsg.status = `${chunk.isError ? '❌' : '✅'} ${chunk.name || '工具'} ${chunk.isError ? '失败' : '完成'}`
         assistantMsg.toolEvents = assistantMsg.toolEvents || []
         assistantMsg.toolEvents.push({
@@ -583,7 +584,6 @@ async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string
       }
       nextTick().then(scrollToBottom)
     }
-
   }
   catch (e: any) {
     const detail = e?.response?.data?.detail || e.message || e
