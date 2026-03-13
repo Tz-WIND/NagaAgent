@@ -26,9 +26,11 @@ import { useParallax } from '@/composables/useParallax'
 import { useStartupProgress } from '@/composables/useStartupProgress'
 import { startToolPolling, stopToolPolling } from '@/composables/useToolStatus'
 import { checkForUpdate, showUpdateDialog, updateInfo } from '@/composables/useVersionCheck'
+import API from '@/api/core'
 import { backendConnected, CONFIG } from '@/utils/config'
 import { clearExpression, setExpression } from '@/utils/live2dController'
 import { destroyParallax, initParallax } from '@/utils/parallax'
+import { activeTabId, agentContacts, tabs } from '@/utils/session'
 import FloatingView from '@/views/FloatingView.vue'
 
 let _splashDismissed = false
@@ -54,6 +56,35 @@ const customBgUrl = computed(() => getActiveBackgroundUrl())
 
 const { width, height } = useWindowSize()
 const scale = computed(() => height.value / (10000 - CONFIG.value.web_live2d.model.size))
+const characterModelMap = ref<Record<string, string>>({})
+const live2dRenderKey = ref(0)
+const activeAgentCharacterTemplate = computed(() => {
+  const tab = tabs.value.find(item => item.id === activeTabId.value)
+  if (!tab || tab.type !== 'agent' || !tab.instanceId)
+    return ''
+  return agentContacts.value.find(item => item.id === tab.instanceId)?.characterTemplate || tab.characterTemplate || ''
+})
+const resolvedLive2dSource = computed(() => {
+  const template = activeAgentCharacterTemplate.value
+  if (template && characterModelMap.value[template]) {
+    return characterModelMap.value[template]
+  }
+  return CONFIG.value.web_live2d.model.source
+})
+
+async function loadCharacterModelMap() {
+  try {
+    const res = await API.listCharacterTemplates()
+    characterModelMap.value = Object.fromEntries(
+      (res.characters || [])
+        .filter(item => item.name && item.live2dModelUrl)
+        .map(item => [item.name, item.live2dModelUrl!]),
+    )
+  }
+  catch {
+    characterModelMap.value = {}
+  }
+}
 
 // ─── 悬浮球模式状态 ──────────────────────────
 const floatingState = ref<FloatingState>('classic')
@@ -239,6 +270,16 @@ watch(sessionRestored, (restored) => {
   }
 })
 
+watch([activeTabId, activeAgentCharacterTemplate, resolvedLive2dSource], () => {
+  live2dRenderKey.value += 1
+})
+
+watch(backendConnected, (connected) => {
+  if (connected) {
+    void loadCharacterModelMap()
+  }
+}, { immediate: true })
+
 // ─── 全局轮询：登录后启动，登出后停止（积分刷新 + 心跳检测）───
 watch(isNagaLoggedIn, (loggedIn) => {
   if (loggedIn && backendConnected.value) {
@@ -347,7 +388,8 @@ onUnmounted(() => {
       >
         <img src="/assets/light.png" alt="" class="absolute right-0 bottom-0 w-80vw h-60vw op-40 -z-1 will-change-transform" :style="{ transform: `translate(${lightTx}px, ${lightTy}px)` }">
         <Live2dModel
-          :source="CONFIG.web_live2d.model.source"
+          :key="live2dRenderKey"
+          :source="resolvedLive2dSource"
           :x="CONFIG.web_live2d.model.x"
           :y="CONFIG.web_live2d.model.y"
           :width="width" :height="height"

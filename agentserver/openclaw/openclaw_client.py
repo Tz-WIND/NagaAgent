@@ -915,6 +915,68 @@ class OpenClawClient:
         """
         messages = []
 
+        def _stringify_tool_payload(value: Any) -> str:
+            if value is None:
+                return ""
+            if isinstance(value, str):
+                return value
+            try:
+                return json.dumps(value, ensure_ascii=False, indent=2)
+            except Exception:
+                return str(value)
+
+        def _extract_message(item: Dict[str, Any]) -> Dict[str, Any]:
+            role = item.get("role", "unknown")
+            raw_content = item.get("content", "")
+            text_parts: List[str] = []
+            tool_events: List[Dict[str, Any]] = []
+
+            if isinstance(raw_content, str):
+                if raw_content.strip():
+                    text_parts.append(raw_content)
+            elif isinstance(raw_content, list):
+                for block in raw_content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = str(block.get("type", "")).strip().lower()
+                    if block_type == "text":
+                        text = block.get("text", "")
+                        if isinstance(text, str) and text.strip():
+                            text_parts.append(text)
+                        continue
+
+                    if block_type in {"tool_use", "toolcall", "tool_call"}:
+                        tool_events.append(
+                            {
+                                "type": "tool_call",
+                                "name": block.get("name") or block.get("tool_name") or "",
+                                "toolCallId": block.get("id") or block.get("tool_use_id") or "",
+                                "args": block.get("input") or block.get("args") or block.get("arguments"),
+                            }
+                        )
+                        continue
+
+                    if block_type in {"tool_result", "tool_result_error"}:
+                        tool_events.append(
+                            {
+                                "type": "tool_result",
+                                "name": block.get("name") or block.get("tool_name") or "",
+                                "toolCallId": block.get("tool_use_id") or block.get("toolCallId") or "",
+                                "isError": bool(block.get("is_error", False) or block_type == "tool_result_error"),
+                                "result": _stringify_tool_payload(
+                                    block.get("content", block.get("result", block.get("output", "")))
+                                ),
+                            }
+                        )
+                        continue
+
+            return {
+                "role": role,
+                "content": "\n".join(part for part in text_parts if part).strip(),
+                "type": "message",
+                "toolEvents": tool_events,
+            }
+
         try:
             # 尝试从 result 中提取
             if isinstance(raw_result, dict):
@@ -926,13 +988,7 @@ class OpenClawClient:
                 if msg_list and isinstance(msg_list, list):
                     for msg in msg_list:
                         if isinstance(msg, dict):
-                            messages.append(
-                                {
-                                    "role": msg.get("role", "unknown"),
-                                    "content": msg.get("content", ""),
-                                    "type": "message",
-                                }
-                            )
+                            messages.append(_extract_message(msg))
                     return messages
 
                 # 备选：从 content[].text 解析 JSON
@@ -948,13 +1004,7 @@ class OpenClawClient:
                                     msg_list = parsed.get("messages", [])
                                     for msg in msg_list:
                                         if isinstance(msg, dict):
-                                            messages.append(
-                                                {
-                                                    "role": msg.get("role", "unknown"),
-                                                    "content": msg.get("content", ""),
-                                                    "type": "message",
-                                                }
-                                            )
+                                            messages.append(_extract_message(msg))
                             except json.JSONDecodeError:
                                 # 不是 JSON，作为原始文本返回
                                 if text.strip():

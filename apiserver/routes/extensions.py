@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import sys
@@ -16,8 +17,9 @@ from urllib.error import URLError
 from fastapi import APIRouter, HTTPException, Request, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+import yaml
 
-from system.config import get_config
+from system.config import get_config, get_data_dir
 from apiserver import naga_auth
 from apiserver.api_server import _call_agentserver, FileUploadResponse
 
@@ -31,9 +33,19 @@ router = APIRouter()
 OPENCLAW_STATE_DIR = Path.home() / ".openclaw"
 OPENCLAW_SKILLS_DIR = OPENCLAW_STATE_DIR / "skills"
 OPENCLAW_CONFIG_PATH = OPENCLAW_STATE_DIR / "openclaw.json"
+NAGA_DATA_DIR = get_data_dir()
+NAGA_SKILLS_DIR = NAGA_DATA_DIR / "skills"
+NAGA_PUBLIC_SKILLS_DIR = NAGA_SKILLS_DIR / "public"
+NAGA_CACHE_SKILLS_DIR = NAGA_SKILLS_DIR / "cache"
+NAGA_AGENTS_DIR = NAGA_DATA_DIR / "agents"
+NAGA_AGENTS_MANIFEST_PATH = NAGA_AGENTS_DIR / "agents.json"
 SKILLS_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "skills_templates"
 MCPORTER_DIR = Path.home() / ".mcporter"
 MCPORTER_CONFIG_PATH = MCPORTER_DIR / "config.json"
+SKILL_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+for _path in (OPENCLAW_SKILLS_DIR, NAGA_PUBLIC_SKILLS_DIR, NAGA_CACHE_SKILLS_DIR, NAGA_AGENTS_DIR):
+    _path.mkdir(parents=True, exist_ok=True)
 
 MARKET_ITEMS: List[Dict[str, Any]] = [
     {
@@ -114,11 +126,104 @@ def _download_text(url: str, timeout: int = 20) -> str:
 
 
 def _write_skill_file(skill_name: str, content: str) -> Path:
-    skill_dir = OPENCLAW_SKILLS_DIR / skill_name
+    return _write_skill_file_to_dir(OPENCLAW_SKILLS_DIR, skill_name, content)
+
+
+def _write_skill_file_to_dir(base_dir: Path, skill_name: str, content: str) -> Path:
+    skill_dir = base_dir / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     skill_path = skill_dir / "SKILL.md"
     skill_path.write_text(content, encoding="utf-8")
     return skill_path
+
+
+def _load_agents_manifest() -> List[Dict[str, Any]]:
+    if not NAGA_AGENTS_MANIFEST_PATH.exists():
+        return []
+    try:
+        data = json.loads(NAGA_AGENTS_MANIFEST_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    agents = data.get("agents")
+    return agents if isinstance(agents, list) else []
+
+
+def _get_agent_record(agent_id: str) -> Optional[Dict[str, Any]]:
+    for agent in _load_agents_manifest():
+        if agent.get("id") == agent_id:
+            return agent
+    return None
+
+
+def _parse_skill_summary(
+    skill_dir: Path,
+    scope: str,
+    source: str,
+    owner: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    skill_path = skill_dir / "SKILL.md"
+    if not skill_path.exists():
+        return None
+
+    name = skill_dir.name
+    description = ""
+    version = "1.0.0"
+    tags: List[str] = []
+
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+        match = SKILL_FRONTMATTER_PATTERN.match(content)
+        if match:
+            metadata = yaml.safe_load(match.group(1)) or {}
+            name = metadata.get("name") or name
+            description = metadata.get("description") or ""
+            version = metadata.get("version") or version
+            tags = list(metadata.get("tags") or [])
+        if not description:
+            for line in content.splitlines():
+                stripped = line.strip()
+                if stripped and stripped != "---" and not stripped.startswith("#"):
+                    description = stripped[:120]
+                    break
+    except Exception as exc:
+        logger.warning(f"读取技能摘要失败 [{skill_path}]: {exc}")
+        description = "技能内容解析失败"
+
+    item = {
+        "name": name,
+        "description": description,
+        "version": version,
+        "tags": tags,
+        "scope": scope,
+        "source": source,
+        "path": str(skill_path),
+    }
+    if owner:
+        item.update({
+            "owner_agent_id": owner.get("id"),
+            "owner_agent_name": owner.get("name"),
+            "owner_engine": owner.get("engine", "openclaw"),
+        })
+    return item
+
+
+def _list_skill_dir(
+    base_dir: Path,
+    scope: str,
+    source: str,
+    owner: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    if not base_dir.exists():
+        return []
+
+    items: List[Dict[str, Any]] = []
+    for skill_dir in sorted(base_dir.iterdir()):
+        if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+            continue
+        item = _parse_skill_summary(skill_dir, scope=scope, source=source, owner=owner)
+        if item:
+            items.append(item)
+    return items
 
 
 def _copy_template_dir(template_name: str, skill_name: str) -> None:
@@ -517,6 +622,67 @@ async def delete_mcp_service(name: str):
 class SkillImportRequest(BaseModel):
     name: str
     content: str
+    scope: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+def _build_skill_catalog() -> Dict[str, Any]:
+    public_skills = _list_skill_dir(
+        NAGA_PUBLIC_SKILLS_DIR,
+        scope="public",
+        source="naga-public",
+    )
+    cache_skills = _list_skill_dir(
+        NAGA_CACHE_SKILLS_DIR,
+        scope="cache",
+        source="naga-cache",
+    ) + _list_skill_dir(
+        OPENCLAW_SKILLS_DIR,
+        scope="cache",
+        source="openclaw-local",
+    )
+
+    private_skills: List[Dict[str, Any]] = []
+    for agent in _load_agents_manifest():
+        agent_id = agent.get("id")
+        if not agent_id:
+            continue
+        agent_dir = NAGA_AGENTS_DIR / str(agent_id) / "skills"
+        private_skills.extend(
+            _list_skill_dir(
+                agent_dir,
+                scope="private",
+                source="agent-private",
+                owner=agent,
+            ),
+        )
+
+    return {
+        "remote_hub": {
+            "status": "todo",
+            "message": "远端技能 Hub 待接入，当前先使用本地缓存和手动导入。",
+        },
+        "local_cache": {
+            "skills": cache_skills,
+            "base_dirs": [str(NAGA_CACHE_SKILLS_DIR), str(OPENCLAW_SKILLS_DIR)],
+        },
+        "public_skills": {
+            "skills": public_skills,
+            "base_dir": str(NAGA_PUBLIC_SKILLS_DIR),
+        },
+        "private_skills": {
+            "skills": private_skills,
+            "base_dir": str(NAGA_AGENTS_DIR),
+        },
+    }
+
+
+@router.get("/skills/catalog")
+async def list_skill_catalog():
+    return {
+        "status": "success",
+        "catalog": _build_skill_catalog(),
+    }
 
 
 @router.post("/skills/import")
@@ -534,8 +700,40 @@ enabled: true
 
 {request.content}
 """
-    skill_path = _write_skill_file(request.name, skill_content)
-    return {"status": "success", "message": f"技能已创建: {skill_path}"}
+
+    scope = (request.scope or "openclaw-local").strip().lower()
+    if scope == "legacy":
+        scope = "openclaw-local"
+
+    if scope == "openclaw-local":
+        skill_path = _write_skill_file(request.name, skill_content)
+    elif scope == "cache":
+        skill_path = _write_skill_file_to_dir(NAGA_CACHE_SKILLS_DIR, request.name, skill_content)
+    elif scope == "public":
+        skill_path = _write_skill_file_to_dir(NAGA_PUBLIC_SKILLS_DIR, request.name, skill_content)
+        try:
+            from system.skill_manager import get_skill_manager
+            get_skill_manager().refresh()
+        except Exception:
+            pass
+    elif scope == "private":
+        agent_id = (request.agent_id or "").strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有技能必须指定 agent_id")
+        agent = _get_agent_record(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="目标干员不存在")
+        agent_skill_dir = NAGA_AGENTS_DIR / agent_id / "skills"
+        skill_path = _write_skill_file_to_dir(agent_skill_dir, request.name, skill_content)
+    else:
+        raise HTTPException(status_code=400, detail=f"未知技能范围: {scope}")
+
+    return {
+        "status": "success",
+        "message": f"技能已创建: {skill_path}",
+        "scope": scope,
+        "path": str(skill_path),
+    }
 
 
 # ============ 文件上传 ============
@@ -649,11 +847,25 @@ async def travel_start(payload: Dict[str, Any]):
     if active:
         raise HTTPException(409, f"已有进行中的旅行: {active.session_id}")
 
+    agent_id = payload.get("agent_id")
+    if agent_id:
+        agent = _get_agent_record(str(agent_id))
+        if not agent:
+            raise HTTPException(404, "指定的探索干员不存在")
+        if agent.get("engine", "openclaw") != "openclaw":
+            raise HTTPException(400, "网络探索目前仅支持 OpenClaw 干员执行")
+
     session = create_session(
+        agent_id=agent_id,
         time_limit_minutes=payload.get("time_limit_minutes", 300),
         credit_limit=payload.get("credit_limit", 1000),
         want_friends=payload.get("want_friends", True),
         friend_description=payload.get("friend_description"),
+        goal_prompt=payload.get("goal_prompt"),
+        post_to_forum=payload.get("post_to_forum", True),
+        deliver_full_report=payload.get("deliver_full_report", True),
+        deliver_channel=payload.get("deliver_channel"),
+        deliver_to=payload.get("deliver_to"),
     )
     # 代理到 agent server
     try:
@@ -897,9 +1109,7 @@ async def search_quintuples(keywords: str = ""):
 
 @router.api_route("/tools/search", methods=["GET", "POST"])
 async def proxy_search(request: Request):
-    """Brave Search 兼容代理 → NagaModel /v1/tools/search"""
-    if not naga_auth.is_authenticated():
-        raise HTTPException(status_code=401, detail="未登录 NagaModel")
+    """统一搜索代理: 优先 NagaModel，回退 Brave，供 Naga 与 OpenClaw 共用。"""
 
     if request.method == "GET":
         params = dict(request.query_params)
@@ -907,15 +1117,57 @@ async def proxy_search(request: Request):
         params = await request.json()
 
     import httpx
+
+    async def _call_upstream(client: httpx.AsyncClient, url: str, headers: dict):
+        if request.method == "GET":
+            return await client.get(url, params=params, headers=headers, timeout=30)
+        return await client.post(url, json=params, headers=headers, timeout=30)
+
     try:
         async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                naga_auth.NAGA_MODEL_URL + "/tools/search",
-                json=params,
-                headers={"Authorization": f"Bearer {naga_auth.get_access_token()}"},
-                timeout=30,
-            )
+            resp = None
+
+            # 优先 Naga 登录态；401 时自动 refresh 一次
+            if naga_auth.is_authenticated():
+                upstream_url = naga_auth.NAGA_MODEL_URL + "/tools/search"
+                resp = await _call_upstream(
+                    client,
+                    upstream_url,
+                    {"Authorization": f"Bearer {naga_auth.get_access_token()}"},
+                )
+                if resp.status_code == 401 and naga_auth.has_refresh_token():
+                    logger.warning("搜索代理检测到 Naga token 过期，尝试刷新后重试")
+                    try:
+                        await naga_auth.refresh()
+                        resp = await _call_upstream(
+                            client,
+                            upstream_url,
+                            {"Authorization": f"Bearer {naga_auth.get_access_token()}"},
+                        )
+                    except Exception as refresh_err:
+                        logger.warning(f"搜索代理刷新 Naga token 失败: {refresh_err}")
+
+            # Naga 不可用或仍然 401/403 时，回退 Brave
+            if resp is None or resp.status_code in (401, 403):
+                search_key = getattr(config.online_search, "search_api_key", "")
+                search_base = getattr(config.online_search, "search_api_base", "")
+                if not search_key or not search_base:
+                    if resp is not None and resp.status_code in (401, 403):
+                        detail = resp.text
+                        raise HTTPException(status_code=401, detail=detail or "Naga 搜索认证失败，且未配置 Brave 搜索")
+                    raise HTTPException(status_code=401, detail="未登录且未配置搜索服务")
+                resp = await _call_upstream(
+                    client,
+                    search_base,
+                    {
+                        "Accept": "application/json",
+                        "X-Subscription-Token": search_key,
+                    },
+                )
+
         return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning(f"搜索代理失败: {e}")
         return JSONResponse(

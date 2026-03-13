@@ -21,8 +21,27 @@ defineEmits<{ 'new-travel': [] }>()
   </div>
 
   <!-- 总结 -->
+  <div v-if="session.goalPrompt" class="text-white/35 text-[11px] bg-white/2 rounded-lg p-3">
+    <div>探索方向：{{ session.goalPrompt }}</div>
+    <div v-if="session.agentName" class="mt-1">
+      执行干员：{{ session.agentName }}
+    </div>
+  </div>
+
   <div v-if="session.summary" class="text-white/60 text-xs leading-relaxed bg-white/3 rounded-lg p-3">
     {{ session.summary }}
+  </div>
+
+  <div
+    v-if="session.forumPostStatus || session.fullReportDeliveryStatus"
+    class="grid grid-cols-1 gap-2 text-[11px] text-white/45 bg-white/2 rounded-lg p-3"
+  >
+    <div v-if="session.forumPostStatus">
+      论坛精华帖：{{ session.forumPostStatus }}<span v-if="session.forumPostId">（{{ session.forumPostId }}）</span>
+    </div>
+    <div v-if="session.fullReportDeliveryStatus">
+      完整报告回传：{{ session.fullReportDeliveryStatus }}
+    </div>
   </div>
 
   <!-- 错误信息 -->

@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import time as _time
+from json import JSONDecodeError
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import httpx
@@ -17,6 +18,12 @@ from system.config import get_config, get_server_port
 from apiserver import naga_auth
 
 logger = logging.getLogger(__name__)
+
+_TOOL_SECTION_BEGIN = "<|tool_calls_section_begin|>"
+_TOOL_SECTION_END = "<|tool_calls_section_end|>"
+_TOOL_CALL_BEGIN = "<|tool_call_begin|>functions."
+_TOOL_CALL_ARG_BEGIN = "<|tool_call_argument_begin|>"
+_TOOL_CALL_END = "<|tool_call_end|>"
 
 # ---------------------------------------------------------------------------
 # 解析工具
@@ -112,6 +119,85 @@ def _extract_tool_blocks(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     return clean_text, tool_calls
 
 
+def _convert_special_tool_call_to_dispatch(tool_name: str, arguments: Any) -> List[Dict[str, Any]]:
+    args = arguments if isinstance(arguments, dict) else {"value": arguments}
+
+    if tool_name == "web_search":
+        queries = args.get("queries")
+        if isinstance(queries, list):
+            shared_args = {k: v for k, v in args.items() if k != "queries"}
+            dispatches: List[Dict[str, Any]] = []
+            for query in queries:
+                if not isinstance(query, str) or not query.strip():
+                    continue
+                dispatch_args = dict(shared_args)
+                dispatch_args["query"] = query.strip()
+                dispatches.append({
+                    "agentType": "tool",
+                    "tool_name": "web_search",
+                    "args": dispatch_args,
+                })
+            if dispatches:
+                return dispatches
+
+    return [{
+        "agentType": "tool",
+        "tool_name": tool_name,
+        "args": args,
+    }]
+
+
+def _extract_special_tool_calls(text: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """提取 Kimi/OpenAI 兼容层泄露出的特殊工具调用语法。"""
+    if _TOOL_CALL_BEGIN not in text:
+        return text, []
+
+    decoder = json.JSONDecoder()
+    tool_calls: List[Dict[str, Any]] = []
+    clean_parts: List[str] = []
+    cursor = 0
+
+    while True:
+        start = text.find(_TOOL_CALL_BEGIN, cursor)
+        if start < 0:
+            clean_parts.append(text[cursor:])
+            break
+
+        section_start = text.rfind(_TOOL_SECTION_BEGIN, cursor, start)
+        clean_parts.append(text[cursor:section_start if section_start >= 0 else start])
+
+        name_start = start + len(_TOOL_CALL_BEGIN)
+        colon = text.find(":", name_start)
+        arg_start = text.find(_TOOL_CALL_ARG_BEGIN, colon if colon >= 0 else name_start)
+        if colon < 0 or arg_start < 0:
+            clean_parts.append(text[start:])
+            break
+
+        tool_name = text[name_start:colon].strip()
+        json_start = arg_start + len(_TOOL_CALL_ARG_BEGIN)
+
+        try:
+            arguments, consumed = decoder.raw_decode(text[json_start:])
+        except JSONDecodeError:
+            logger.warning("[AgenticLoop] 无法解析特殊工具调用 JSON，保留原始文本")
+            clean_parts.append(text[start:])
+            break
+
+        tool_calls.extend(_convert_special_tool_call_to_dispatch(tool_name, arguments))
+
+        end = text.find(_TOOL_CALL_END, json_start + consumed)
+        if end < 0:
+            cursor = json_start + consumed
+        else:
+            cursor = end + len(_TOOL_CALL_END)
+            if text.startswith(_TOOL_SECTION_END, cursor):
+                cursor += len(_TOOL_SECTION_END)
+
+    clean_text = "".join(clean_parts).strip()
+    clean_text = re.sub(r"\n{3,}", "\n\n", clean_text)
+    return clean_text, tool_calls
+
+
 def parse_tool_calls_from_text(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """从LLM完整输出中提取所有工具调用JSON。
 
@@ -122,6 +208,10 @@ def parse_tool_calls_from_text(text: str) -> Tuple[str, List[Dict[str, Any]]]:
     """
     # 优先使用 ```tool``` 代码块
     clean_text, tool_calls = _extract_tool_blocks(text)
+    if tool_calls:
+        return clean_text, tool_calls
+
+    clean_text, tool_calls = _extract_special_tool_calls(text)
     if tool_calls:
         return clean_text, tool_calls
 

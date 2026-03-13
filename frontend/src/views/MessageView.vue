@@ -1,5 +1,5 @@
 <script lang="ts">
-import { onKeyStroke, useEventListener } from '@vueuse/core'
+import { useEventListener } from '@vueuse/core'
 import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ACCESS_TOKEN, authExpired } from '@/api'
 import API from '@/api/core'
@@ -9,7 +9,7 @@ import MessageItem from '@/components/MessageItem.vue'
 import { toolMessage } from '@/composables/useToolStatus'
 import { CONFIG } from '@/utils/config'
 import { live2dState, setEmotion } from '@/utils/live2dController'
-import { type ChatTab, activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
+import { type ChatTab, type Message, activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
 
 const isSending = ref(false)
@@ -241,8 +241,67 @@ async function chatStreamInternal(content: string, options?: { skill?: string, i
 
 <script setup lang="ts">
 const input = defineModel<string>()
-const containerRef = useTemplateRef('containerRef')
+const normalContainerRef = useTemplateRef('normalContainerRef')
+const expandedContainerRef = useTemplateRef('expandedContainerRef')
+const composerRef = ref<HTMLTextAreaElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const inputDockRef = ref<HTMLElement | null>(null)
+const isExpanded = ref(false)
+const expandedStyle = ref<Record<string, string>>({})
+const expandedInputStyle = ref<Record<string, string>>({})
+
+function isImeComposing(event: KeyboardEvent) {
+  return event.isComposing || (event as any).keyCode === 229
+}
+
+function resizeComposer() {
+  if (!composerRef.value) {
+    return
+  }
+  composerRef.value.style.height = '0px'
+  const nextHeight = Math.min(Math.max(composerRef.value.scrollHeight, 44), 160)
+  composerRef.value.style.height = `${nextHeight}px`
+}
+
+function toggleExpanded() {
+  isExpanded.value = !isExpanded.value
+  if (isExpanded.value) {
+    nextTick(() => {
+      resizeComposer()
+      updateExpandedLayout()
+      nextTick().then(scrollToBottom)
+    })
+  }
+}
+
+function handleComposerEnter(event: KeyboardEvent) {
+  if (isImeComposing(event) || event.shiftKey) {
+    return
+  }
+  event.preventDefault()
+  sendMessage()
+}
+
+function updateExpandedLayout() {
+  const chatRect = (normalContainerRef.value as any)?.$el?.getBoundingClientRect?.()
+  if (!chatRect || !inputDockRef.value) {
+    return
+  }
+  const inputRect = inputDockRef.value.getBoundingClientRect()
+  const left = Math.max(8, chatRect.left)
+  const composerHeight = Math.max(56, Math.ceil(inputRect.height))
+  expandedStyle.value = {
+    left: `${left}px`,
+    top: '8px',
+    right: '8px',
+    bottom: `${composerHeight + 16}px`,
+  }
+  expandedInputStyle.value = {
+    left: `${left}px`,
+    right: '8px',
+    bottom: '8px',
+  }
+}
 
 function toggleTTS() {
   ttsEnabled.value = !ttsEnabled.value
@@ -257,8 +316,18 @@ watch(isPlaying, (playing) => {
   live2dState.value = playing ? 'talking' : 'idle'
 })
 
+watch(input, () => {
+  nextTick(() => {
+    resizeComposer()
+    if (isExpanded.value) {
+      updateExpandedLayout()
+    }
+  })
+})
+
 function scrollToBottom() {
-  containerRef.value?.scrollToBottom()
+  normalContainerRef.value?.scrollToBottom()
+  expandedContainerRef.value?.scrollToBottom()
 }
 
 // ── Tab 管理 ──
@@ -317,9 +386,9 @@ watch(activeTabId, async (id) => {
   const tab = tabs.value.find(t => t.id === id)
   if (tab) {
     tab.unread = 0
-    // 懒加载干员对话历史（首次点击立即触发）
-    if (tab.type === 'agent' && tab.instanceId && !isAgentLoading(tab.instanceId) && tab.messages.length === 0) {
-      await loadAgentMessages(tab)
+    // 切换到干员 tab 时强制触发一次后端历史/唤醒，避免只命中本地缓存导致进程未拉起
+    if (tab.type === 'agent' && tab.instanceId && !isAgentLoading(tab.instanceId)) {
+      await loadAgentMessages(tab, { forceRefresh: true })
       nextTick().then(scrollToBottom)
     }
   }
@@ -342,16 +411,143 @@ function sendMessage() {
   input.value = ''
 }
 
-async function sendToAgent(tab: ChatTab, msg: string) {
+function saveAgentTabMessages(tab: ChatTab) {
+  if (!tab.instanceId) return
+  const storageKey = `agent_history_${tab.instanceId}`
+  localStorage.setItem(storageKey, JSON.stringify(tab.messages))
+}
+
+function pushSystemMessage(content: string): Message {
+  const message: Message = { role: 'system', content }
+  const tab = getActiveTab()
+  if (tab.type === 'agent') {
+    tab.messages.push(message)
+    saveAgentTabMessages(tab)
+  } else {
+    MESSAGES.value.push(message)
+  }
+  nextTick().then(scrollToBottom)
+  return message
+}
+
+function dispatchToActiveTab(content: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
+  const tab = getActiveTab()
+  if (tab.type === 'agent') {
+    void sendToAgent(tab, content, options)
+    return
+  }
+  chatStream(content, options)
+  nextTick().then(scrollToBottom)
+}
+
+async function sendToAgent(tab: ChatTab, msg: string, options?: { skill?: string, images?: string[], voiceInput?: boolean }) {
   if (!tab.instanceId) {
     tab.messages.push({ role: 'system', content: '干员实例未就绪，请稍后再试' })
+    return
+  }
+  if (tab.engine === 'naga-core') {
+    tab.messages.push({ role: 'user', content: msg })
+    nextTick().then(scrollToBottom)
+
+    tab.messages.push({
+      role: 'assistant',
+      content: '',
+      reasoning: '',
+      generating: true,
+      status: options?.voiceInput ? '理解话语中' : '思考中',
+      sender: tab.name,
+      toolEvents: [],
+    })
+    const assistantMsg = tab.messages[tab.messages.length - 1]!
+    let contentBuf = ''
+    let roundContentStart = 0
+
+    try {
+      const { sessionId, response } = await API.chatStream(msg, {
+        sessionId: tab.sessionId,
+        agentId: tab.instanceId,
+        disableTTS: true,
+        skill: options?.skill,
+        images: options?.images,
+        temporary: false,
+      })
+
+      if (sessionId) {
+        tab.sessionId = sessionId
+        localStorage.setItem(`agent_session_${tab.instanceId}`, sessionId)
+      }
+
+      for await (const chunk of response) {
+        if (chunk.type === 'reasoning') {
+          assistantMsg.reasoning = (assistantMsg.reasoning || '') + (chunk.text || '')
+        } else if (chunk.type === 'content') {
+          contentBuf += chunk.text || ''
+          assistantMsg.content = contentBuf
+        } else if (chunk.type === 'content_clean') {
+          contentBuf = contentBuf.substring(0, roundContentStart) + (chunk.text || '')
+          assistantMsg.content = contentBuf
+        } else if (chunk.type === 'round_start' && (chunk.round ?? 0) > 1) {
+          contentBuf += '\n---\n\n'
+          assistantMsg.content = contentBuf
+          roundContentStart = contentBuf.length
+        } else if (chunk.type === 'tool_calls') {
+          const calls = chunk.calls || []
+          assistantMsg.status = calls.length > 0
+            ? `调度工具: ${calls.map(c => c.tool_name || c.service_name || c.agentType || 'tool').join(', ')}`
+            : '调度工具中'
+          assistantMsg.toolEvents = assistantMsg.toolEvents || []
+          for (const call of calls) {
+            assistantMsg.toolEvents.push({
+              type: 'tool_call',
+              name: call.tool_name || call.service_name || call.agentType || '工具',
+              args: call,
+            })
+          }
+        } else if (chunk.type === 'tool_results') {
+          assistantMsg.toolEvents = assistantMsg.toolEvents || []
+          for (const result of chunk.results || []) {
+            assistantMsg.toolEvents.push({
+              type: 'tool_result',
+              name: result.tool_name || result.service_name || '工具',
+              isError: result.status !== 'success',
+              result: result.result,
+            })
+          }
+          roundContentStart = contentBuf.length
+        } else if (chunk.type === 'status') {
+          assistantMsg.status = chunk.text || ''
+        } else if (chunk.type === 'compress_info') {
+          const idx = tab.messages.indexOf(assistantMsg)
+          if (idx > 0) {
+            tab.messages.splice(idx, 0, { role: 'info', content: chunk.text || '【已压缩上下文】' })
+          }
+        } else if (chunk.type === 'auth_expired') {
+          assistantMsg.content = chunk.text || '登录已过期，请重新登录'
+        }
+        nextTick().then(scrollToBottom)
+      }
+    } catch (e: any) {
+      const detail = e?.response?.data?.detail || e?.message || e
+      assistantMsg.content = `发送失败: ${detail}`
+    }
+
+    delete assistantMsg.generating
+    delete assistantMsg.status
+    if (!assistantMsg.reasoning) {
+      delete assistantMsg.reasoning
+    }
+    saveAgentTabMessages(tab)
+    if (activeTabId.value !== tab.id) {
+      tab.unread++
+    }
+    nextTick().then(scrollToBottom)
     return
   }
 
   tab.messages.push({ role: 'user', content: msg })
   nextTick().then(scrollToBottom)
 
-  tab.messages.push({ role: 'assistant', content: '', generating: true, status: '思考中', sender: tab.name })
+  tab.messages.push({ role: 'assistant', content: '', generating: true, status: '思考中', sender: tab.name, toolEvents: [] })
   const assistantMsg = tab.messages[tab.messages.length - 1]!
 
   try {
@@ -367,16 +563,27 @@ async function sendToAgent(tab: ChatTab, msg: string) {
         assistantMsg.content = `错误: ${chunk.text}`
       } else if (chunk.type === 'tool_call') {
         assistantMsg.status = `🔧 ${chunk.name || '工具调用中'}...`
-        assistantMsg.content += `\n\n> 🔧 调用工具: ${chunk.name || '工具'}...\n`
+        assistantMsg.toolEvents = assistantMsg.toolEvents || []
+        assistantMsg.toolEvents.push({
+          type: 'tool_call',
+          name: chunk.name || '工具',
+          toolCallId: chunk.toolCallId,
+          args: chunk.args,
+        })
       } else if (chunk.type === 'tool_result') {
-        assistantMsg.status = `✅ ${chunk.name || '工具'} 完成`
-        assistantMsg.content += `> ✅ ${chunk.name || '工具'} 完成\n\n`
+        assistantMsg.status = `${chunk.isError ? '❌' : '✅'} ${chunk.name || '工具'} ${chunk.isError ? '失败' : '完成'}`
+        assistantMsg.toolEvents = assistantMsg.toolEvents || []
+        assistantMsg.toolEvents.push({
+          type: 'tool_result',
+          name: chunk.name || '工具',
+          toolCallId: chunk.toolCallId,
+          isError: chunk.isError,
+          result: chunk.result ?? chunk.text,
+        })
       }
       nextTick().then(scrollToBottom)
     }
 
-    if (!assistantMsg.content)
-      assistantMsg.content = '（无回复）'
   }
   catch (e: any) {
     const detail = e?.response?.data?.detail || e.message || e
@@ -385,6 +592,9 @@ async function sendToAgent(tab: ChatTab, msg: string) {
 
   delete assistantMsg.generating
   delete assistantMsg.status
+
+  // 保存干员对话历史到 localStorage
+  saveAgentTabMessages(tab)
 
   // 非活跃 tab → 未读+1
   if (activeTabId.value !== tab.id) {
@@ -397,12 +607,13 @@ async function sendToAgent(tab: ChatTab, msg: string) {
 onMounted(async () => {
   loadCurrentSession()
   scrollToBottom()
+  nextTick(resizeComposer)
 })
 useEventListener('token', scrollToBottom)
-onKeyStroke('Enter', (e) => {
-  if (e.isComposing)
-    return
-  sendMessage()
+useEventListener(window, 'resize', () => {
+  if (isExpanded.value) {
+    updateExpandedLayout()
+  }
 })
 
 // Session history
@@ -472,33 +683,28 @@ async function handleFileUpload(event: Event) {
 
   if (ext && parseable.includes(ext)) {
     // 解析文档内容后发送给文本模型
-    MESSAGES.value.push({ role: 'system', content: `正在解析文件: ${file.name}...` })
+    const msg = pushSystemMessage(`正在解析文件: ${file.name}...`)
     try {
       const result = await API.parseDocument(file)
-      const msg = MESSAGES.value[MESSAGES.value.length - 1]!
       const truncNote = result.truncated ? '（内容过长，已截断）' : ''
       msg.content = `文件解析完成: ${file.name}${truncNote}`
-      chatStream(`以下是文件「${file.name}」的内容：\n\n${result.content}\n\n请分析这个文件的内容。`)
-      nextTick().then(scrollToBottom)
+      dispatchToActiveTab(`以下是文件「${file.name}」的内容：\n\n${result.content}\n\n请分析这个文件的内容。`)
     }
     catch (err: any) {
-      const msg = MESSAGES.value[MESSAGES.value.length - 1]!
       msg.content = `文件解析失败: ${err?.response?.data?.detail || err.message}`
     }
   }
   else {
     // 其他格式走原有上传逻辑
-    MESSAGES.value.push({ role: 'system', content: `正在上传文件: ${file.name}...` })
+    const msg = pushSystemMessage(`正在上传文件: ${file.name}...`)
     try {
       const result = await API.uploadDocument(file)
-      const msg = MESSAGES.value[MESSAGES.value.length - 1]!
       msg.content = `文件上传成功: ${file.name}`
       if (result.filePath) {
-        chatStream(`请分析我刚上传的文件「${file.name}」，文件完整路径: ${result.filePath}`)
+        dispatchToActiveTab(`请分析我刚上传的文件「${file.name}」，文件完整路径: ${result.filePath}`)
       }
     }
     catch (err: any) {
-      const msg = MESSAGES.value[MESSAGES.value.length - 1]!
       msg.content = `文件上传失败: ${err.message}`
     }
   }
@@ -540,20 +746,19 @@ async function toggleVoiceInput() {
         const { text } = await API.transcribeAudio(audioBlob, { language: 'zh' })
         if (text && typeof text === 'string' && text.trim()) {
           // 语音识别成功：直接发送（带语音标注前缀）
-          chatStream(`以下是用户的语音输入：【${text.trim()}】`, { voiceInput: true })
-          nextTick().then(scrollToBottom)
+          dispatchToActiveTab(`以下是用户的语音输入：【${text.trim()}】`, { voiceInput: true })
         }
       }
       catch (err: any) {
         const status = err?.response?.status
         if (status === 401) {
-          MESSAGES.value.push({ role: 'system', content: '语音识别需要登录后使用' })
+          pushSystemMessage('语音识别需要登录后使用')
         }
         else if (status === 402) {
-          MESSAGES.value.push({ role: 'system', content: '余额不足，无法使用语音识别' })
+          pushSystemMessage('余额不足，无法使用语音识别')
         }
         else {
-          MESSAGES.value.push({ role: 'system', content: `语音识别失败: ${err.message || err}` })
+          pushSystemMessage(`语音识别失败: ${err.message || err}`)
         }
       }
     }
@@ -563,10 +768,10 @@ async function toggleVoiceInput() {
   }
   catch (err: any) {
     if (err.name === 'NotAllowedError') {
-      MESSAGES.value.push({ role: 'system', content: '麦克风权限被拒绝，请在系统设置中允许麦克风访问' })
+      pushSystemMessage('麦克风权限被拒绝，请在系统设置中允许麦克风访问')
     }
     else {
-      MESSAGES.value.push({ role: 'system', content: `无法启动录音: ${err.message || err}` })
+      pushSystemMessage(`无法启动录音: ${err.message || err}`)
     }
   }
 }
@@ -596,31 +801,48 @@ function getSupportedMimeType(): string {
       <AgentContacts />
 
       <!-- 主内容区 -->
-      <BoxContainer ref="containerRef" class="w-full grow" hide-back>
+      <BoxContainer ref="normalContainerRef" class="w-full grow" hide-back>
         <!-- Tab Bar：header slot -->
         <template #header>
-          <div class="flex gap-1 px-1 pt-3 pb-2">
-            <button
-              v-for="tab in tabs" :key="tab.id"
-              class="tab-btn" :class="{ active: tab.id === activeTabId }"
-              @click="activeTabId = tab.id"
-              @dblclick="startRename(tab)"
-            >
-              <input
-                v-if="renamingTabId === tab.id"
-                ref="renameInputRef"
-                v-model="renameValue"
-                class="tab-rename-input"
-                @blur="finishRename(tab)"
-                @keydown.enter="finishRename(tab)"
-                @click.stop
+          <div class="message-header px-1 pt-3 pb-2">
+            <div class="tab-row">
+              <button
+                v-for="tab in tabs" :key="tab.id"
+                class="tab-btn" :class="{ active: tab.id === activeTabId }"
+                @click="activeTabId = tab.id"
+                @dblclick="startRename(tab)"
               >
-              <template v-else>
-                {{ tab.name }}
-                <span v-if="tab.type === 'agent'" class="tab-close" @click.stop="closeTab(tab)">×</span>
-              </template>
-              <span v-if="tab.unread && tab.id !== activeTabId" class="badge">{{ tab.unread }}</span>
-            </button>
+                <input
+                  v-if="renamingTabId === tab.id"
+                  ref="renameInputRef"
+                  v-model="renameValue"
+                  class="tab-rename-input"
+                  @blur="finishRename(tab)"
+                  @keydown.enter="finishRename(tab)"
+                  @click.stop
+                >
+                <template v-else>
+                  {{ tab.name }}
+                  <span v-if="tab.type === 'agent'" class="tab-close" @click.stop="closeTab(tab)">×</span>
+                </template>
+                <span v-if="tab.unread && tab.id !== activeTabId" class="badge">{{ tab.unread }}</span>
+              </button>
+            </div>
+            <div class="window-actions">
+              <button
+                v-if="!isExpanded"
+                class="window-btn"
+                title="放大对话窗口"
+                @click="toggleExpanded"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M15 3h6v6" />
+                  <path d="M9 21H3v-6" />
+                  <path d="M21 3l-7 7" />
+                  <path d="M3 21l7-7" />
+                </svg>
+              </button>
+            </div>
           </div>
         </template>
 
@@ -637,10 +859,82 @@ function getSupportedMimeType(): string {
             :role="item.role" :content="item.content"
             :reasoning="item.reasoning" :sender="item.sender"
             :generating="item.generating" :status="item.status"
+            :tool-events="item.toolEvents"
             :class="(item.generating && index === activeMessages.length - 1) || 'border-b'"
           />
         </div>
       </BoxContainer>
+
+      <Teleport to="body">
+        <div v-if="isExpanded" class="expanded-chat-overlay" :style="expandedStyle">
+          <BoxContainer
+            ref="expandedContainerRef"
+            class="message-shell size-full"
+            box-class="w-full h-full"
+            :parallax="false"
+            hide-back
+          >
+            <!-- Tab Bar：header slot -->
+            <template #header>
+              <div class="message-header px-1 pt-3 pb-2">
+                <div class="tab-row">
+                  <button
+                    v-for="tab in tabs" :key="tab.id"
+                    class="tab-btn" :class="{ active: tab.id === activeTabId }"
+                    @click="activeTabId = tab.id"
+                    @dblclick="startRename(tab)"
+                  >
+                    <input
+                      v-if="renamingTabId === tab.id"
+                      ref="renameInputRef"
+                      v-model="renameValue"
+                      class="tab-rename-input"
+                      @blur="finishRename(tab)"
+                      @keydown.enter="finishRename(tab)"
+                      @click.stop
+                    >
+                    <template v-else>
+                      {{ tab.name }}
+                      <span v-if="tab.type === 'agent'" class="tab-close" @click.stop="closeTab(tab)">×</span>
+                    </template>
+                    <span v-if="tab.unread && tab.id !== activeTabId" class="badge">{{ tab.unread }}</span>
+                  </button>
+                </div>
+                <div class="window-actions">
+                  <button
+                    class="window-btn"
+                    title="缩小对话窗口"
+                    @click="toggleExpanded"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M14 10 21 3" />
+                      <path d="M21 10V3h-7" />
+                      <path d="M3 14l7 7" />
+                      <path d="M3 21h7v-7" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </template>
+
+            <div v-if="agentLoadingActive" class="agent-loading-overlay">
+              <div class="agent-loading-spinner" />
+              <div class="agent-loading-text">干员加载中</div>
+            </div>
+
+            <div v-else class="grid gap-4 pb-8">
+              <MessageItem
+                v-for="item, index in activeMessages" :key="`expanded-${index}`"
+                :role="item.role" :content="item.content"
+                :reasoning="item.reasoning" :sender="item.sender"
+                :generating="item.generating" :status="item.status"
+                :tool-events="item.toolEvents"
+                :class="(item.generating && index === activeMessages.length - 1) || 'border-b'"
+              />
+            </div>
+          </BoxContainer>
+        </div>
+      </Teleport>
     </div>
 
     <!-- Session History Panel（仅在娜迦 tab 可见） -->
@@ -691,8 +985,12 @@ function getSupportedMimeType(): string {
     <div v-if="toolMessage" class="mx-[var(--nav-back-width)] text-white/50 text-xs px-2 py-1">
       {{ toolMessage }}
     </div>
-    <div class="mx-[var(--nav-back-width)]">
-      <div class="box flex items-center gap-2">
+    <div
+      ref="inputDockRef"
+      :class="isExpanded ? 'expanded-input-dock' : 'mx-[var(--nav-back-width)]'"
+      :style="isExpanded ? expandedInputStyle : undefined"
+    >
+      <div class="box flex items-center gap-2 min-w-0">
         <button
           v-if="activeTabId === 'naga'"
           class="p-2 text-white/60 hover:text-white bg-transparent border-none cursor-pointer text-sm shrink-0"
@@ -710,14 +1008,18 @@ function getSupportedMimeType(): string {
         >
           H
         </button>
-        <input
+        <span class="input-prefix shrink-0">&gt;</span>
+        <textarea
+          ref="composerRef"
           v-model="input"
-          class="p-2 lh-none text-white w-full bg-transparent border-none outline-none"
-          type="text"
+          rows="1"
+          class="composer-textarea flex-1 min-w-0 text-white bg-transparent border-none outline-none"
           :placeholder="activeTabId === 'naga' ? 'Type a message...' : `发送给 ${getActiveTab().name}...`"
-        >
+          @keydown.enter.exact="handleComposerEnter"
+          @input="resizeComposer"
+        />
         <button
-          v-if="CONFIG.voice_realtime.enabled && activeTabId === 'naga'"
+          v-if="CONFIG.voice_realtime.enabled"
           class="input-icon-btn shrink-0"
           :class="{ recording: isRecording }"
           :title="isRecording ? '停止录音' : '语音输入'"
@@ -727,7 +1029,7 @@ function getSupportedMimeType(): string {
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2" /></svg>
         </button>
         <button
-          v-if="CONFIG.system.voice_enabled && activeTabId === 'naga'"
+          v-if="CONFIG.system.voice_enabled"
           class="input-icon-btn shrink-0"
           :title="ttsEnabled ? '关闭语音播报' : '开启语音播报'"
           @click="toggleTTS"
@@ -736,7 +1038,6 @@ function getSupportedMimeType(): string {
           <svg v-else xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><line x1="22" y1="9" x2="16" y2="15" /><line x1="16" y1="9" x2="22" y2="15" /></svg>
         </button>
         <button
-          v-if="activeTabId === 'naga'"
           class="input-icon-btn shrink-0"
           title="上传文件 (Word/Excel/文本)"
           @click="triggerUpload"
@@ -750,12 +1051,123 @@ function getSupportedMimeType(): string {
           class="hidden"
           @change="handleFileUpload"
         >
+        <button
+          class="send-btn shrink-0"
+          :disabled="!input?.trim()"
+          title="发送消息"
+          @click="sendMessage"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 2 11 13" />
+            <path d="m22 2-7 20-4-9-9-4Z" />
+          </svg>
+        </button>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.expanded-chat-overlay {
+  position: fixed;
+  z-index: 80;
+}
+
+.expanded-input-dock {
+  position: fixed;
+  z-index: 81;
+}
+
+.expanded-chat-overlay :deep(.box) {
+  width: 100%;
+  height: 100%;
+}
+
+.composer-textarea {
+  min-height: 44px;
+  max-height: 160px;
+  padding: 10px 0;
+  line-height: 24px;
+  resize: none;
+  overflow-y: auto;
+}
+
+.composer-textarea::placeholder {
+  color: rgba(255, 255, 255, 0.45);
+}
+
+.input-prefix {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 1rem;
+  line-height: 1;
+  padding-left: 0.15rem;
+}
+
+.send-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 36px;
+  height: 36px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(212, 175, 55, 0.22);
+  color: rgba(255, 255, 255, 0.92);
+  cursor: pointer;
+  transition: background 0.2s ease, transform 0.2s ease, opacity 0.2s ease;
+}
+
+.send-btn:hover:not(:disabled) {
+  background: rgba(212, 175, 55, 0.34);
+  transform: translateY(-1px);
+}
+
+.send-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tab-row {
+  display: flex;
+  gap: 0.25rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.window-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex-shrink: 0;
+}
+
+.window-btn {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.window-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.95);
+  border-color: rgba(255, 255, 255, 0.22);
+}
+
 /* ── Tab 栏（与 ConfigView 完全一致） ── */
 .tab-btn {
   flex: 1;
@@ -865,6 +1277,7 @@ function getSupportedMimeType(): string {
   display: flex;
   align-items: center;
   justify-content: center;
+  align-self: center;
   width: 32px;
   height: 32px;
   border-radius: 6px;

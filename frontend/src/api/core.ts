@@ -37,6 +37,39 @@ export interface OpenClawStatus {
   skills_error?: string
 }
 
+export interface CharacterTemplate {
+  name: string
+  aiName?: string
+  bio?: string
+  voice?: string
+  promptFile?: string
+  portrait?: string
+  live2dModel?: string
+  live2dModelUrl?: string
+  active?: boolean
+}
+
+export type AgentEngine = 'openclaw' | 'naga-core'
+
+export interface SkillCatalogItem {
+  name: string
+  description: string
+  version?: string
+  tags?: string[]
+  scope: 'cache' | 'public' | 'private'
+  source: string
+  path: string
+  ownerAgentId?: string
+  ownerAgentName?: string
+  ownerEngine?: AgentEngine
+}
+
+export interface SkillCatalogSection {
+  skills: SkillCatalogItem[]
+  baseDir?: string
+  baseDirs?: string[]
+}
+
 export interface MarketItem {
   id: string
   title: string
@@ -142,8 +175,17 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get('/system/character')
   }
 
+  listCharacterTemplates(): Promise<{
+    status: 'success'
+    activeCharacter?: string
+    characters: CharacterTemplate[]
+  }> {
+    return this.instance.get('/system/characters')
+  }
+
   chat(message: string, options?: {
     sessionId?: string
+    agentId?: string
     useSelfGame?: boolean
     skipIntentAnalysis?: boolean
   }): Promise<{
@@ -156,6 +198,7 @@ export class CoreApiClient extends ApiClient {
 
   async chatStream(message: string, options?: {
     sessionId?: string
+    agentId?: string
     returnAudio?: boolean
     disableTTS?: boolean
     skipIntentAnalysis?: boolean
@@ -379,6 +422,32 @@ export class CoreApiClient extends ApiClient {
     return this.instance.post('/skills/import', { name, content })
   }
 
+  getSkillCatalog(): Promise<{
+    status: 'success'
+    catalog: {
+      remoteHub: { status: string, message: string }
+      localCache: SkillCatalogSection
+      publicSkills: SkillCatalogSection
+      privateSkills: SkillCatalogSection
+    }
+  }> {
+    return this.instance.get('/skills/catalog')
+  }
+
+  importScopedSkill(params: {
+    name: string
+    content: string
+    scope: 'cache' | 'public' | 'private'
+    agentId?: string
+  }): Promise<{
+    status: string
+    message: string
+    scope: string
+    path: string
+  }> {
+    return this.instance.post('/skills/import', params)
+  }
+
   getContextStats(days?: number) {
     return this.instance.get(`/logs/context/statistics?days=${days}`)
   }
@@ -481,10 +550,16 @@ export class CoreApiClient extends ApiClient {
   // ── 旅行 ──
 
   startTravel(params: {
+    agentId?: string
     timeLimitMinutes?: number
     creditLimit?: number
     wantFriends?: boolean
     friendDescription?: string
+    goalPrompt?: string
+    postToForum?: boolean
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
   }): Promise<{ status: 'success', sessionId: string }> {
     return this.instance.post('/travel/start', params)
   }
@@ -511,13 +586,13 @@ export class CoreApiClient extends ApiClient {
   // ── 干员通讯录 API（Agent Server 8001） ──
 
   /** 列出通讯录中所有干员 */
-  listAgents(): Promise<{ agents: Array<{ id: string, name: string, running: boolean, created_at: number }> }> {
+  listAgents(): Promise<{ agents: Array<{ id: string, name: string, running: boolean, createdAt?: number, created_at?: number, characterTemplate?: string, engine?: AgentEngine }> }> {
     return agentAxios.get('/openclaw/agents')
   }
 
   /** 新建干员（写 manifest + 创建目录，不启动进程） */
-  createAgent(name?: string): Promise<{ id: string, name: string, running: boolean }> {
-    return agentAxios.post('/openclaw/agents', { name })
+  createAgent(name?: string, characterTemplate?: string, engine: AgentEngine = 'openclaw'): Promise<{ id: string, name: string, running: boolean, characterTemplate?: string, engine?: AgentEngine }> {
+    return agentAxios.post('/openclaw/agents', { name, characterTemplate, engine })
   }
 
   /** 从通讯录删除干员 */
@@ -531,12 +606,20 @@ export class CoreApiClient extends ApiClient {
   }
 
   /** 获取干员对话历史 */
-  getAgentHistory(id: string, limit = 50): Promise<{ messages: Array<{ role: string, content: string }> }> {
+  getAgentHistory(id: string, limit = 50): Promise<{ messages: Array<{ role: string, content: string, toolEvents?: any[] }> }> {
     return agentAxios.get(`/openclaw/agents/${id}/history`, { params: { limit } })
   }
 
   /** 流式发送消息到干员（SSE，内部自动 ensure_running） */
-  async *streamToAgent(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{ type: string, text: string, name?: string }> {
+  async *streamToAgent(id: string, message: string, timeoutSeconds = 120): AsyncGenerator<{
+    type: string
+    text: string
+    name?: string
+    toolCallId?: string
+    args?: any
+    result?: any
+    isError?: boolean
+  }> {
     const resp = await fetch(`http://localhost:8001/openclaw/agents/${id}/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },

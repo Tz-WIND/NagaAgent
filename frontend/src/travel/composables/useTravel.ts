@@ -93,10 +93,12 @@ export function useTravel() {
   }
 
   async function startTravel(params: {
+    agentId?: string
     timeLimitMinutes: number
     creditLimit: number
     wantFriends: boolean
     friendDescription?: string
+    goalPrompt?: string
   }) {
     loading.value = true
     try {

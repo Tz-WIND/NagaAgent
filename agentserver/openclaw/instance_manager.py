@@ -79,35 +79,108 @@ def _save_manifest(data: dict):
 
 # ── Workspace 文件初始化 ──
 
-_WORKSPACE_FILES = {
+_OPENCLAW_WORKSPACE_FILES = {
     "HEARTBEAT.md": "",
     "IDENTITY.md": "",
+    "SOUL.md": "",
     "TOOLS.md": "",
     "USER.md": "",
 }
 
+_COMMON_AGENT_DIRS = ("memory", "skills", "notes")
+_COMMON_AGENT_FILES = {
+    "IDENTITY.md": "",
+    "SOUL.md": "",
+    "notes/CLAUDE.md": (
+        "# 干员记事本\n\n"
+        "这里用于存放该干员的长期约束、长期计划、固定注意事项和手工补充资料。\n"
+    ),
+}
 
-def _init_agent_dir(agent_id: str, agent_name: str = "") -> Path:
+SUPPORTED_AGENT_ENGINES = {"openclaw", "naga-core"}
+
+
+def normalize_agent_engine(engine: Optional[str]) -> str:
+    value = (engine or "openclaw").strip().lower()
+    if value in {"nagacore", "naga_core"}:
+        value = "naga-core"
+    if value not in SUPPORTED_AGENT_ENGINES:
+        raise ValueError(f"不支持的干员引擎: {engine}")
+    return value
+
+
+def _load_character_identity_content(character_template: Optional[str]) -> str:
+    if not character_template:
+        return ""
+
+    try:
+        from system.config import CHARACTERS_DIR, load_character
+
+        char_data = load_character(character_template)
+        prompt_file = char_data.get("prompt_file") or "conversation_style_prompt.txt"
+        prompt_path = CHARACTERS_DIR / character_template / prompt_file
+        if not prompt_path.exists():
+            logger.warning(f"角色模板 [{character_template}] 缺少提示词文件: {prompt_path}")
+            return ""
+
+        prompt_text = prompt_path.read_text(encoding="utf-8").strip()
+        if not prompt_text:
+            return ""
+
+        return (
+            f"# 人格模板：{character_template}\n\n"
+            "以下内容从 characters 模板初始化，用作该干员的人格基底。\n"
+            "后续个性化发展请写入 SOUL.md 等实例文件，不要改回模板源。\n\n"
+            f"{prompt_text}\n"
+        )
+    except Exception as e:
+        logger.warning(f"加载角色模板 [{character_template}] 失败: {e}")
+        return ""
+
+
+def get_agent_dir(agent_id: str) -> Path:
+    return _get_agents_dir() / agent_id
+
+
+def _init_agent_dir(
+    agent_id: str,
+    agent_name: str = "",
+    character_template: Optional[str] = None,
+    engine: str = "openclaw",
+) -> Path:
     """创建干员目录（以 UUID 命名）并初始化 workspace 文件。返回目录路径。"""
-    agent_dir = _get_agents_dir() / agent_id
+    engine = normalize_agent_engine(engine)
+    agent_dir = get_agent_dir(agent_id)
     agent_dir.mkdir(parents=True, exist_ok=True)
 
-    # AGENTS.md 单独处理：包含干员名称
-    agents_md = agent_dir / "AGENTS.md"
-    if not agents_md.exists():
-        display_name = agent_name or agent_id[:8]
-        agents_md.write_text(
-            f"# {display_name}\n\n"
-            f"你是 NagaAgent 系统的干员「{display_name}」。\n"
-            f"你可以独立完成用户分配的任务，使用可用的工具和技能。\n"
-            f"将重要信息记录到 memory/ 目录中的日期文件，以便跨会话保持记忆。\n",
-            encoding="utf-8",
-        )
+    for relative_dir in _COMMON_AGENT_DIRS:
+        (agent_dir / relative_dir).mkdir(parents=True, exist_ok=True)
 
-    for filename, default_content in _WORKSPACE_FILES.items():
+    if engine == "openclaw":
+        # AGENTS.md 单独处理：包含干员名称
+        agents_md = agent_dir / "AGENTS.md"
+        if not agents_md.exists():
+            display_name = agent_name or agent_id[:8]
+            agents_md.write_text(
+                f"# {display_name}\n\n"
+                f"你是 NagaAgent 系统的干员「{display_name}」。\n"
+                f"你可以独立完成用户分配的任务，使用可用的工具和技能。\n"
+                f"将重要信息记录到 memory/ 目录中的日期文件，以便跨会话保持记忆。\n",
+                encoding="utf-8",
+            )
+
+    identity_content = _load_character_identity_content(character_template)
+
+    common_files = dict(_COMMON_AGENT_FILES)
+    if engine == "openclaw":
+        common_files.update(_OPENCLAW_WORKSPACE_FILES)
+
+    for filename, default_content in common_files.items():
         fp = agent_dir / filename
+        fp.parent.mkdir(parents=True, exist_ok=True)
         if not fp.exists():
-            fp.write_text(default_content, encoding="utf-8")
+            content = identity_content if filename == "IDENTITY.md" and identity_content else default_content
+            fp.write_text(content, encoding="utf-8")
     return agent_dir
 
 
@@ -132,6 +205,8 @@ class AgentInstance:
     primary: bool = False
     running: bool = False
     created_at: float = field(default_factory=time.time)
+    character_template: Optional[str] = None
+    engine: str = "openclaw"
 
 
 def cleanup_port_range(start: int = PORT_RANGE_START, end: int = PORT_RANGE_END) -> int:
@@ -214,10 +289,18 @@ class InstanceManager:
 
     # ── 通讯录操作（不启动进程） ──
 
-    def create_agent(self, name: Optional[str] = None, agent_id: Optional[str] = None) -> AgentInstance:
+    def create_agent(
+        self,
+        name: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        character_template: Optional[str] = None,
+        engine: str = "openclaw",
+    ) -> AgentInstance:
         """创建干员（写 manifest + 创建目录），不启动进程。"""
         if len(self._instances) >= MAX_INSTANCES:
             raise RuntimeError("干员数量最多100个，如有特殊需求请联系开发组")
+
+        engine = normalize_agent_engine(engine)
 
         self._agent_counter += 1
         if not name:
@@ -227,17 +310,19 @@ class InstanceManager:
             agent_id = uuid.uuid4().hex[:12]
 
         # 创建目录 + workspace 文件（用 UUID 命名，含干员名称）
-        _init_agent_dir(agent_id, name)
+        _init_agent_dir(agent_id, name, character_template, engine=engine)
 
         inst = AgentInstance(
             id=agent_id,
             name=name,
             created_at=time.time(),
+            character_template=character_template,
+            engine=engine,
         )
         self._instances[agent_id] = inst
         self._save_to_manifest()
 
-        logger.info(f"创建干员 [{name}] id={agent_id}（通讯录条目，未启动进程）")
+        logger.info(f"创建干员 [{name}] id={agent_id} engine={engine}（通讯录条目，未启动进程）")
         return inst
 
     def delete_agent(self, agent_id: str, delete_data: bool = True) -> None:
@@ -313,6 +398,8 @@ class InstanceManager:
                 "name": inst.name,
                 "running": inst.running,
                 "created_at": inst.created_at,
+                "character_template": inst.character_template,
+                "engine": inst.engine,
             }
             for inst in self._instances.values()
         ]
@@ -327,6 +414,8 @@ class InstanceManager:
         inst = self._instances.get(agent_id)
         if inst is None:
             raise RuntimeError(f"干员 {agent_id} 不存在")
+        if inst.engine != "openclaw":
+            raise RuntimeError(f"干员 [{inst.name}] 使用的是 {inst.engine}，暂未接入独立 OpenClaw 运行时")
 
         if inst.running and inst.client is not None:
             # 检查端口是否仍可达
@@ -488,6 +577,8 @@ class InstanceManager:
                     "id": inst.id,
                     "name": inst.name,
                     "created_at": inst.created_at,
+                    "character_template": inst.character_template,
+                    "engine": inst.engine,
                 }
                 for inst in self._instances.values()
             ],
@@ -514,13 +605,17 @@ class InstanceManager:
                 continue
 
             name = saved.get("name", f"干员{self._agent_counter + 1}")
+            character_template = saved.get("character_template")
+            engine = normalize_agent_engine(saved.get("engine"))
             # 确保目录存在（用 UUID）
-            _init_agent_dir(agent_id)
+            _init_agent_dir(agent_id, name, character_template, engine=engine)
 
             inst = AgentInstance(
                 id=agent_id,
                 name=name,
                 created_at=saved.get("created_at", time.time()),
+                character_template=character_template,
+                engine=engine,
             )
             self._instances[agent_id] = inst
             restored += 1
@@ -599,11 +694,10 @@ class InstanceManager:
 
     # ── 流式发送 ──
 
-    # OpenClaw 静默回复信号（agent 不想回复时输出）
-    _SILENT_REPLY_TOKENS = {"NO_REPLY", "NO_REPL", "HEARTBEAT_OK"}
-
-    # Skill XML 检测（LLM 未正确调用 read 工具，而是直接输出 XML）
+    # Skill/Tool 调用检测（LLM 输出文本格式而非原生 ToolCall）
     import re as _re
+    import json as _json_lib
+
     _SKILL_XML_RE = _re.compile(
         r"<skill\b[^>]*>\s*<name>\s*(\S+?)\s*</name>"
         r"(?:\s*<location>[^<]*</location>)?"
@@ -615,22 +709,88 @@ class InstanceManager:
         r"[\s\S]*?</skill_call>",
         _re.IGNORECASE,
     )
+    _JSON_TOOL_RE = _re.compile(
+        r'\{\s*"action"\s*:\s*"([^"]+)"\s*,\s*"args"\s*:\s*(\{[^}]*\})\s*\}',
+        _re.IGNORECASE,
+    )
+    # 检测伪代码工具调用: await read(...), await search(...) 等
+    _PSEUDO_CODE_RE = _re.compile(
+        r'(?:await\s+)?(\w+)\s*\(\s*["\']([^"\']+)["\']\s*\)',
+        _re.IGNORECASE,
+    )
+    # 检测特殊分隔符工具调用格式（Qwen/GLM 等）
+    _SPECIAL_TOOL_RE = _re.compile(
+        r'<\|tool_call_begin\|>functions\.(\w+):\d+<\|tool_call_argument_begin\|>(\{[^}]+\})',
+        _re.IGNORECASE,
+    )
+    _SPECIAL_TOOL_MARKERS = (
+        "<|tool_calls_section_begin|>",
+        "<|tool_calls_section_end|>",
+        "<|tool_call_begin|>",
+        "<|tool_call_argument_begin|>",
+        "<|tool_call_end|>",
+    )
 
-    def _detect_skill_invocation(self, text: str) -> dict | None:
-        """检测文本中的 skill XML。返回 {"name": "..."} 或 None。"""
+    def _detect_tool_invocation(self, text: str) -> dict | None:
+        """检测 skill XML、JSON、伪代码或特殊分隔符工具调用。返回 {"type": "...", "name": "...", "args": {...}} 或 None。"""
+        # 优先检测 skill XML
         m = self._SKILL_XML_RE.search(text)
         if m:
-            return {"name": m.group(1)}
+            return {"type": "skill", "name": m.group(1)}
         m = self._SKILL_CALL_XML_RE.search(text)
         if m:
-            return {"name": m.group(1)}
+            return {"type": "skill", "name": m.group(1)}
+
+        # 检测特殊分隔符格式（Qwen/GLM）
+        m = self._SPECIAL_TOOL_RE.search(text)
+        if m:
+            try:
+                tool_name = m.group(1)
+                args = self._json_lib.loads(m.group(2))
+                return {"type": "special", "name": tool_name, "args": args}
+            except:
+                pass
+
+        # 检测 JSON 工具调用
+        m = self._JSON_TOOL_RE.search(text)
+        if m:
+            try:
+                args = self._json_lib.loads(m.group(2))
+                return {"type": "json", "name": m.group(1), "args": args}
+            except:
+                pass
+
+        # 检测伪代码工具调用
+        m = self._PSEUDO_CODE_RE.search(text)
+        if m:
+            func_name = m.group(1).lower()
+            arg = m.group(2)
+            skill_map = {
+                "read": "read",
+                "search": "web-search",
+                "websearch": "web-search",
+                "web_search": "web-search",
+            }
+            if func_name in skill_map:
+                return {"type": "pseudo", "name": skill_map[func_name], "original": func_name, "arg": arg}
+
         return None
 
-    def _strip_skill_xml(self, text: str) -> str:
-        """移除文本中所有 skill XML 标签。"""
+    def _strip_tool_invocation(self, text: str) -> str:
+        """移除文本中所有 skill XML 和 JSON 工具调用。"""
         text = self._SKILL_XML_RE.sub("", text)
         text = self._SKILL_CALL_XML_RE.sub("", text)
+        text = self._JSON_TOOL_RE.sub("", text)
         return text.strip()
+
+    def _sanitize_stream_content(self, text: str) -> str:
+        """移除流式内容里残留的工具分隔符前缀。"""
+        if not text:
+            return text
+        sanitized = text
+        for marker in self._SPECIAL_TOOL_MARKERS:
+            sanitized = sanitized.replace(marker, "")
+        return sanitized
 
     @staticmethod
     def _read_skill_file(skill_name: str) -> str | None:
@@ -668,14 +828,14 @@ class InstanceManager:
 
                 chunk_type = chunk.get("type", "")
                 chunk_text = chunk.get("text", "")
+                logger.info(f"[stream] [{inst_name}] 收到事件: type={chunk_type}, chunk={chunk}")
 
                 if chunk_type == "content":
+                    chunk_text = self._sanitize_stream_content(chunk_text)
                     full_text += chunk_text
                     yield {"type": "content", "text": chunk_text}
                 elif chunk_type == "done":
-                    final = (full_text or chunk_text).strip()
-                    if final.upper() in self._SILENT_REPLY_TOKENS:
-                        final = ""
+                    final = self._sanitize_stream_content((full_text or chunk_text)).strip()
                     yield {"type": "done", "text": final}
                     return
                 elif chunk_type == "error":
@@ -684,15 +844,26 @@ class InstanceManager:
                 elif chunk_type == "status":
                     yield {"type": "status", "text": chunk_text}
                 elif chunk_type == "tool_call":
-                    yield {"type": "tool_call", "name": chunk.get("name", ""), "text": chunk_text}
+                    yield {
+                        "type": "tool_call",
+                        "name": chunk.get("name", ""),
+                        "text": chunk_text,
+                        "toolCallId": chunk.get("toolCallId", ""),
+                        "args": chunk.get("args"),
+                    }
                 elif chunk_type == "tool_result":
-                    yield {"type": "tool_result", "name": chunk.get("name", ""), "text": chunk_text}
+                    yield {
+                        "type": "tool_result",
+                        "name": chunk.get("name", ""),
+                        "text": chunk_text,
+                        "toolCallId": chunk.get("toolCallId", ""),
+                        "isError": bool(chunk.get("isError", False)),
+                        "result": chunk.get("result"),
+                    }
 
             # 流结束但没有 done event
             if full_text:
-                final = full_text.strip()
-                if final.upper() in self._SILENT_REPLY_TOKENS:
-                    final = ""
+                final = self._sanitize_stream_content(full_text).strip()
                 yield {"type": "done", "text": final}
             else:
                 yield {"type": "error", "text": "流结束但无回复"}
@@ -750,61 +921,13 @@ class InstanceManager:
             "workspace": agent_workspace,
         }
 
-        logger.info(f"[stream] [{inst.name}] SSE → {stream_url}")
+        logger.info(f"[stream] [{inst.name}] SSE → {stream_url} (使用 OpenClaw 原生工具)")
 
         try:
             async with httpx.AsyncClient() as http:
-                # ── 第一轮：发送用户消息 ──
-                first_done_text = None
+                # 直接透传 OpenClaw 的原生响应，让 OpenClaw 处理工具调用
                 async for event in self._do_single_stream(
                     http, stream_url, headers, payload, timeout, inst.name
-                ):
-                    if event["type"] == "done":
-                        first_done_text = event["text"]
-                        # 先不 yield done，检查是否需要执行 skill
-                    elif event["type"] == "error":
-                        yield event
-                        return
-                    else:
-                        yield event
-
-                if first_done_text is None:
-                    return  # error 已在上面 yield
-
-                # ── 检测 skill 调用 ──
-                skill = self._detect_skill_invocation(first_done_text)
-                if not skill:
-                    # 无 skill，正常结束
-                    yield {"type": "done", "text": first_done_text}
-                    return
-
-                # ── 有 skill → 后端代为执行 ──
-                logger.info(f"[stream] [{inst.name}] 检测到 skill: {skill['name']}")
-                clean_text = self._strip_skill_xml(first_done_text)
-
-                yield {"type": "tool_call", "name": skill["name"], "text": ""}
-
-                skill_content = self._read_skill_file(skill["name"])
-                if not skill_content:
-                    logger.warning(f"[stream] [{inst.name}] skill 文件未找到: {skill['name']}")
-                    yield {"type": "tool_result", "name": skill["name"], "text": "技能文件未找到"}
-                    yield {"type": "done", "text": clean_text or "技能加载失败"}
-                    return
-
-                yield {"type": "tool_result", "name": skill["name"], "text": "已加载技能指令"}
-
-                # ── 第二轮：带 skill 指令重新回答 ──
-                follow_up = (
-                    f"你刚才选择了技能 [{skill['name']}]。以下是该技能的完整执行指引：\n\n"
-                    f"{skill_content}\n\n"
-                    f"请严格按照以上指引，使用你的工具（如 online_search、exec 等）来完成用户的原始请求。"
-                    f"直接执行工具并给出结果，不要再输出 <skill> 或 <skill_call> 标签。"
-                )
-                follow_payload = {**payload, "message": follow_up}
-                logger.info(f"[stream] [{inst.name}] skill follow-up → {skill['name']}")
-
-                async for event in self._do_single_stream(
-                    http, stream_url, headers, follow_payload, timeout, inst.name
                 ):
                     yield event
 

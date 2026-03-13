@@ -539,8 +539,16 @@ export function createHooksRequestHandler(
           if (phase === "start" && toolName) {
             res.write(`data: ${JSON.stringify({ type: "status", text: `调用工具: ${toolName}` })}\n\n`);
             res.write(`data: ${JSON.stringify({ type: "tool_call", name: toolName, toolCallId: evt.data?.toolCallId ?? "" })}\n\n`);
-          } else if (phase === "end" && toolName) {
-            res.write(`data: ${JSON.stringify({ type: "tool_result", name: toolName, toolCallId: evt.data?.toolCallId ?? "" })}\n\n`);
+          } else if ((phase === "end" || phase === "result") && toolName) {
+            res.write(
+              `data: ${JSON.stringify({
+                type: "tool_result",
+                name: toolName,
+                toolCallId: evt.data?.toolCallId ?? "",
+                isError: Boolean(evt.data?.isError),
+                result: evt.data?.result,
+              })}\n\n`,
+            );
           }
         }
 

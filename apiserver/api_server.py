@@ -205,6 +205,7 @@ class ChatRequest(BaseModel):
     message: str
     stream: bool = False
     session_id: Optional[str] = None
+    agent_id: Optional[str] = None
     disable_tts: bool = False  # V17: 支持禁用服务器端TTS
     return_audio: bool = False  # V19: 支持返回音频URL供客户端播放
     skill: Optional[str] = None  # 用户主动选择的技能名称，注入完整指令到系统提示词
@@ -257,6 +258,7 @@ from .routes.system import router as system_router
 from .routes.tools import router as tools_router
 from .routes.extensions import router as extensions_router
 from .routes.chat import router as chat_router
+from .routes.openai_proxy import router as openai_proxy_router
 
 app.include_router(forum_router)
 app.include_router(auth_router)
@@ -265,3 +267,4 @@ app.include_router(system_router)
 app.include_router(tools_router)
 app.include_router(extensions_router)
 app.include_router(chat_router)
+app.include_router(openai_proxy_router)

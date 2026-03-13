@@ -439,10 +439,11 @@ class EmbeddedRuntime:
             gw_env = self.env
             gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
             try:
-                from system.config import config as _cfg
-                search_base = getattr(_cfg.online_search, "search_api_base", "")
-                if search_base:
-                    gw_env["BRAVE_SEARCH_BASE_URL"] = search_base
+                from system.config import get_server_port
+                api_port = get_server_port("api_server")
+                search_proxy = f"http://127.0.0.1:{api_port}/tools/search"
+                gw_env["BRAVE_SEARCH_BASE_URL"] = search_proxy
+                gw_env["NAGA_WEB_SEARCH_PROXY_URL"] = search_proxy
             except Exception:
                 pass
 
@@ -504,10 +505,11 @@ class EmbeddedRuntime:
         gw_env = self.env.copy()
         gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
         try:
-            from system.config import config as _cfg
-            search_base = getattr(_cfg.online_search, "search_api_base", "")
-            if search_base:
-                gw_env["BRAVE_SEARCH_BASE_URL"] = search_base
+            from system.config import get_server_port
+            api_port = get_server_port("api_server")
+            search_proxy = f"http://127.0.0.1:{api_port}/tools/search"
+            gw_env["BRAVE_SEARCH_BASE_URL"] = search_proxy
+            gw_env["NAGA_WEB_SEARCH_PROXY_URL"] = search_proxy
         except Exception:
             pass
 

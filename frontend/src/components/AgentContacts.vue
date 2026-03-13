@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { AgentEngine, CharacterTemplate } from '@/api/core'
+import { Button, InputText, Select } from 'primevue'
 import { nextTick, ref } from 'vue'
 import API from '@/api/core'
 import back from '@/assets/icons/back.png'
@@ -8,6 +10,16 @@ const backIcon = back
 
 const collapsed = ref(false)
 const adding = ref(false)
+const createDialogVisible = ref(false)
+const createName = ref('')
+const createCharacterTemplate = ref('')
+const createEngine = ref<AgentEngine>('openclaw')
+const createError = ref('')
+const characterTemplates = ref<CharacterTemplate[]>([])
+const engineOptions: Array<{ label: string, value: AgentEngine, description: string }> = [
+  { label: 'OpenClaw', value: 'openclaw', description: '适合浏览器、网页探索和复杂工具链。' },
+  { label: 'NagaCore', value: 'naga-core', description: '使用娜迦现有后端能力，后续会提炼成按干员隔离的独立运行时。' },
+]
 
 // 右键菜单
 const contextMenu = ref<{ show: boolean, x: number, y: number, agentId: string, agentName: string }>({
@@ -19,11 +31,13 @@ const renamingId = ref<string | null>(null)
 const renameValue = ref('')
 const renameInputRef = ref<HTMLInputElement | null>(null)
 
-function handleClick(agent: { id: string, name: string, running: boolean, created_at: number }) {
+function handleClick(agent: { id: string, name: string, running: boolean, created_at?: number, builtin?: boolean }) {
   openAgentTab(agent)
 }
 
-function handleContextMenu(e: MouseEvent, agent: { id: string, name: string }) {
+function handleContextMenu(e: MouseEvent, agent: { id: string, name: string, builtin?: boolean }) {
+  if (agent.builtin)
+    return
   e.preventDefault()
   contextMenu.value = { show: true, x: e.clientX, y: e.clientY, agentId: agent.id, agentName: agent.name }
 }
@@ -86,14 +100,42 @@ async function deleteAgent() {
 }
 
 async function addAgent() {
+  createError.value = ''
+  createName.value = `干员${nextAgentNumber()}`
+  if (!characterTemplates.value.length) {
+    try {
+      const res = await API.listCharacterTemplates()
+      characterTemplates.value = res.characters || []
+    }
+    catch { /* ignore */ }
+  }
+  createCharacterTemplate.value = characterTemplates.value.find(item => item.active)?.name || characterTemplates.value[0]?.name || ''
+  createEngine.value = 'openclaw'
+  createDialogVisible.value = true
+}
+
+async function confirmAddAgent() {
   if (adding.value) return
+  const name = createName.value.trim()
+  if (!name) {
+    createError.value = '请输入干员名称'
+    return
+  }
+  if (!createCharacterTemplate.value) {
+    createError.value = '请选择角色模板'
+    return
+  }
+
   adding.value = true
+  createError.value = ''
   try {
-    const num = nextAgentNumber()
-    await API.createAgent(`干员${num}`)
+    await API.createAgent(name, createCharacterTemplate.value, createEngine.value)
+    createDialogVisible.value = false
     await loadAgentContacts()
   }
-  catch { /* ignore */ }
+  catch (e: any) {
+    createError.value = e?.response?.data?.detail || e?.message || '创建干员失败'
+  }
   finally {
     adding.value = false
   }
@@ -101,6 +143,9 @@ async function addAgent() {
 
 // 初始加载
 loadAgentContacts()
+void API.listCharacterTemplates().then((res) => {
+  characterTemplates.value = res.characters || []
+}).catch(() => {})
 </script>
 
 <template>
@@ -152,9 +197,15 @@ loadAgentContacts()
             <div class="contact-name">
               {{ agent.name }}
             </div>
+            <div v-if="agent.builtin" class="builtin-badge">
+              默认
+            </div>
+            <div class="engine-badge" :class="agent.engine === 'naga-core' ? 'engine-naga' : 'engine-openclaw'">
+              {{ agent.engine === 'naga-core' ? 'NC' : 'OC' }}
+            </div>
             <div v-if="agent.running" class="running-dot" title="运行中" />
             <!-- 铅笔图标：点击进入重命名 -->
-            <button class="rename-icon" title="重命名" @click.stop="startRenameFromIcon(agent)">
+            <button v-if="!agent.builtin" class="rename-icon" title="重命名" @click.stop="startRenameFromIcon(agent)">
               <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
             </button>
           </template>
@@ -186,6 +237,63 @@ loadAgentContacts()
         </div>
       </div>
       <div v-if="contextMenu.show" class="ctx-overlay" @click="closeContextMenu" />
+    </Teleport>
+
+    <Teleport to="body">
+      <Transition name="dialog-fade">
+        <div v-if="createDialogVisible" class="dialog-overlay" @click.self="createDialogVisible = false">
+          <div class="dialog-card">
+            <h2 class="dialog-title">
+              新建干员
+            </h2>
+            <div class="dialog-form">
+              <label class="dialog-label">干员名称</label>
+              <InputText v-model="createName" class="dialog-input" placeholder="例如：干员7" />
+
+              <label class="dialog-label">人格模板</label>
+              <Select
+                v-model="createCharacterTemplate"
+                :options="characterTemplates"
+                option-label="name"
+                option-value="name"
+                class="dialog-input"
+                placeholder="选择一个 characters 模板"
+                append-to="body"
+                :pt="{ overlay: { class: 'agent-select-overlay' } }"
+              />
+              <div v-if="createCharacterTemplate" class="dialog-hint">
+                {{ characterTemplates.find(item => item.name === createCharacterTemplate)?.bio || '该模板将初始化写入干员的 IDENTITY.md。' }}
+              </div>
+              <div v-else class="dialog-hint">
+                创建后会把选中的角色模板写入该干员的 IDENTITY.md，后天发展仍保留在该干员自己的实例目录。
+              </div>
+
+              <label class="dialog-label">干员引擎</label>
+              <Select
+                v-model="createEngine"
+                :options="engineOptions"
+                option-label="label"
+                option-value="value"
+                class="dialog-input"
+                placeholder="选择干员引擎"
+                append-to="body"
+                :pt="{ overlay: { class: 'agent-select-overlay' } }"
+              />
+              <div class="dialog-hint">
+                {{ engineOptions.find(item => item.value === createEngine)?.description }}
+              </div>
+
+              <div v-if="createError" class="dialog-error">
+                {{ createError }}
+              </div>
+            </div>
+            <div class="dialog-actions">
+              <Button label="取消" text @click="createDialogVisible = false" />
+              <Button label="创建干员" :loading="adding" @click="confirmAddAgent" />
+            </div>
+          </div>
+        </div>
+      </Transition>
     </Teleport>
   </div>
 </template>
@@ -316,6 +424,36 @@ loadAgentContacts()
   text-overflow: ellipsis;
 }
 
+.engine-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 1.4;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.builtin-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 1.4;
+  font-weight: 700;
+  flex-shrink: 0;
+  color: rgba(212, 175, 55, 0.95);
+  background: rgba(212, 175, 55, 0.12);
+}
+
+.engine-openclaw {
+  color: rgba(96, 165, 250, 0.95);
+  background: rgba(96, 165, 250, 0.12);
+}
+
+.engine-naga {
+  color: rgba(74, 222, 128, 0.95);
+  background: rgba(74, 222, 128, 0.12);
+}
+
 .running-dot {
   width: 6px;
   height: 6px;
@@ -423,6 +561,81 @@ loadAgentContacts()
 
 .ctx-danger:hover {
   color: #e74c3c;
+}
+
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.dialog-card {
+  width: min(440px, calc(100vw - 32px));
+  padding: 20px 22px;
+  border: 1px solid rgba(212, 175, 55, 0.45);
+  border-radius: 12px;
+  background: rgba(20, 14, 6, 0.98);
+  box-shadow: 0 0 60px rgba(0, 0, 0, 0.5), 0 0 40px rgba(212, 175, 55, 0.1);
+}
+
+.dialog-title {
+  margin: 0 0 14px;
+  font-size: 18px;
+  font-weight: 600;
+  color: rgba(212, 175, 55, 0.92);
+  text-align: center;
+}
+
+.dialog-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dialog-label {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.55);
+}
+
+.dialog-input {
+  width: 100%;
+}
+
+.dialog-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.42);
+}
+
+.dialog-error {
+  font-size: 12px;
+  color: #e85d5d;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.dialog-fade-enter-active,
+.dialog-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.dialog-fade-enter-from,
+.dialog-fade-leave-to {
+  opacity: 0;
+}
+
+:global(.agent-select-overlay) {
+  z-index: 10050 !important;
 }
 
 /* 滚动条 */

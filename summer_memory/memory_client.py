@@ -73,6 +73,16 @@ class RemoteMemoryClient:
             if not resp.content:
                 logger.warning(f"NagaMemory 返回空响应 [{method} {path}] status={resp.status_code}")
                 return {"success": False, "error": "服务返回空响应，请检查网络或代理设置"}
+            content_type = resp.headers.get("content-type", "")
+            text_preview = resp.text[:300].replace("\n", "\\n")
+            if "json" not in content_type.lower():
+                logger.warning(
+                    "NagaMemory 响应 Content-Type 非 JSON [%s %s]: %s preview=%r",
+                    method,
+                    path,
+                    content_type or "<missing>",
+                    text_preview,
+                )
             return resp.json()
         except httpx.HTTPStatusError as e:
             logger.error(f"NagaMemory HTTP {e.response.status_code} [{method} {path}]: {e}")
@@ -84,7 +94,12 @@ class RemoteMemoryClient:
             logger.error(f"NagaMemory 请求失败 [{method} {path}]: {e}")
             return {"success": False, "error": str(e)}
         except ValueError as e:
-            logger.error(f"NagaMemory 响应解析失败 [{method} {path}]: {e}")
+            snippet = ""
+            try:
+                snippet = resp.text[:300].replace("\n", "\\n")
+            except Exception:
+                pass
+            logger.error(f"NagaMemory 响应解析失败 [{method} {path}]: {e}; body={snippet!r}")
             return {"success": False, "error": f"服务返回非JSON响应: {e}"}
 
     # ---- 健康 / 统计 ----

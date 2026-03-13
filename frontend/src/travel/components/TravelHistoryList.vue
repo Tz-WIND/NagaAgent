@@ -29,6 +29,9 @@ defineEmits<{ select: [session: TravelSession] }>()
           <div class="text-white/30 text-[10px]">
             {{ session.discoveries?.length ?? 0 }} 个发现
           </div>
+          <div v-if="session.agentName" class="text-white/25 text-[10px] truncate">
+            执行干员：{{ session.agentName }}
+          </div>
         </div>
         <span
           class="text-[10px] px-1.5 py-0.5 rounded shrink-0"

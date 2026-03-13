@@ -309,7 +309,7 @@ def inject_naga_llm_config() -> bool:
         return False
 
     try:
-        from system.config import config as naga_config
+        from system.config import config as naga_config, get_data_dir
 
         config_data = json.loads(OPENCLAW_CONFIG_FILE.read_text(encoding="utf-8"))
         _apply_hooks_compat_patch(config_data)
@@ -317,33 +317,38 @@ def inject_naga_llm_config() -> bool:
         _apply_gateway_port_patch(config_data)
 
         # ── LLM Provider ──
-        # 已登录或有 refresh_token（登录态可恢复）→ 用 NagaBusiness 网关
-        try:
-            from apiserver.naga_auth import is_authenticated, has_refresh_token, get_access_token, NAGA_MODEL_URL
-            use_business = is_authenticated() or has_refresh_token()
-            if use_business:
-                base_url = NAGA_MODEL_URL
-                api_key = get_access_token() or naga_config.api.api_key
-                logger.info(f"使用 NagaBusiness 网关: {base_url}")
-            else:
-                base_url = naga_config.api.base_url.rstrip("/")
-                api_key = naga_config.api.api_key
-                logger.info(f"使用静态配置: {base_url}")
-        except ImportError:
-            base_url = naga_config.api.base_url.rstrip("/")
-            api_key = naga_config.api.api_key
-            api_key = naga_config.api.api_key
+        # 使用本地 API Server 的 OpenAI 兼容代理端点（统一计费）
+        from system.config import get_server_port
+        api_port = get_server_port("api_server")
+        base_url = f"http://127.0.0.1:{api_port}/v1"
+        api_key = ""  # 代理端点内部处理认证
+        logger.info(f"OpenClaw 使用 Naga 代理端点: {base_url}/chat/completions")
 
-        provider_name = "naga"
+        # 根据模型 ID 判断 provider 类型（让 OpenClaw 识别特殊模型）
         model_id = naga_config.api.model
+        model_id_lower = model_id.lower()
+        if "kimi" in model_id_lower or "moonshot" in model_id_lower:
+            provider_name = "moonshot"
+        elif "deepseek" in model_id_lower:
+            provider_name = "deepseek"
+        elif "glm" in model_id_lower:
+            provider_name = "zhipu"
+        elif "qwen" in model_id_lower:
+            provider_name = "alibaba"
+        elif "minimax" in model_id_lower:
+            provider_name = "minimax"
+        else:
+            provider_name = "naga"
         full_model_id = f"{provider_name}/{model_id}"
 
         models_config = config_data.setdefault("models", {})
         models_config["mode"] = "merge"
-        providers = models_config.setdefault("providers", {})
+        # 清空旧 providers 避免遗留无效配置导致校验失败
+        providers = {}
+        models_config["providers"] = providers
         providers[provider_name] = {
             "baseUrl": base_url,
-            "apiKey": api_key,
+            "apiKey": "naga-proxy-placeholder",
             "auth": "api-key",
             "api": "openai-completions",
             "models": [
@@ -370,20 +375,85 @@ def inject_naga_llm_config() -> bool:
         # 注：OpenClaw 不支持自定义 Brave base URL，但主路径搜索走 NagaAgent 本地执行
         search_key = getattr(naga_config.online_search, "search_api_key", "")
         env_section = config_data.setdefault("env", {})
-        if search_key:
-            env_section["BRAVE_API_KEY"] = search_key
-            tools_section = config_data.setdefault("tools", {})
-            web_section = tools_section.setdefault("web", {})
-            search_section = web_section.setdefault("search", {})
-            search_section["apiKey"] = search_key
-        else:
-            env_section.pop("BRAVE_API_KEY", None)
+        channels_section = config_data.setdefault("channels", {})
+        tools_section = config_data.setdefault("tools", {})
+        tools_section["loopDetection"] = {
+            "enabled": True,
+            "historySize": 20,
+            "warningThreshold": 4,
+            "criticalThreshold": 6,
+            "globalCircuitBreakerThreshold": 8,
+            "detectors": {
+                "genericRepeat": True,
+                "knownPollNoProgress": True,
+                "pingPong": True,
+            },
+        }
+        web_section = tools_section.setdefault("web", {})
+        search_section = web_section.setdefault("search", {})
+        search_section["enabled"] = True
+        search_section["provider"] = "brave"
+        # OpenClaw 只检查“有没有 key”，实际请求会被 BRAVE_SEARCH_BASE_URL 重定向到本地统一搜索代理。
+        search_section["apiKey"] = "naga-search-proxy"
+        env_section["BRAVE_API_KEY"] = "naga-search-proxy"
+
+        # ── 公有技能目录共享给 OpenClaw ──
+        shared_public_skills_dir = get_data_dir() / "skills" / "public"
+        shared_public_skills_dir.mkdir(parents=True, exist_ok=True)
+        skills_section = config_data.setdefault("skills", {})
+        skills_load_section = skills_section.setdefault("load", {})
+        extra_dirs = skills_load_section.setdefault("extraDirs", [])
+        shared_public_path = str(shared_public_skills_dir)
+        if shared_public_path not in extra_dirs:
+            extra_dirs.append(shared_public_path)
+
+        # ── 飞书通道注入（可选）──
+        feishu_cfg = getattr(naga_config.openclaw, "feishu", None)
+        if feishu_cfg and getattr(feishu_cfg, "enabled", False):
+            app_id = getattr(feishu_cfg, "app_id", "").strip()
+            app_secret = getattr(feishu_cfg, "app_secret", "").strip()
+            if app_id and app_secret:
+                feishu_channel = {
+                    "enabled": True,
+                    "appId": app_id,
+                    "appSecret": app_secret,
+                    "dmPolicy": getattr(feishu_cfg, "dm_policy", "open"),
+                    "groupPolicy": getattr(feishu_cfg, "group_policy", "allowlist"),
+                }
+                allow_from = getattr(feishu_cfg, "allow_from", None) or []
+                if allow_from:
+                    feishu_channel["allowFrom"] = [str(item).strip() for item in allow_from if str(item).strip()]
+                doc_owner_open_id = getattr(feishu_cfg, "doc_owner_open_id", None)
+                if doc_owner_open_id:
+                    feishu_channel["docOwnerOpenId"] = str(doc_owner_open_id).strip()
+                channels_section["feishu"] = feishu_channel
+            else:
+                logger.warning("OpenClaw 飞书已启用，但缺少 app_id/app_secret，跳过通道注入")
 
         OPENCLAW_CONFIG_FILE.write_text(
             json.dumps(config_data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        logger.info(f"已注入 Naga 配置: model={full_model_id}, search_key={'已配置' if search_key else '未配置'}")
+
+        # 创建 auth-profiles.json 让 OpenClaw 能找到 API key
+        auth_profiles_path = OPENCLAW_CONFIG_DIR / "agents" / "main" / "agent" / "auth-profiles.json"
+        auth_profiles_path.parent.mkdir(parents=True, exist_ok=True)
+        auth_profiles = {
+            f"{provider_name}:default": {
+                "provider": provider_name,
+                "mode": "api_key",
+                "apiKey": "naga-proxy-placeholder"
+            }
+        }
+        auth_profiles_path.write_text(
+            json.dumps(auth_profiles, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        logger.info(
+            f"已注入 Naga 配置: model={full_model_id}, search_key={'已配置' if search_key else '未配置'}, "
+            f"feishu={'已启用' if (feishu_cfg and getattr(feishu_cfg, 'enabled', False)) else '未启用'}"
+        )
         return True
 
     except Exception as e:

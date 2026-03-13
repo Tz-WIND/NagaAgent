@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { Message } from '@/utils/session'
+import type { Message, ToolEvent } from '@/utils/session'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { CONFIG } from '@/utils/config'
 import Markdown from './Markdown.vue'
@@ -24,6 +24,16 @@ let phraseTimer: ReturnType<typeof setInterval> | undefined
 
 const generatingText = computed(() => {
   return GENERATING_PHRASES[phraseIndex.value % GENERATING_PHRASES.length] ?? 'Generating...'
+})
+
+const displaySource = computed(() => {
+  if (props.content)
+    return props.content
+  if (props.reasoning)
+    return ''
+  if (props.generating)
+    return generatingText.value
+  return ''
 })
 
 const shouldAnimate = computed(() => props.generating && !props.content && !props.reasoning)
@@ -62,6 +72,33 @@ const ROLE_MAP = {
 }
 
 const reasoningExpanded = ref(true)
+
+function formatToolPayload(value: unknown): string {
+  if (value == null)
+    return ''
+  if (typeof value === 'string')
+    return value
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
+}
+
+function toolSummary(event: ToolEvent): string {
+  const name = event.name || '工具'
+  if (event.type === 'tool_call') {
+    return `🔧 ${name}`
+  }
+  return `${event.isError ? '❌' : '✅'} ${name}`
+}
+
+function toolBody(event: ToolEvent): string {
+  if (event.type === 'tool_call') {
+    return formatToolPayload(event.args)
+  }
+  return formatToolPayload(event.result)
+}
 </script>
 
 <template>
@@ -94,7 +131,17 @@ const reasoningExpanded = ref(true)
         <span class="status-spinner" />
         <span class="status-text">{{ status }}</span>
       </div>
-      <Markdown v-else :source="content || (reasoning ? '' : generatingText)" />
+      <Markdown v-else :source="displaySource" />
+      <div v-if="toolEvents?.length" class="tool-events">
+        <details
+          v-for="(event, index) in toolEvents"
+          :key="`${event.type}-${event.toolCallId || event.name || 'tool'}-${index}`"
+          class="tool-result"
+        >
+          <summary>{{ toolSummary(event) }}</summary>
+          <pre v-if="toolBody(event)" class="tool-result-body">{{ toolBody(event) }}</pre>
+        </details>
+      </div>
     </div>
   </div>
 </template>
@@ -175,6 +222,10 @@ const reasoningExpanded = ref(true)
   font-size: 0.85rem;
   border-left: 2px solid rgba(255, 255, 255, 0.15);
   margin: 0.3rem 0;
+}
+
+.tool-events {
+  margin-top: 0.4rem;
 }
 
 /* 思考过程区块 */

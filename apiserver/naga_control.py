@@ -323,8 +323,14 @@ async def _start_travel(params: dict) -> dict:
         return {"success": False, "error": f"已有进行中的旅行 (session_id={active.session_id})，请先停止"}
 
     session = create_session(
+        agent_id=params.get("agent_id"),
         time_limit_minutes=params.get("time_limit", 300),
         credit_limit=params.get("credit_limit", 1000),
+        goal_prompt=params.get("goal_prompt"),
+        post_to_forum=params.get("post_to_forum", True),
+        deliver_full_report=params.get("deliver_full_report", True),
+        deliver_channel=params.get("deliver_channel"),
+        deliver_to=params.get("deliver_to"),
     )
 
     # 代理到 agent_server 实际执行探索

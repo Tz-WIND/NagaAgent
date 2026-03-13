@@ -27,6 +27,7 @@ const MAX_SEARCH_COUNT = 10;
 
 const BRAVE_SEARCH_ENDPOINT = process.env.BRAVE_SEARCH_BASE_URL || "https://api.search.brave.com/res/v1/web/search";
 const BRAVE_LLM_CONTEXT_ENDPOINT = process.env.BRAVE_SEARCH_BASE_URL?.replace(/\/web\/search$/, "/llm/context") || "https://api.search.brave.com/res/v1/llm/context";
+const LOCAL_SEARCH_PROXY_ENDPOINT = process.env.NAGA_WEB_SEARCH_PROXY_URL || (BRAVE_SEARCH_ENDPOINT.includes("/tools/search") ? BRAVE_SEARCH_ENDPOINT : "");
 const DEFAULT_PERPLEXITY_BASE_URL = "https://openrouter.ai/api/v1";
 const PERPLEXITY_DIRECT_BASE_URL = "https://api.perplexity.ai";
 const PERPLEXITY_SEARCH_ENDPOINT = "https://api.perplexity.ai/search";
@@ -160,6 +161,12 @@ function createWebSearchSchema(params: {
         description: "Number of results to return (1-10).",
         minimum: 1,
         maximum: MAX_SEARCH_COUNT,
+      }),
+    ),
+    raw: Type.Optional(
+      Type.Boolean({
+        description:
+          "Return raw original tool payload instead of compact summarized results. Default: false.",
       }),
     ),
   } as const;
@@ -1801,6 +1808,239 @@ async function runWebSearch(params: {
   return payload;
 }
 
+async function runLocalProxySearch(params: {
+  query: string;
+  count: number;
+  timeoutSeconds: number;
+  cacheTtlMs: number;
+  freshness?: string;
+}): Promise<{
+  query: string;
+  provider: "naga-proxy";
+  count: number;
+  tookMs: number;
+  externalContent: {
+    untrusted: true;
+    source: "web_search";
+    provider: "naga-proxy";
+    wrapped: true;
+  };
+  results: Array<{
+    title: string;
+    url: string;
+    description: string;
+    published?: string;
+    siteName?: string;
+  }>;
+}> {
+  const cacheKey = normalizeCacheKey(
+    "web-search-local-proxy",
+    params.query,
+    String(params.count),
+    params.freshness ?? "",
+  );
+  const cached = readCache(SEARCH_CACHE, cacheKey);
+  if (cached) {
+    return cached as {
+      query: string;
+      provider: "naga-proxy";
+      count: number;
+      tookMs: number;
+      externalContent: {
+        untrusted: true;
+        source: "web_search";
+        provider: "naga-proxy";
+        wrapped: true;
+      };
+      results: Array<{
+        title: string;
+        url: string;
+        description: string;
+        published?: string;
+        siteName?: string;
+      }>;
+    };
+  }
+
+  const start = Date.now();
+  const url = new URL(LOCAL_SEARCH_PROXY_ENDPOINT);
+  url.searchParams.set("q", params.query);
+  url.searchParams.set("count", String(params.count));
+  if (params.freshness) {
+    url.searchParams.set("freshness", params.freshness);
+  }
+
+  const mapped = await withTrustedWebToolsEndpoint(
+    {
+      url: url.toString(),
+      timeoutSeconds: params.timeoutSeconds,
+      init: {
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+        },
+      },
+    },
+    async ({ response }) => {
+      if (!response.ok) {
+        const detailResult = await readResponseText(response, { maxBytes: 64_000 });
+        const detail = detailResult.text;
+        throw new Error(
+          `Naga local search proxy error (${response.status}): ${detail || response.statusText}`,
+        );
+      }
+
+      const data = (await response.json()) as BraveSearchResponse;
+      const results = Array.isArray(data.web?.results) ? (data.web?.results ?? []) : [];
+      return results.map((entry) => {
+        const description = entry.description ?? "";
+        const title = entry.title ?? "";
+        const resultUrl = entry.url ?? "";
+        const rawSiteName = resolveSiteName(resultUrl);
+        return {
+          title: title ? wrapWebContent(title, "web_search") : "",
+          url: resultUrl,
+          description: description ? wrapWebContent(description, "web_search") : "",
+          published: entry.age || undefined,
+          siteName: rawSiteName || undefined,
+        };
+      });
+    },
+  );
+
+  const payload = {
+    query: params.query,
+    provider: "naga-proxy" as const,
+    count: mapped.length,
+    tookMs: Date.now() - start,
+    externalContent: {
+      untrusted: true as const,
+      source: "web_search" as const,
+      provider: "naga-proxy" as const,
+      wrapped: true as const,
+    },
+    results: mapped,
+  };
+  writeCache(SEARCH_CACHE, cacheKey, payload, params.cacheTtlMs);
+  return payload;
+}
+
+const EXTERNAL_CONTENT_BLOCK_RE =
+  /\n?<<<EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\n?[\s\S]*?\n---\n?|\n?<<<END_EXTERNAL_UNTRUSTED_CONTENT[^>]*>>>\n?/g;
+
+function stripExternalMarkers(text: string | undefined): string {
+  if (!text) {
+    return "";
+  }
+  return text.replace(EXTERNAL_CONTENT_BLOCK_RE, "").replace(/\s+/g, " ").trim();
+}
+
+function truncateSummaryText(text: string | undefined, maxChars: number): string {
+  const cleaned = stripExternalMarkers(text);
+  if (!cleaned) {
+    return "";
+  }
+  if (cleaned.length <= maxChars) {
+    return cleaned;
+  }
+  return `${cleaned.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function summarizeWebSearchPayload(payload: unknown): {
+  summary: string;
+  details: Record<string, unknown>;
+} {
+  if (!payload || typeof payload !== "object") {
+    return {
+      summary: typeof payload === "string" ? payload : JSON.stringify(payload, null, 2),
+      details: { value: payload },
+    };
+  }
+
+  const record = payload as Record<string, unknown>;
+  const query = typeof record.query === "string" ? record.query : "";
+  const provider = typeof record.provider === "string" ? record.provider : "unknown";
+  const tookMs = typeof record.tookMs === "number" ? record.tookMs : undefined;
+  const rawResults = Array.isArray(record.results) ? record.results : [];
+
+  const compactResults = rawResults
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return null;
+      }
+      const result = entry as Record<string, unknown>;
+      const title = truncateSummaryText(typeof result.title === "string" ? result.title : "", 120);
+      const description = truncateSummaryText(
+        typeof result.description === "string" ? result.description : "",
+        220,
+      );
+      const url = typeof result.url === "string" ? result.url : "";
+      const siteName = typeof result.siteName === "string" ? result.siteName : undefined;
+      const published = typeof result.published === "string" ? result.published : undefined;
+      return {
+        title,
+        url,
+        ...(siteName ? { siteName } : {}),
+        ...(published ? { published } : {}),
+        ...(description ? { description } : {}),
+      };
+    })
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+
+  const shownResults = compactResults.slice(0, 5);
+  const lines = [
+    `query: ${query || "(unknown)"}`,
+    `provider: ${provider}${typeof tookMs === "number" ? `, tookMs: ${tookMs}` : ""}`,
+    `results: ${compactResults.length}`,
+  ];
+
+  shownResults.forEach((entry, index) => {
+    lines.push(`${index + 1}. ${String(entry.title || "(untitled)")}`);
+    if (entry.siteName || entry.published) {
+      lines.push(
+        `   source: ${String(entry.siteName || "(unknown)")}${entry.published ? ` | ${String(entry.published)}` : ""}`,
+      );
+    }
+    if (entry.url) {
+      lines.push(`   url: ${String(entry.url)}`);
+    }
+    if (entry.description) {
+      lines.push(`   snippet: ${String(entry.description)}`);
+    }
+  });
+
+  if (compactResults.length > shownResults.length) {
+    lines.push(`... ${compactResults.length - shownResults.length} more results omitted`);
+  }
+
+  return {
+    summary: lines.join("\n"),
+    details: {
+      query,
+      provider,
+      ...(typeof tookMs === "number" ? { tookMs } : {}),
+      totalResults: compactResults.length,
+      results: shownResults,
+      ...(compactResults.length > shownResults.length
+        ? { omittedResults: compactResults.length - shownResults.length }
+        : {}),
+    },
+  };
+}
+
+function summarizedJsonResult(payload: unknown): ReturnType<typeof jsonResult> {
+  const summarized = summarizeWebSearchPayload(payload);
+  return {
+    content: [
+      {
+        type: "text",
+        text: summarized.summary,
+      },
+    ],
+    details: summarized.details,
+  };
+}
+
 export function createWebSearchTool(options?: {
   config?: OpenClawConfig;
   sandboxed?: boolean;
@@ -1843,6 +2083,25 @@ export function createWebSearchTool(options?: {
       perplexityTransport: provider === "perplexity" ? perplexityTransport.transport : undefined,
     }),
     execute: async (_toolCallId, args) => {
+      if (LOCAL_SEARCH_PROXY_ENDPOINT) {
+        const params = args as Record<string, unknown>;
+        const query = readStringParam(params, "query", { required: true });
+        const raw = params.raw === true;
+        const count =
+          readNumberParam(params, "count", { integer: true }) ?? search?.maxResults ?? undefined;
+        const rawFreshness = readStringParam(params, "freshness");
+        const freshness = rawFreshness ? normalizeFreshness(rawFreshness, "brave") : undefined;
+
+        const localResult = await runLocalProxySearch({
+          query,
+          count: resolveSearchCount(count, DEFAULT_SEARCH_COUNT),
+          timeoutSeconds: resolveTimeoutSeconds(search?.timeoutSeconds, DEFAULT_TIMEOUT_SECONDS),
+          cacheTtlMs: resolveCacheTtlMs(search?.cacheTtlMinutes, DEFAULT_CACHE_TTL_MINUTES),
+          freshness,
+        });
+        return raw ? jsonResult(localResult) : summarizedJsonResult(localResult);
+      }
+
       const perplexityRuntime = provider === "perplexity" ? perplexityTransport : undefined;
       const apiKey =
         provider === "perplexity"
@@ -1862,6 +2121,7 @@ export function createWebSearchTool(options?: {
       const supportsStructuredPerplexityFilters =
         provider === "perplexity" && perplexityRuntime?.transport === "search_api";
       const params = args as Record<string, unknown>;
+      const raw = params.raw === true;
       const query = readStringParam(params, "query", { required: true });
       const count =
         readNumberParam(params, "count", { integer: true }) ?? search?.maxResults ?? undefined;
@@ -2091,7 +2351,7 @@ export function createWebSearchTool(options?: {
         kimiModel: resolveKimiModel(kimiConfig),
         braveMode,
       });
-      return jsonResult(result);
+      return raw ? jsonResult(result) : summarizedJsonResult(result);
     },
   };
 }

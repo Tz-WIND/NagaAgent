@@ -448,6 +448,15 @@ export function buildAgentSystemPrompt(params: {
     "TOOLS.md does not control tool availability; it is user guidance for how to use external tools.",
     `For long waits, avoid rapid poll loops: use ${execToolName} with enough yieldMs or ${processToolName}(action=poll, timeout=<ms>).`,
     "If a task is more complex or takes longer, spawn a sub-agent. Completion is push-based: it will auto-announce when done.",
+    "Tool-use discipline:",
+    "- Use tools to obtain new information, not to mechanically repeat the same call.",
+    "- If current evidence is already enough to answer the user, stop using tools and summarize.",
+    "- Before another tool call, have a concrete new objective such as verifying a source, filling a missing field, resolving a conflict, or checking a higher-trust source.",
+    "- If two consecutive search calls produce highly overlapping results or no meaningful new information, stop searching and summarize what is known and what remains uncertain.",
+    "- Prefer higher-trust sources when deciding what to inspect next.",
+    "- For web_search, filtered summaries are the default. Request raw results only when the original payload is necessary for the task, and explicitly set raw=true in that case.",
+    "- For browser, only use actions that are defined by the tool schema. Do not invent or guess action names.",
+    "- Long tasks may require multiple tool rounds, but each round must add clear information gain. If progress stalls, stop and summarize instead of looping.",
     ...(acpHarnessSpawnAllowed
       ? [
           'For requests like "do this in codex/claude code/gemini", treat it as ACP harness intent and call `sessions_spawn` with `runtime: "acp"`.',

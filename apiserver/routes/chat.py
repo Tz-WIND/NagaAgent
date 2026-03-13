@@ -4,12 +4,21 @@ import asyncio
 import logging
 import threading
 import traceback
+from dataclasses import dataclass
+from pathlib import Path
 from typing import AsyncGenerator
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from system.config import get_config, build_system_prompt, build_context_supplement
+from system.config import (
+    CHARACTERS_DIR,
+    build_context_supplement,
+    build_system_prompt,
+    get_config,
+    get_data_dir,
+    load_character,
+)
 from apiserver import naga_auth
 from apiserver.message_manager import message_manager
 from apiserver.llm_service import get_llm_service
@@ -27,6 +36,145 @@ from apiserver.routes.tools import _update_proactive_activity_silent
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_NAGA_CORE_ENGINES = {"naga-core", "nagacore", "naga_core"}
+
+
+@dataclass
+class _AgentPromptContext:
+    agent_id: str
+    name: str
+    engine: str
+    character_template: str | None
+    system_prompt: str
+    extra_sections: list[str]
+    skills_prompt: str
+    skill_manager: object | None
+
+
+def _normalize_agent_engine(value: str | None) -> str:
+    normalized = (value or "openclaw").strip().lower()
+    if normalized in {"nagacore", "naga_core"}:
+        normalized = "naga-core"
+    return normalized
+
+
+def _load_agent_manifest_record(agent_id: str) -> dict | None:
+    manifest_path = get_data_dir() / "agents" / "agents.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        import json
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for item in manifest.get("agents", []):
+            if item.get("id") == agent_id:
+                item = dict(item)
+                item["engine"] = _normalize_agent_engine(item.get("engine"))
+                return item
+    except Exception as e:
+        logger.warning(f"[NagaCore] 读取干员 manifest 失败: {e}")
+    return None
+
+
+def _read_text_snippet(path: Path, max_chars: int = 4000) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rstrip() + "\n\n[已截断]"
+
+
+def _load_character_prompt(character_template: str | None) -> str:
+    if not character_template:
+        return ""
+    try:
+        char_meta = load_character(character_template)
+        prompt_file = char_meta.get("prompt_file") or "conversation_style_prompt.txt"
+        prompt_path = CHARACTERS_DIR / character_template / prompt_file
+        return _read_text_snippet(prompt_path, max_chars=12000)
+    except Exception as e:
+        logger.warning(f"[NagaCore] 加载角色模板 [{character_template}] 失败: {e}")
+        return ""
+
+
+def _load_memory_section(memory_dir: Path) -> str:
+    if not memory_dir.exists():
+        return ""
+    files = [
+        path for path in memory_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in {".md", ".txt"}
+    ]
+    if not files:
+        return ""
+    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    chunks: list[str] = []
+    for memory_file in files[:3]:
+        content = _read_text_snippet(memory_file, max_chars=1200)
+        if not content:
+            continue
+        chunks.append(f"### {memory_file.name}\n{content}")
+    if not chunks:
+        return ""
+    return "## 干员长期记忆\n\n以下是该干员的本地长期记忆摘录，请在回答时保持一致：\n\n" + "\n\n".join(chunks)
+
+
+def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | None:
+    if not agent_id:
+        return None
+
+    record = _load_agent_manifest_record(agent_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"NagaCore 干员不存在: {agent_id}")
+
+    engine = _normalize_agent_engine(record.get("engine"))
+    if engine not in _NAGA_CORE_ENGINES:
+        raise HTTPException(status_code=400, detail=f"干员 [{record.get('name') or agent_id}] 不是 NagaCore 引擎")
+
+    from system.skill_manager import SkillManager
+
+    agent_dir = get_data_dir() / "agents" / agent_id
+    identity_path = agent_dir / "IDENTITY.md"
+    soul_path = agent_dir / "SOUL.md"
+    notes_path = agent_dir / "notes" / "CLAUDE.md"
+    private_skills_dir = agent_dir / "skills"
+    public_skills_dir = get_data_dir() / "skills" / "public"
+    project_skills_dir = Path(__file__).resolve().parents[2] / "skills"
+
+    system_prompt = _read_text_snippet(identity_path, max_chars=16000)
+    if not system_prompt:
+        system_prompt = _load_character_prompt(record.get("character_template")) or build_system_prompt()
+
+    extra_sections: list[str] = []
+    soul_text = _read_text_snippet(soul_path, max_chars=5000)
+    if soul_text:
+        extra_sections.append("## 干员灵魂\n\n以下是该干员后天形成的长期倾向、偏好和成长记录，请保持一致：\n\n" + soul_text)
+
+    notes_text = _read_text_snippet(notes_path, max_chars=4000)
+    if notes_text:
+        extra_sections.append("## 干员记事本\n\n以下是该干员的长期注意事项和工作记事：\n\n" + notes_text)
+
+    memory_section = _load_memory_section(agent_dir / "memory")
+    if memory_section:
+        extra_sections.append(memory_section)
+
+    skill_manager = SkillManager(skills_dirs=[project_skills_dir, public_skills_dir, private_skills_dir])
+    skills_prompt = skill_manager.generate_skills_prompt()
+
+    return _AgentPromptContext(
+        agent_id=agent_id,
+        name=record.get("name") or agent_id,
+        engine=engine,
+        character_template=record.get("character_template"),
+        system_prompt=system_prompt,
+        extra_sections=extra_sections,
+        skills_prompt=skills_prompt,
+        skill_manager=skill_manager,
+    )
 
 
 def _supports_function_calling(model_name: str) -> bool:
@@ -197,6 +345,8 @@ async def chat(request: ChatRequest):
         # 更新ProactiveVision的用户活动时间
         asyncio.create_task(_update_proactive_activity_silent())
 
+        agent_ctx = _build_agent_prompt_context(request.agent_id)
+
         # 技能调度前缀：让 LLM 明确知道当前处于技能模式
         user_message = request.message
         if request.skill:
@@ -205,7 +355,7 @@ async def chat(request: ChatRequest):
         session_id = message_manager.create_session(request.session_id, temporary=request.temporary)
 
         # 系统提示词 = 纯人格
-        system_prompt = build_system_prompt()
+        system_prompt = agent_ctx.system_prompt if agent_ctx else build_system_prompt()
 
         # 先构建对话消息（人格在 messages[0]）
         effective_message = user_message
@@ -240,6 +390,13 @@ async def chat(request: ChatRequest):
             include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
             skill_name=request.skill,
             rag_section=rag_section,
+            skills_prompt_override=agent_ctx.skills_prompt if agent_ctx else None,
+            skill_instructions_override=(
+                agent_ctx.skill_manager.get_skill_instructions(request.skill)
+                if agent_ctx and request.skill and agent_ctx.skill_manager
+                else None
+            ),
+            extra_sections=agent_ctx.extra_sections if agent_ctx else None,
         )
         messages.append({"role": "system", "content": supplement})
 
@@ -282,6 +439,7 @@ async def chat_stream(request: ChatRequest):
         try:
             import time as _time
             t_api_start = _time.monotonic()
+            agent_ctx = _build_agent_prompt_context(request.agent_id)
 
             # 获取或创建会话ID
             session_id = message_manager.create_session(request.session_id, temporary=request.temporary)
@@ -297,7 +455,7 @@ async def chat_stream(request: ChatRequest):
             yield f"data: session_id: {session_id}\n\n"
 
             # 系统提示词 = 纯人格
-            system_prompt = build_system_prompt()
+            system_prompt = agent_ctx.system_prompt if agent_ctx else build_system_prompt()
 
             # 用户消息使用带技能前缀的版本
             effective_message = user_message
@@ -367,6 +525,13 @@ async def chat_stream(request: ChatRequest):
                 include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
                 skill_name=request.skill,
                 rag_section=rag_section,
+                skills_prompt_override=agent_ctx.skills_prompt if agent_ctx else None,
+                skill_instructions_override=(
+                    agent_ctx.skill_manager.get_skill_instructions(request.skill)
+                    if agent_ctx and request.skill and agent_ctx.skill_manager
+                    else None
+                ),
+                extra_sections=agent_ctx.extra_sections if agent_ctx else None,
             )
             messages.append({"role": "system", "content": supplement})
 

@@ -134,7 +134,13 @@ export class ApiClient {
       }
     }
 
-    console.error('API Error:', error)
+    const status = error.response?.status
+    const url = error.config?.url || ''
+    const isExpectedMissingSession = status === 404 && !!url.match(/\/sessions\/[^/]+$/)
+    const isTransientForumError = !!url.startsWith('/forum/api/') && (status === 500 || status === 503)
+    if (!isExpectedMissingSession && !isTransientForumError) {
+      console.error('API Error:', error)
+    }
     return Promise.reject(error)
   }
 

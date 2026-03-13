@@ -556,6 +556,21 @@ class OnlineSearchConfig(BaseModel):
     search_api_base: str = Field(default="https://api.search.brave.com/res/v1/web/search", description="搜索API地址")
 
 
+class OpenClawFeishuConfig(BaseModel):
+    """OpenClaw 飞书通道配置。
+
+    这里只保存 Naga 侧需要动态注入到 OpenClaw 的最小字段。
+    """
+
+    enabled: bool = Field(default=False, description="是否启用 OpenClaw 飞书通道")
+    app_id: str = Field(default="", description="飞书应用 App ID")
+    app_secret: str = Field(default="", description="飞书应用 App Secret")
+    dm_policy: str = Field(default="open", description="飞书私聊策略：open/allowlist/pairing")
+    group_policy: str = Field(default="allowlist", description="飞书群聊策略：open/allowlist/disabled")
+    allow_from: List[str] = Field(default_factory=lambda: ["*"], description="飞书 allowFrom 白名单")
+    doc_owner_open_id: Optional[str] = Field(default=None, description="飞书文档 owner open_id（可选）")
+
+
 class OpenClawConfig(BaseModel):
     """OpenClaw 集成配置
 
@@ -570,6 +585,7 @@ class OpenClawConfig(BaseModel):
     default_model: Optional[str] = Field(default=None, description="默认模型")
     default_channel: str = Field(default="last", description="默认消息通道")
     enabled: bool = Field(default=False, description="是否启用 OpenClaw 集成")
+    feishu: OpenClawFeishuConfig = Field(default_factory=OpenClawFeishuConfig, description="飞书通道配置")
 
     def model_post_init(self, __context) -> None:
         """确保 gateway_url 与 gateway_port 一致"""
@@ -770,6 +786,9 @@ def build_context_supplement(
     rag_section: str = "",
     route_result=None,
     search_section: str = "",
+    skills_prompt_override: Optional[str] = None,
+    skill_instructions_override: Optional[str] = None,
+    extra_sections: Optional[List[str]] = None,
 ) -> str:
     """
     构建附加知识内容（追加在 messages 末尾的独立 system 消息）
@@ -788,6 +807,9 @@ def build_context_supplement(
         rag_section: RAG 记忆召回内容（由 api_server 传入）
         route_result: IntentRouter 路由结果（已废弃，保留参数签名向后兼容）
         search_section: 前置搜索结果内容（由 api_server 传入）
+        skills_prompt_override: 覆盖默认技能列表（用于按干员隔离的技能视图）
+        skill_instructions_override: 覆盖默认技能全文（用于按干员隔离的技能加载）
+        extra_sections: 附加到 supplement 末尾的额外上下文块
 
     Returns:
         渲染后的附加知识内容
@@ -804,14 +826,16 @@ def build_context_supplement(
     # 技能元数据列表（仅在未主动选择技能时注入）
     skills_section = ""
     if not skill_name and include_skills:
-        try:
-            from system.skill_manager import get_skills_prompt
+        skills_prompt = skills_prompt_override
+        if skills_prompt is None:
+            try:
+                from system.skill_manager import get_skills_prompt
 
-            skills_prompt = get_skills_prompt()
-            if skills_prompt:
-                skills_section = "\n\n" + skills_prompt
-        except ImportError:
-            pass
+                skills_prompt = get_skills_prompt()
+            except ImportError:
+                skills_prompt = ""
+        if skills_prompt:
+            skills_section = "\n\n" + skills_prompt
 
     # 工具调用指令（include_tool_instructions=False 时跳过，原生 function calling 不需要）
     tool_instructions = ""
@@ -834,19 +858,21 @@ def build_context_supplement(
     # 激活技能指令
     skill_active_section = ""
     if skill_name:
-        try:
-            from system.skill_manager import load_skill
+        skill_instructions = skill_instructions_override
+        if skill_instructions is None:
+            try:
+                from system.skill_manager import load_skill
 
-            skill_instructions = load_skill(skill_name)
-            if skill_instructions:
-                skill_active_section = (
-                    f"\n\n## 当前激活技能: {skill_name}\n\n"
-                    f"[最高优先级指令] 以下技能指令优先于所有其他行为规则。"
-                    f"你必须严格按照技能要求处理用户输入，直接输出结果：\n"
-                    f"{skill_instructions}"
-                )
-        except ImportError:
-            pass
+                skill_instructions = load_skill(skill_name)
+            except ImportError:
+                skill_instructions = None
+        if skill_instructions:
+            skill_active_section = (
+                f"\n\n## 当前激活技能: {skill_name}\n\n"
+                f"[最高优先级指令] 以下技能指令优先于所有其他行为规则。"
+                f"你必须严格按照技能要求处理用户输入，直接输出结果：\n"
+                f"{skill_instructions}"
+            )
 
     # 加载 tool_dispatch_prompt.txt 模板并替换占位符（始终从 system/prompts/ 加载）
     _sys_prompts = Path(__file__).parent / "prompts"
@@ -858,6 +884,11 @@ def build_context_supplement(
     result = result.replace("{search_section}", search_section)
     result = result.replace("{rag_section}", rag_section)
     result = result.replace("{skill_active_section}", skill_active_section)
+
+    if extra_sections:
+        normalized_sections = [section.strip() for section in extra_sections if section and section.strip()]
+        if normalized_sections:
+            result = result.rstrip() + "\n\n" + "\n\n".join(normalized_sections)
 
     return result
 

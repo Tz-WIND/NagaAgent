@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { MarketItem } from '@/api/core'
+import type { MarketItem, SkillCatalogItem } from '@/api/core'
 import { useStorage } from '@vueuse/core'
 import { Accordion } from 'primevue'
 import { computed, ref } from 'vue'
@@ -8,6 +8,7 @@ import BoxContainer from '@/components/BoxContainer.vue'
 import ConfigGroup from '@/components/ConfigGroup.vue'
 import McpAddDialog from '@/components/McpAddDialog.vue'
 import SkillAddDialog from '@/components/SkillAddDialog.vue'
+import { agentContacts, loadAgentContacts } from '@/utils/session'
 
 interface McpService {
   name: string
@@ -19,7 +20,7 @@ interface McpService {
   config?: Record<string, any>
 }
 
-const accordionValue = useStorage('accordion-skill', ['mcp', 'skills'])
+const accordionValue = useStorage('accordion-skill', ['mcp', 'remote-hub', 'local-cache', 'public-skills', 'private-skills'])
 
 // ── MCP 服务 ──
 const mcpServices = ref<McpService[]>([])
@@ -117,22 +118,58 @@ async function deleteMcp(svc: McpService) {
 }
 
 // ── 技能仓库 ──
-const skills = ref<MarketItem[]>([])
-const skillsLoading = ref(true)
+const marketItems = ref<MarketItem[]>([])
+const marketLoading = ref(true)
+const skillCatalogLoading = ref(true)
+const localCacheSkills = ref<SkillCatalogItem[]>([])
+const publicSkills = ref<SkillCatalogItem[]>([])
+const privateSkills = ref<SkillCatalogItem[]>([])
 const installing = ref<string | null>(null)
 const showSkillDialog = ref(false)
+const skillDialogScope = ref<'cache' | 'public' | 'private'>('public')
 
-API.getMarketItems().then((res) => {
-  skills.value = res.items ?? []
-}).catch(() => {}).finally(() => {
-  skillsLoading.value = false
-})
+async function loadSkillCatalog() {
+  skillCatalogLoading.value = true
+  try {
+    const res = await API.getSkillCatalog()
+    localCacheSkills.value = res.catalog.localCache.skills || []
+    publicSkills.value = res.catalog.publicSkills.skills || []
+    privateSkills.value = res.catalog.privateSkills.skills || []
+  }
+  catch {
+    localCacheSkills.value = []
+    publicSkills.value = []
+    privateSkills.value = []
+  }
+  finally {
+    skillCatalogLoading.value = false
+  }
+}
+
+async function loadMarketItems() {
+  marketLoading.value = true
+  try {
+    const res = await API.getMarketItems()
+    marketItems.value = res.items ?? []
+  }
+  catch {
+    marketItems.value = []
+  }
+  finally {
+    marketLoading.value = false
+  }
+}
+
+void loadSkillCatalog()
+void loadMarketItems()
+void loadAgentContacts()
 
 async function installItem(item: MarketItem) {
   installing.value = item.id
   try {
     await API.installMarketItem(item.id)
     item.installed = true
+    await loadSkillCatalog()
   }
   catch (e: any) {
     // eslint-disable-next-line no-alert
@@ -143,21 +180,33 @@ async function installItem(item: MarketItem) {
   }
 }
 
-async function onSkillConfirm(data: { name: string, content: string }) {
+function openSkillDialog(scope: 'cache' | 'public' | 'private') {
+  skillDialogScope.value = scope
+  showSkillDialog.value = true
+}
+
+async function onSkillConfirm(data: { name: string, content: string, scope: 'cache' | 'public' | 'private', agentId?: string }) {
   try {
-    await API.importCustomSkill(data.name, data.content)
+    await API.importScopedSkill(data)
     showSkillDialog.value = false
-    skillsLoading.value = true
-    API.getMarketItems().then((res) => {
-      skills.value = res.items ?? []
-    }).catch(() => {}).finally(() => {
-      skillsLoading.value = false
-    })
+    await loadSkillCatalog()
   }
   catch (e: any) {
     // eslint-disable-next-line no-alert
     alert(`导入失败: ${e.message}`)
   }
+}
+
+function skillBadgeLabel(skill: SkillCatalogItem) {
+  if (skill.source === 'agent-private')
+    return skill.ownerEngine === 'naga-core' ? 'NagaCore 私有' : 'OpenClaw 私有'
+  if (skill.source === 'openclaw-local')
+    return 'OpenClaw 本地'
+  if (skill.source === 'naga-cache')
+    return 'Naga 缓存'
+  if (skill.source === 'naga-public')
+    return '公有'
+  return skill.source
 }
 </script>
 
@@ -216,16 +265,21 @@ async function onSkillConfirm(data: { name: string, content: string }) {
         </div>
       </ConfigGroup>
 
-      <!-- 技能仓库 -->
-      <ConfigGroup value="skills" header="技能仓库">
+      <ConfigGroup value="remote-hub" header="远端技能 Hub">
         <div class="grid gap-3 min-w-0 overflow-hidden">
-          <div v-if="skillsLoading" class="text-white/40 text-xs py-2">
+          <div class="skill-placeholder">
+            远端技能 Hub 待接入。目前先保留本地导入结构，并临时复用 OpenClaw 市场作为可安装来源。
+          </div>
+          <div v-if="marketLoading" class="text-white/40 text-xs py-2">
             加载中...
           </div>
           <template v-else>
-            <div v-for="item in skills" :key="item.id" class="skill-item min-w-0">
+            <div v-for="item in marketItems" :key="item.id" class="skill-item min-w-0">
               <div class="flex-1 min-w-0 overflow-hidden">
-                <div class="font-bold text-sm text-white truncate">{{ item.title }}</div>
+                <div class="flex items-center gap-2">
+                  <div class="font-bold text-sm text-white truncate">{{ item.title }}</div>
+                  <span class="scope-badge">临时市场源</span>
+                </div>
                 <div class="text-xs op-50 truncate">{{ item.description }}</div>
               </div>
               <div class="ml-3 shrink-0">
@@ -247,7 +301,82 @@ async function onSkillConfirm(data: { name: string, content: string }) {
               </div>
             </div>
           </template>
-          <button class="add-btn" @click="showSkillDialog = true">
+        </div>
+      </ConfigGroup>
+
+      <ConfigGroup value="local-cache" header="本地技能缓存">
+        <div class="grid gap-3 min-w-0 overflow-hidden">
+          <div v-if="skillCatalogLoading" class="text-white/40 text-xs py-2">
+            加载中...
+          </div>
+          <template v-else>
+            <div v-for="skill in localCacheSkills" :key="`${skill.source}:${skill.name}`" class="skill-item min-w-0">
+              <div class="flex-1 min-w-0 overflow-hidden">
+                <div class="flex items-center gap-2">
+                  <div class="font-bold text-sm text-white truncate">{{ skill.name }}</div>
+                  <span class="scope-badge">{{ skillBadgeLabel(skill) }}</span>
+                </div>
+                <div class="text-xs op-50 truncate">{{ skill.description || '暂无描述' }}</div>
+              </div>
+            </div>
+            <div v-if="!localCacheSkills.length" class="text-white/40 text-xs py-2">
+              暂无本地缓存技能
+            </div>
+          </template>
+          <button class="add-btn" @click="openSkillDialog('cache')">
+            +
+          </button>
+        </div>
+      </ConfigGroup>
+
+      <ConfigGroup value="public-skills" header="公有技能">
+        <div class="grid gap-3 min-w-0 overflow-hidden">
+          <div v-if="skillCatalogLoading" class="text-white/40 text-xs py-2">
+            加载中...
+          </div>
+          <template v-else>
+            <div v-for="skill in publicSkills" :key="`${skill.source}:${skill.name}`" class="skill-item min-w-0">
+              <div class="flex-1 min-w-0 overflow-hidden">
+                <div class="flex items-center gap-2">
+                  <div class="font-bold text-sm text-white truncate">{{ skill.name }}</div>
+                  <span class="scope-badge">{{ skillBadgeLabel(skill) }}</span>
+                </div>
+                <div class="text-xs op-50 truncate">{{ skill.description || '暂无描述' }}</div>
+              </div>
+            </div>
+            <div v-if="!publicSkills.length" class="text-white/40 text-xs py-2">
+              暂无公有技能
+            </div>
+          </template>
+          <button class="add-btn" @click="openSkillDialog('public')">
+            +
+          </button>
+        </div>
+      </ConfigGroup>
+
+      <ConfigGroup value="private-skills" header="私有技能">
+        <div class="grid gap-3 min-w-0 overflow-hidden">
+          <div v-if="skillCatalogLoading" class="text-white/40 text-xs py-2">
+            加载中...
+          </div>
+          <template v-else>
+            <div v-for="skill in privateSkills" :key="`${skill.ownerAgentId}:${skill.name}`" class="skill-item min-w-0">
+              <div class="flex-1 min-w-0 overflow-hidden">
+                <div class="flex items-center gap-2">
+                  <div class="font-bold text-sm text-white truncate">{{ skill.name }}</div>
+                  <span class="scope-badge">{{ skillBadgeLabel(skill) }}</span>
+                </div>
+                <div class="text-xs op-50 truncate">{{ skill.description || '暂无描述' }}</div>
+                <div class="text-[11px] text-white/35 truncate mt-1">
+                  绑定干员：{{ skill.ownerAgentName || skill.ownerAgentId || '未知干员' }}
+                </div>
+              </div>
+            </div>
+            <div v-if="!privateSkills.length" class="text-white/40 text-xs py-2">
+              暂无私有技能
+            </div>
+          </template>
+          <button class="add-btn" @click="openSkillDialog('private')">
             +
           </button>
         </div>
@@ -263,6 +392,8 @@ async function onSkillConfirm(data: { name: string, content: string }) {
     />
     <SkillAddDialog
       :visible="showSkillDialog"
+      :agents="agentContacts"
+      :initial-scope="skillDialogScope"
       @confirm="onSkillConfirm"
       @cancel="showSkillDialog = false"
     />
@@ -387,6 +518,27 @@ async function onSkillConfirm(data: { name: string, content: string }) {
 
 .skill-item:hover {
   background: rgba(255, 255, 255, 0.08);
+}
+
+.skill-placeholder {
+  padding: 0.75rem 0.85rem;
+  border-radius: 8px;
+  border: 1px dashed rgba(212, 175, 55, 0.28);
+  background: rgba(212, 175, 55, 0.04);
+  font-size: 0.76rem;
+  color: rgba(255, 255, 255, 0.55);
+  line-height: 1.6;
+}
+
+.scope-badge {
+  padding: 0 0.38rem;
+  border-radius: 999px;
+  background: rgba(212, 175, 55, 0.12);
+  color: rgba(212, 175, 55, 0.82);
+  font-size: 0.62rem;
+  line-height: 1.6;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
 .add-btn {

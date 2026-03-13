@@ -543,9 +543,21 @@ async def create_agent(payload: Dict[str, Any]):
         raise HTTPException(503, "实例管理器未就绪")
 
     name = payload.get("name")
+    character_template = (payload.get("character_template") or "").strip() or None
+    engine = (payload.get("engine") or "openclaw").strip() or "openclaw"
     try:
-        inst = Modules.instance_manager.create_agent(name)
-        return {"id": inst.id, "name": inst.name, "running": inst.running}
+        inst = Modules.instance_manager.create_agent(
+            name,
+            character_template=character_template,
+            engine=engine,
+        )
+        return {
+            "id": inst.id,
+            "name": inst.name,
+            "running": inst.running,
+            "character_template": inst.character_template,
+            "engine": inst.engine,
+        }
     except Exception as e:
         logger.error(f"创建干员失败: {e}")
         raise HTTPException(500, f"创建失败: {e}")
@@ -587,6 +599,8 @@ async def get_agent_history(agent_id: str, limit: int = 50):
     inst = Modules.instance_manager.get_instance(agent_id)
     if inst is None:
         raise HTTPException(404, "干员不存在")
+    if inst.engine != "openclaw":
+        return {"messages": []}
 
     # 按需启动进程（需要 Gateway 运行才能查询 session 历史）
     if not inst.running or not inst.client:
@@ -598,37 +612,27 @@ async def get_agent_history(agent_id: str, limit: int = 50):
 
     session_key = inst.client._default_session_key
     if not session_key:
+        logger.warning(f"干员 [{inst.name}] session_key 为空，无法获取历史")
         return {"messages": []}
 
     try:
-        http = await inst.client._get_client()
-        resp = await http.post(
-            f"{inst.client.config.gateway_url}/tools/invoke",
-            json={"tool": "sessions_history", "args": {"sessionKey": session_key, "limit": limit}},
-            headers=inst.client.config.get_gateway_headers(),
-            timeout=15,
+        logger.info(f"获取干员 [{inst.name}] 历史: session_key={session_key}, limit={limit}")
+        history = await inst.client.get_sessions_history(
+            session_key=session_key,
+            limit=limit,
+            include_tools=True,
         )
-        if resp.status_code == 200:
-            result = resp.json().get("result", {})
-            # sessions_history 工具直接返回 {messages: [...]}，不在 details 子对象中
-            raw_msgs = result.get("messages", [])
-            messages = []
-            for msg in raw_msgs:
-                role = msg.get("role", "")
-                if role not in ("user", "assistant"):
-                    continue
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    content = "\n".join(
-                        item.get("text", "") for item in content
-                        if isinstance(item, dict) and item.get("type") == "text"
-                    )
-                if isinstance(content, str) and content.strip():
-                    messages.append({"role": role, "content": content})
+        if history.get("success"):
+            messages = [
+                msg for msg in history.get("messages", [])
+                if isinstance(msg, dict) and msg.get("role") in ("user", "assistant")
+            ]
+            logger.info(f"解析后有效消息: {len(messages)} 条")
             return {"messages": messages}
+        logger.warning(f"获取干员 [{inst.name}] 历史失败: {history.get('error', 'unknown')}")
         return {"messages": []}
     except Exception as e:
-        logger.warning(f"获取干员 [{inst.name}] 历史失败: {e}")
+        logger.warning(f"获取干员 [{inst.name}] 历史失败: {e}", exc_info=True)
         return {"messages": []}
 
 
@@ -1357,7 +1361,17 @@ async def travel_execute(payload: Dict[str, Any]):
     if not session_id:
         raise HTTPException(400, "session_id 不能为空")
 
-    if not Modules.openclaw_client:
+    from apiserver.travel_service import load_session
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "旅行 session 不存在")
+
+    if session.agent_id:
+        if not Modules.instance_manager:
+            raise HTTPException(503, "实例管理器未就绪")
+    elif not Modules.openclaw_client:
         raise HTTPException(503, "OpenClaw 客户端未就绪")
 
     asyncio.create_task(_run_travel_session(session_id))
@@ -1371,8 +1385,11 @@ async def _run_travel_session(session_id: str):
 
     from apiserver.travel_service import (
         load_session, save_session, TravelStatus,
-        build_travel_prompt, build_social_prompt,
-        parse_discoveries, parse_social,
+        analyze_history,
+        build_forum_post_payload,
+        build_social_prompt,
+        build_travel_prompt,
+        build_wrap_up_prompt,
     )
 
     try:
@@ -1381,17 +1398,32 @@ async def _run_travel_session(session_id: str):
         logger.error(f"旅行 session 不存在: {session_id}")
         return
 
-    session_key = f"travel:{session_id[:12]}"
+    travel_client = Modules.openclaw_client
+    if session.agent_id:
+        if not Modules.instance_manager:
+            raise RuntimeError("实例管理器未就绪，无法使用指定干员执行探索")
+        inst = await Modules.instance_manager.ensure_running(session.agent_id)
+        if not inst.client:
+            raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+        session.agent_name = inst.name
+        travel_client = inst.client
+    elif travel_client is None:
+        raise RuntimeError("OpenClaw 客户端未就绪")
+
+    session_key = f"travel:{session.agent_id or 'main'}:{session_id[:8]}"
     session.openclaw_session_key = session_key
     session.status = TravelStatus.RUNNING
     session.started_at = datetime.now().isoformat()
     save_session(session)
 
-    logger.info(f"[旅行] 开始旅行 session: {session_id}, key={session_key}")
+    logger.info(
+        f"[旅行] 开始旅行 session: {session_id}, key={session_key}, "
+        f"agent={session.agent_name or session.agent_id or 'default'}"
+    )
 
     try:
         # 发送探索指令
-        await Modules.openclaw_client.send_message(
+        await travel_client.send_message(
             message=build_travel_prompt(session),
             session_key=session_key,
             name="NagaTravel",
@@ -1400,7 +1432,7 @@ async def _run_travel_session(session_id: str):
 
         # 如果想社交，额外发送社交指令
         if session.want_friends:
-            await Modules.openclaw_client.send_message(
+            await travel_client.send_message(
                 message=build_social_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
@@ -1413,7 +1445,7 @@ async def _run_travel_session(session_id: str):
         seen_social_keys: set = set()
 
         while True:
-            await asyncio.sleep(60)
+            await asyncio.sleep(30)
 
             # 检查时间限制
             elapsed = (datetime.now() - start_time).total_seconds() / 60
@@ -1433,38 +1465,88 @@ async def _run_travel_session(session_id: str):
                 logger.info(f"[旅行] session 已被取消: {session_id}")
                 return
 
+            previous_discovery_count = len(session.discoveries)
+
             # 轮询 OpenClaw 获取新消息
             try:
-                history = await Modules.openclaw_client.get_sessions_history(
-                    session_key=session_key, limit=50, include_tools=False,
+                history = await travel_client.get_sessions_history(
+                    session_key=session_key, limit=80, include_tools=True,
                 )
                 messages = history if isinstance(history, list) else history.get("messages", [])
 
-                # 解析发现和社交互动
-                new_discoveries = parse_discoveries(messages)
-                for d in new_discoveries:
-                    if d.url not in seen_discovery_urls:
-                        seen_discovery_urls.add(d.url)
-                        session.discoveries.append(d)
+                # 从工具结果和阶段性文本中提炼发现、社交、预算
+                analysis = analyze_history(messages)
+                session.discoveries = analysis.discoveries
+                session.social_interactions = analysis.social_interactions
+                session.credits_used = analysis.credits_used
+                session.tool_stats = analysis.tool_stats
+                session.unique_sources = len(
+                    {
+                        d.site_name
+                        or (
+                            d.url.split("/")[2]
+                            if isinstance(d.url, str) and d.url.count("/") >= 2
+                            else d.url
+                        )
+                        for d in session.discoveries
+                        if d.url
+                    }
+                )
 
-                new_social = parse_social(messages)
-                for s in new_social:
+                for d in session.discoveries:
+                    seen_discovery_urls.add(d.url)
+
+                for s in session.social_interactions:
                     key = f"{s.type}:{s.post_id}:{s.content_preview[:30]}"
                     if key not in seen_social_keys:
                         seen_social_keys.add(key)
-                        session.social_interactions.append(s)
+                if len(session.discoveries) > previous_discovery_count:
+                    session.idle_polls = 0
+                else:
+                    session.idle_polls += 1
 
             except Exception as e:
                 logger.warning(f"[旅行] 轮询历史失败: {e}")
 
             session.elapsed_minutes = round(elapsed, 1)
+
+            # 预算接近上限或长时间无增量时，要求 OpenClaw 开始收束
+            wrap_up_threshold = int(session.credit_limit * 0.9)
+            hard_stop_threshold = max(session.credit_limit, int(session.credit_limit * 1.1))
+            should_request_wrap_up = (
+                (session.credits_used >= wrap_up_threshold and len(session.discoveries) > 0)
+                or (session.idle_polls >= 2 and len(session.discoveries) > 0)
+            )
+            if should_request_wrap_up and not session.wrap_up_sent:
+                try:
+                    await travel_client.send_message(
+                        message=build_wrap_up_prompt(session),
+                        session_key=session_key,
+                        name="NagaTravel",
+                        timeout_seconds=0,
+                    )
+                    session.wrap_up_sent = True
+                    logger.info(
+                        f"[旅行] 已发送收束指令: {session_id}, credits={session.credits_used}, idle={session.idle_polls}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[旅行] 发送收束指令失败: {e}")
+
+            if session.credits_used >= hard_stop_threshold:
+                logger.info(f"[旅行] 估算积分到达限制 {session.credits_used}/{session.credit_limit}")
+                break
+
+            if session.idle_polls >= 4 and len(session.discoveries) > 0:
+                logger.info(f"[旅行] 长时间无新增发现，准备结束: idle_polls={session.idle_polls}")
+                break
+
             save_session(session)
 
         # 发送收尾指令
         logger.info(f"[旅行] 发送收尾指令: {session_id}")
         try:
-            await Modules.openclaw_client.send_message(
-                message="旅行时间到了，请总结你的发现。列出你访问过的最有趣的内容，以及任何社交互动。",
+            await travel_client.send_message(
+                message=build_wrap_up_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
                 timeout_seconds=300,
@@ -1472,7 +1554,7 @@ async def _run_travel_session(session_id: str):
 
             # 等待并获取最终回复
             await asyncio.sleep(30)
-            history = await Modules.openclaw_client.get_sessions_history(
+            history = await travel_client.get_sessions_history(
                 session_key=session_key, limit=5, include_tools=False,
             )
             messages = history if isinstance(history, list) else history.get("messages", [])
@@ -1494,19 +1576,65 @@ async def _run_travel_session(session_id: str):
             f"[旅行] 完成: {session_id}, 发现={len(session.discoveries)}, 社交={len(session.social_interactions)}"
         )
 
-        # QQ 通知
-        try:
-            summary_text = session.summary or "旅行已完成"
-            await Modules.openclaw_client.send_message(
-                message=f"🌍 旅行报告\n{summary_text}\n\n发现了 {len(session.discoveries)} 个有趣内容。",
-                channel="qq",
-                deliver=True,
-                session_key=session_key,
-                name="NagaTravel",
-                timeout_seconds=30,
-            )
-        except Exception as e:
-            logger.warning(f"[旅行] QQ 通知发送失败: {e}")
+        # 自动产出论坛精华版
+        if session.post_to_forum and session.summary:
+            try:
+                from apiserver.routes.forum import create_forum_post_internal
+
+                forum_payload = build_forum_post_payload(session)
+                session.forum_digest = forum_payload.get("content")
+                post_result = await create_forum_post_internal(forum_payload, timeout_seconds=20.0)
+                if isinstance(post_result, dict):
+                    session.forum_post_id = str(
+                        post_result.get("id")
+                        or post_result.get("postId")
+                        or post_result.get("post", {}).get("id")
+                        or ""
+                    ) or None
+                session.forum_post_status = "posted"
+                save_session(session)
+                logger.info(f"[旅行] 已自动发布论坛精华帖: session={session_id}, post_id={session.forum_post_id}")
+            except Exception as e:
+                session.forum_post_status = f"failed:{e}"
+                save_session(session)
+                logger.warning(f"[旅行] 自动发布论坛精华帖失败: {e}")
+
+        # 完整版报告回传给用户/通道
+        if session.deliver_full_report:
+            try:
+                if not session.deliver_channel and not session.deliver_to:
+                    session.full_report_delivery_status = "stored_in_app"
+                    save_session(session)
+                else:
+                    summary_text = session.summary or "旅行已完成"
+                    lines = [
+                        "🌍 探索完整报告",
+                        summary_text,
+                        "",
+                        f"发现条目：{len(session.discoveries)}",
+                        f"唯一来源：{session.unique_sources}",
+                        f"工具统计：{session.tool_stats or {}}",
+                    ]
+                    if session.forum_post_id:
+                        lines.extend(["", f"论坛精华帖已发布，post_id={session.forum_post_id}"])
+                    deliver_kwargs = {
+                        "message": "\n".join(lines),
+                        "deliver": True,
+                        "session_key": session_key,
+                        "name": "NagaTravel",
+                        "timeout_seconds": 30,
+                    }
+                    if session.deliver_channel:
+                        deliver_kwargs["channel"] = session.deliver_channel
+                    if session.deliver_to:
+                        deliver_kwargs["to"] = session.deliver_to
+                    await travel_client.send_message(**deliver_kwargs)
+                    session.full_report_delivery_status = "delivered"
+                save_session(session)
+            except Exception as e:
+                session.full_report_delivery_status = f"failed:{e}"
+                save_session(session)
+                logger.warning(f"[旅行] 完整报告回传失败: {e}")
 
     except Exception as e:
         logger.error(f"[旅行] 异常: {e}", exc_info=True)
