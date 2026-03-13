@@ -15,6 +15,7 @@ from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 import httpx
 
 from system.config import get_config, get_server_port
+from apiserver.agent_directory import format_agent_directory_text, resolve_agent_descriptor
 from apiserver import naga_auth
 
 logger = logging.getLogger(__name__)
@@ -647,11 +648,14 @@ _GATEWAY_DIRECT_TOOLS = frozenset({
 # 可本地执行的工具（无需经过 OpenClaw，直接本地完成）
 _LOCAL_EXEC_TOOLS = frozenset({
     "exec", "read", "write", "edit", "ls", "find", "grep", "process", "image",
-    "sessions_spawn", "sessions_send", "gateway",
+    "sessions_spawn", "sessions_send", "gateway", "agents_list", "agent_relay",
 })
 
 
-async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
+async def _execute_openclaw_tool_call(
+    call: Dict[str, Any],
+    source_agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """调用 OpenClaw 工具。
     Gateway 级工具直接走 /tools/invoke；
     agent-session 级工具（exec/read/write 等）走 /hooks/agent 让 agent 代执行。
@@ -681,7 +685,7 @@ async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
 
     # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
     if tool_name in _LOCAL_EXEC_TOOLS:
-        return await _execute_local_tool(call, tool_name, tool_args)
+        return await _execute_local_tool(call, tool_name, tool_args, source_agent_id=source_agent_id)
 
     try:
         client = _get_openclaw_client()
@@ -753,7 +757,10 @@ async def _execute_openclaw_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _execute_local_tool(
-    call: Dict[str, Any], tool_name: str, tool_args: Dict[str, Any]
+    call: Dict[str, Any],
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    source_agent_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """本地直接执行 agent-session 级工具（exec/read/write/ls/grep 等），不经过 OpenClaw。"""
     import subprocess as _sp
@@ -883,6 +890,12 @@ async def _execute_local_tool(
                     break
             return _ok("\n".join(results) if results else "未找到匹配")
 
+        elif tool_name == "agents_list":
+            return _ok(format_agent_directory_text())
+
+        elif tool_name == "agent_relay":
+            return await _execute_agent_relay(call, tool_args, source_agent_id)
+
         elif tool_name == "image":
             url = tool_args.get("url", "")
             return _err(f"image 工具暂不支持本地执行，请使用 openclaw__agent 模式: {url}")
@@ -897,6 +910,99 @@ async def _execute_local_tool(
     except Exception as e:
         logger.error(f"[AgenticLoop] 本地工具执行失败: {tool_name}, error={e}")
         return _err(f"执行失败: {e}")
+
+
+async def _execute_agent_relay(
+    call: Dict[str, Any],
+    tool_args: Dict[str, Any],
+    source_agent_id: Optional[str],
+) -> Dict[str, Any]:
+    target_agent_id = str(tool_args.get("target_agent_id") or "").strip() or None
+    target_agent_name = str(tool_args.get("target_agent_name") or "").strip() or None
+    message = str(tool_args.get("message") or "").strip()
+    if not message:
+        return {
+            "tool_call": call,
+            "result": "缺少 message 参数",
+            "status": "error",
+            "service_name": "agent_directory",
+            "tool_name": "agent_relay",
+        }
+
+    if not target_agent_id and not target_agent_name:
+        return {
+            "tool_call": call,
+            "result": "缺少目标干员，请先调用 agents_list 再指定 target_agent_id 或 target_agent_name",
+            "status": "error",
+            "service_name": "agent_directory",
+            "tool_name": "agent_relay",
+        }
+
+    target = resolve_agent_descriptor(agent_id=target_agent_id, agent_name=target_agent_name, include_builtin=True)
+    if target is None:
+        return {
+            "tool_call": call,
+            "result": "目标干员不存在，请先调用 agents_list 检查通讯录",
+            "status": "error",
+            "service_name": "agent_directory",
+            "tool_name": "agent_relay",
+        }
+
+    payload = {
+        "message": message,
+        "target_agent_id": target.id,
+        "source_agent_id": source_agent_id,
+        "purpose": tool_args.get("purpose"),
+        "context": tool_args.get("context"),
+        "timeout_seconds": max(5, min(int(tool_args.get("timeout_seconds", 120) or 120), 600)),
+    }
+
+    try:
+        client = _get_openclaw_client()
+        response = await client.post(
+            f"http://localhost:{get_server_port('api_server')}/agents/relay",
+            json=payload,
+            timeout=payload["timeout_seconds"] + 30,
+        )
+        if response.status_code != 200:
+            return {
+                "tool_call": call,
+                "result": f"转发失败: HTTP {response.status_code} {response.text[:300]}",
+                "status": "error",
+                "service_name": "agent_directory",
+                "tool_name": "agent_relay",
+            }
+        data = response.json()
+        if not data.get("success", False):
+            return {
+                "tool_call": call,
+                "result": data.get("error") or "目标干员未返回成功结果",
+                "status": "error",
+                "service_name": "agent_directory",
+                "tool_name": "agent_relay",
+            }
+        reply = str(data.get("reply") or "").strip() or "(目标干员未返回正文)"
+        result_text = (
+            f"目标干员: {data.get('target', {}).get('name', target.name)}\n"
+            f"目标引擎: {data.get('target', {}).get('engine', target.engine)}\n"
+            f"回复:\n{reply}"
+        )
+        return {
+            "tool_call": call,
+            "result": result_text,
+            "status": "success",
+            "service_name": "agent_directory",
+            "tool_name": "agent_relay",
+        }
+    except Exception as e:
+        logger.error(f"[AgenticLoop] 干员转发失败: {e}")
+        return {
+            "tool_call": call,
+            "result": f"转发异常: {e}",
+            "status": "error",
+            "service_name": "agent_directory",
+            "tool_name": "agent_relay",
+        }
 
 
 async def _execute_openclaw_session_tool(
@@ -1035,7 +1141,11 @@ async def _send_live2d_actions(live2d_calls: List[Dict[str, Any]], session_id: s
         logger.debug(f"[AgenticLoop] Live2D动作发送失败: {e}")
 
 
-async def execute_tool_calls(tool_calls: List[Dict[str, Any]], session_id: str) -> List[Dict[str, Any]]:
+async def execute_tool_calls(
+    tool_calls: List[Dict[str, Any]],
+    session_id: str,
+    source_agent_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """按 agentType 分组并行执行工具调用（不包含 live2d）。
 
     Returns:
@@ -1049,7 +1159,7 @@ async def execute_tool_calls(tool_calls: List[Dict[str, Any]], session_id: str) 
         elif agent_type == "openclaw":
             tasks.append(_execute_openclaw_call(call, session_id))
         elif agent_type in ("tool", "openclaw_tool"):
-            tasks.append(_execute_openclaw_tool_call(call))
+            tasks.append(_execute_openclaw_tool_call(call, source_agent_id=source_agent_id))
         elif agent_type == "naga_control":
             tasks.append(_execute_naga_control(call))
         else:
@@ -1184,6 +1294,7 @@ async def run_agentic_loop(
     max_rounds: int = 5,
     model_override: Optional[Dict[str, str]] = None,
     tools: Optional[List[Dict[str, Any]]] = None,
+    source_agent_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Agentic tool loop 核心。
 
@@ -1287,18 +1398,36 @@ async def run_agentic_loop(
         else:
             clean_text, tool_calls = parse_tool_calls_from_text(complete_text)
 
-        # 4. 分离live2d和可执行调用
+        # 4. 分离 live2d 和可执行调用
         actionable_calls = [tc for tc in tool_calls if tc.get("agentType") != "live2d"]
         live2d_calls = [tc for tc in tool_calls if tc.get("agentType") == "live2d"]
 
-        # 4a. fire-and-forget Live2D
-        if live2d_calls:
-            asyncio.create_task(_send_live2d_actions(live2d_calls, session_id))
-
-        # 4b. 如果检测到了任何工具调用，发送 content_clean 让前端替换掉带有工具代码块的原文
+        # 4a. 如果检测到了任何工具调用，发送 content_clean 让前端替换掉带有工具代码块的原文
         if tool_calls and clean_text != complete_text:
             # 保留工具调用前的简短说明文字（如"让我查一下"），仅移除 ```tool``` 代码块
             yield _format_sse_event("content_clean", {"text": clean_text})
+
+        # 4b. 所有工具调用都先透传给前端，再触发实际执行/动画。
+        call_descriptions = []
+        for tc in tool_calls:
+            desc = {"agentType": tc.get("agentType", "")}
+            if tc.get("agentType") == "live2d":
+                desc["service_name"] = "live2d"
+                if tc.get("action"):
+                    desc["tool_name"] = tc["action"]
+            if tc.get("service_name"):
+                desc["service_name"] = tc["service_name"]
+            if tc.get("tool_name"):
+                desc["tool_name"] = tc["tool_name"]
+            if tc.get("message"):
+                desc["message"] = tc["message"][:100]
+            call_descriptions.append(desc)
+        if call_descriptions:
+            yield _format_sse_event("tool_calls", {"calls": call_descriptions})
+
+        # 4c. Live2D 在工具调用已经进入消息流后再异步触发，避免生成正文时频繁变脸。
+        if live2d_calls:
+            asyncio.create_task(_send_live2d_actions(live2d_calls, session_id))
 
         # 5. 如果没有可执行的工具调用，循环结束
         if not actionable_calls:
@@ -1312,22 +1441,9 @@ async def run_agentic_loop(
 
         logger.info(f"[AgenticLoop] Round {round_num}: 检测到 {len(actionable_calls)} 个工具调用")
 
-        # 6. 通知前端正在执行工具
-        call_descriptions = []
-        for tc in actionable_calls:
-            desc = {"agentType": tc.get("agentType", "")}
-            if tc.get("service_name"):
-                desc["service_name"] = tc["service_name"]
-            if tc.get("tool_name"):
-                desc["tool_name"] = tc["tool_name"]
-            if tc.get("message"):
-                desc["message"] = tc["message"][:100]
-            call_descriptions.append(desc)
-        yield _format_sse_event("tool_calls", {"calls": call_descriptions})
-
         # 7. 并行执行工具调用
         t_tool_start = _time.monotonic()
-        results = await execute_tool_calls(actionable_calls, session_id)
+        results = await execute_tool_calls(actionable_calls, session_id, source_agent_id=source_agent_id)
         t_tool_elapsed = _time.monotonic() - t_tool_start
         logger.info(f"[AgenticLoop] Round {round_num}: 工具执行完成 {t_tool_elapsed:.2f}s "
                     f"({len(results)} 个工具)")

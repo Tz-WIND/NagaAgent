@@ -22,6 +22,11 @@ extraResources:
     to: build/icon.png
   - from: build/icon.ico
     to: build/icon.ico
+  - from: premium-assets/backgrounds
+    to: premium-assets/backgrounds
+    filter:
+      - '**/*'
+      - '!.DS_Store'
   - from: ../characters
     to: characters
     filter:

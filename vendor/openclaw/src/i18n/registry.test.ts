@@ -5,15 +5,14 @@ import {
   loadLazyLocaleTranslation,
   resolveNavigatorLocale,
 } from "../../ui/src/i18n/lib/registry.ts";
-import type { TranslationMap } from "../../ui/src/i18n/lib/types.ts";
 
-function getNestedTranslation(map: TranslationMap | null, ...path: string[]): string | undefined {
-  let value: string | TranslationMap | undefined = map ?? undefined;
+function getNestedTranslation(map: unknown, ...path: string[]): string | undefined {
+  let value: unknown = map ?? undefined;
   for (const key of path) {
-    if (value === undefined || typeof value === "string") {
+    if (value === undefined || value === null || typeof value === "string" || typeof value !== "object") {
       return undefined;
     }
-    value = value[key];
+    value = (value as Record<string, unknown>)[key];
   }
   return typeof value === "string" ? value : undefined;
 }

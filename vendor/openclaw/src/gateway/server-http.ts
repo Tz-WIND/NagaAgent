@@ -76,6 +76,19 @@ type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
 const HOOK_AUTH_FAILURE_LIMIT = 20;
 const HOOK_AUTH_FAILURE_WINDOW_MS = 60_000;
 
+const formatHookEventText = (value: unknown): string | undefined => {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  if (value instanceof Error) {
+    return value.message;
+  }
+  return undefined;
+};
+
 type HookDispatchers = {
   dispatchWakeHook: (value: { text: string; mode: "now" | "next-heartbeat" }) => void;
   dispatchAgentHook: (value: HookAgentDispatchPayload) => string;
@@ -535,7 +548,7 @@ export function createHooksRequestHandler(
         // 工具调度事件 → 转发为 status + tool_call/tool_result
         if (evt.stream === "tool") {
           const phase = evt.data?.phase;
-          const toolName = evt.data?.name ?? "";
+          const toolName = formatHookEventText(evt.data?.name);
           if (phase === "start" && toolName) {
             res.write(`data: ${JSON.stringify({ type: "status", text: `调用工具: ${toolName}` })}\n\n`);
             res.write(`data: ${JSON.stringify({ type: "tool_call", name: toolName, toolCallId: evt.data?.toolCallId ?? "" })}\n\n`);
@@ -555,7 +568,7 @@ export function createHooksRequestHandler(
         if (evt.stream === "lifecycle") {
           const phase = evt.data?.phase;
           if (phase === "end" || phase === "error") {
-            const errMsg = phase === "error" ? String(evt.data?.error ?? "") : undefined;
+            const errMsg = phase === "error" ? formatHookEventText(evt.data?.error) ?? "" : undefined;
             res.write(`data: ${JSON.stringify({ type: phase === "error" ? "error" : "done", text: errMsg ?? "" })}\n\n`);
             closed = true;
             unsubscribe();

@@ -8,7 +8,7 @@ const props = defineProps<{
 }>()
 
 defineEmits<{
-  'preview-image': [src: string]
+  previewImage: [src: string]
 }>()
 
 function formatTime(iso: string): string {
@@ -56,7 +56,7 @@ async function toggleLike() {
             :key="i"
             :src="img"
             class="w-16 h-16 rounded object-cover cursor-pointer hover:brightness-110 transition"
-            @click="$emit('preview-image', img)"
+            @click="$emit('previewImage', img)"
           >
         </div>
 

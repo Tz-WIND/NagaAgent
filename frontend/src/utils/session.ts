@@ -1,5 +1,5 @@
-import type { StreamChunk } from '@/utils/encoding'
 import type { AgentEngine } from '@/api/core'
+import type { StreamChunk } from '@/utils/encoding'
 import { useStorage } from '@vueuse/core'
 import { ref } from 'vue'
 import API from '@/api/core'
@@ -105,10 +105,12 @@ export async function loadAgentContacts() {
     // 更新 counter 避免编号冲突
     const maxNum = agentContacts.value.reduce((max, a) => {
       const m = a.name.match(/^干员(\d+)$/)
-      return m ? Math.max(max, parseInt(m[1] ?? '0')) : max
+      return m ? Math.max(max, Number.parseInt(m[1] ?? '0')) : max
     }, 0)
-    if (maxNum > agentCounter) agentCounter = maxNum
-  } catch {
+    if (maxNum > agentCounter)
+      agentCounter = maxNum
+  }
+  catch {
     // 后端未就绪
   }
 }
@@ -237,7 +239,8 @@ export function isAgentLoading(instanceId: string) {
 }
 
 export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?: boolean }) {
-  if (!tab.instanceId) return
+  if (!tab.instanceId)
+    return
   if (tab.engine === 'naga-core') {
     const storageKey = `agent_history_${tab.instanceId}`
     const persistedSessionId = localStorage.getItem(`agent_session_${tab.instanceId}`) || tab.sessionId
@@ -250,7 +253,8 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
           storageMessages = messages
           tab.messages = messages
         }
-      } catch {}
+      }
+      catch {}
     }
 
     if (persistedSessionId) {
@@ -273,7 +277,8 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
           localStorage.setItem(storageKey, JSON.stringify(tab.messages))
           return
         }
-      } catch {
+      }
+      catch {
         // 保留 localStorage 兜底
       }
     }
@@ -286,13 +291,15 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
     }
     return
   }
-  if (_loadingAgents.value.has(tab.instanceId)) return
+  if (_loadingAgents.value.has(tab.instanceId))
+    return
   const forceRefresh = options?.forceRefresh === true
   const cachedMessages = tab.messages.slice()
   let storageMessages: Message[] = []
 
   // 跳过已有真实消息的 tab
-  if (!forceRefresh && tab.messages.length > 0) return
+  if (!forceRefresh && tab.messages.length > 0)
+    return
   _loadingAgents.value = new Set([..._loadingAgents.value, tab.instanceId])
 
   try {
@@ -310,7 +317,8 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
             return
           }
         }
-      } catch {}
+      }
+      catch {}
     }
 
     // 强制刷新时也走后端，以触发 ensure_running 唤醒 OpenClaw 进程。
@@ -323,25 +331,30 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
         toolEvents: Array.isArray((m as any).toolEvents)
           ? (m as any).toolEvents
           : Array.isArray((m as any).tool_events)
-              ? (m as any).tool_events
-              : [],
+            ? (m as any).tool_events
+            : [],
       }))
       localStorage.setItem(storageKey, JSON.stringify(tab.messages))
-    } else if (storageMessages.length > 0) {
+    }
+    else if (storageMessages.length > 0) {
       // 后端暂无历史时，保留 localStorage 中的历史作为展示兜底。
       tab.messages = storageMessages
-    } else if (forceRefresh && cachedMessages.length > 0) {
+    }
+    else if (forceRefresh && cachedMessages.length > 0) {
       // 唤醒成功但后端暂无历史且本地无缓存时，保留已打开 tab 中的消息。
       tab.messages = cachedMessages
     }
-  } catch {
+  }
+  catch {
     // 强制刷新失败时优先保留 localStorage，其次保留已打开 tab 的消息
     if (storageMessages.length > 0) {
       tab.messages = storageMessages
-    } else if (forceRefresh && cachedMessages.length > 0) {
+    }
+    else if (forceRefresh && cachedMessages.length > 0) {
       tab.messages = cachedMessages
     }
-  } finally {
+  }
+  finally {
     _loadingAgents.value.delete(tab.instanceId)
     // 触发 ref 更新（Set 的 delete 不会自动触发）
     _loadingAgents.value = new Set(_loadingAgents.value)

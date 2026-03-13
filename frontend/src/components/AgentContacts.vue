@@ -23,7 +23,11 @@ const engineOptions: Array<{ label: string, value: AgentEngine, description: str
 
 // 右键菜单
 const contextMenu = ref<{ show: boolean, x: number, y: number, agentId: string, agentName: string }>({
-  show: false, x: 0, y: 0, agentId: '', agentName: '',
+  show: false,
+  x: 0,
+  y: 0,
+  agentId: '',
+  agentName: '',
 })
 
 // 重命名
@@ -71,13 +75,15 @@ async function finishRename(agentId: string) {
     try {
       await API.renameAgent(agentId, newName)
       // 更新通讯录
-      if (contact) contact.name = newName
+      if (contact)
+        contact.name = newName
       // 同步到已打开的 tab + 消息中的 sender
       const tab = tabs.value.find(t => t.instanceId === agentId)
       if (tab) {
         tab.name = newName
         for (const msg of tab.messages) {
-          if (msg.sender === oldName) msg.sender = newName
+          if (msg.sender === oldName)
+            msg.sender = newName
         }
       }
     }
@@ -93,7 +99,8 @@ async function deleteAgent() {
     await API.deleteAgent(agentId)
     // 从 tabs 中移除对应 tab
     const idx = tabs.value.findIndex(t => t.instanceId === agentId)
-    if (idx > 0) tabs.value.splice(idx, 1)
+    if (idx > 0)
+      tabs.value.splice(idx, 1)
     await loadAgentContacts()
   }
   catch { /* ignore */ }
@@ -115,7 +122,8 @@ async function addAgent() {
 }
 
 async function confirmAddAgent() {
-  if (adding.value) return
+  if (adding.value)
+    return
   const name = createName.value.trim()
   if (!name) {
     createError.value = '请输入干员名称'
@@ -227,7 +235,7 @@ void API.listCharacterTemplates().then((res) => {
       <div
         v-if="contextMenu.show"
         class="ctx-menu"
-        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
+        :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       >
         <div class="ctx-item" @click="startRenameFromMenu">
           重命名

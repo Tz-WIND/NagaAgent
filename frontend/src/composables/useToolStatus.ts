@@ -1,3 +1,4 @@
+import axios from 'axios'
 import { ref } from 'vue'
 import { authExpired } from '@/api'
 import API from '@/api/core'
@@ -50,6 +51,13 @@ async function poll() {
       if (active.length > 0 && !toolMessage.value) {
         toolMessage.value = `AgentServer: ${active.length} 个任务执行中...`
       }
+    }
+    else if (
+      tasks.status === 'rejected'
+      && axios.isAxiosError(tasks.reason)
+      && tasks.reason.response?.status === 503
+    ) {
+      openclawTasks.value = []
     }
 
     if (live2d.status === 'fulfilled' && live2d.value.actions?.length) {

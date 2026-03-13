@@ -332,6 +332,22 @@ _OPENCLAW_TOOLS = [
         "parameters": {"type": "object", "properties": {}},
     },
     {
+        "name": "agent_relay",
+        "description": "把消息转发给另一名干员并等待其回复。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target_agent_id": {"type": "string", "description": "目标干员 ID"},
+                "target_agent_name": {"type": "string", "description": "目标干员名称，可替代 ID"},
+                "message": {"type": "string", "description": "要转发给目标干员的消息"},
+                "purpose": {"type": "string", "description": "转发目的或期望产出"},
+                "context": {"type": "string", "description": "补充上下文"},
+                "timeout_seconds": {"type": "integer", "description": "等待秒数，默认 120"},
+            },
+            "required": ["message"],
+        },
+    },
+    {
         "name": "canvas",
         "description": "节点画布控制。",
         "parameters": {

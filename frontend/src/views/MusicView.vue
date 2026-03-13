@@ -11,7 +11,6 @@ const {
   tracks,
   currentIndex,
   isPlaying,
-  playMode,
   duration,
   currentTime,
   currentTrack,

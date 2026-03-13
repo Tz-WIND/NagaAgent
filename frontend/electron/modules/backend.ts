@@ -1,7 +1,7 @@
 import type { Buffer } from 'node:buffer'
 import type { ChildProcess } from 'node:child_process'
 import { spawn, spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
@@ -50,6 +50,19 @@ function quoteWindowsArg(arg: string): string {
   return `"${arg.replaceAll('"', '""')}"`
 }
 
+function resolveVenvPython(cwd: string): string {
+  return process.platform === 'win32'
+    ? join(cwd, '.venv', 'Scripts', 'python.exe')
+    : join(cwd, '.venv', 'bin', 'python')
+}
+
+function resolveVenvUv(cwd: string): string | null {
+  const candidate = process.platform === 'win32'
+    ? join(cwd, '.venv', 'Scripts', 'uv.exe')
+    : join(cwd, '.venv', 'bin', 'uv')
+  return existsSync(candidate) ? candidate : null
+}
+
 export function startBackend(): void {
   let cmd: string
   let args: string[]
@@ -66,10 +79,7 @@ export function startBackend(): void {
   else {
     // 开发模式：优先使用 venv 中的 Python 解释器，确保依赖版本一致
     cwd = join(__dirname, '..', '..')
-    const venvPython = process.platform === 'win32'
-      ? join(cwd, '.venv', 'Scripts', 'python.exe')
-      : join(cwd, '.venv', 'bin', 'python')
-    cmd = venvPython
+    cmd = resolveVenvPython(cwd)
     args = ['main.py', '--headless']
   }
 
@@ -170,26 +180,30 @@ export function startBackend(): void {
         devRetryCount++
         console.log('[Backend] Dependency error detected, auto-installing...')
 
-        const venvPython = process.platform === 'win32'
-          ? join(cwd, '.venv', 'Scripts', 'python.exe')
-          : join(cwd, '.venv', 'bin', 'python')
+        const venvPython = resolveVenvPython(cwd)
         const reqFile = join(cwd, 'requirements.txt')
+        const venvUv = resolveVenvUv(cwd)
 
-        // Try uv first, fallback to pip
+        // Prefer the project venv's uv; if it is absent, try python -m uv before falling back to pip.
         let installOk = false
-        try {
-          const uvResult = spawnSync('uv', ['pip', 'install', '--python', venvPython, '-r', reqFile], {
+        if (venvUv) {
+          const uvResult = spawnSync(venvUv, ['pip', 'install', '--python', venvPython, '-r', reqFile], {
             cwd,
             stdio: 'inherit',
             timeout: 120_000,
           })
           installOk = uvResult.status === 0
-          if (!installOk && uvResult.error) {
-            throw uvResult.error
-          }
         }
-        catch {
-          console.log('[Backend] uv not available, falling back to pip...')
+        if (!installOk) {
+          const uvModuleResult = spawnSync(venvPython, ['-m', 'uv', 'pip', 'install', '-r', reqFile], {
+            cwd,
+            stdio: 'inherit',
+            timeout: 120_000,
+          })
+          installOk = uvModuleResult.status === 0
+        }
+        if (!installOk) {
+          console.log('[Backend] Internal uv unavailable, falling back to pip...')
           const pipResult = spawnSync(venvPython, ['-m', 'pip', 'install', '-r', reqFile], {
             cwd,
             stdio: 'inherit',
@@ -232,8 +246,12 @@ export function stopBackend(): void {
     }
     catch {
       // 进程组不存在，回退杀单个进程
-      try { process.kill(pid, 'SIGTERM') }
-      catch { /* already dead */ }
+      try {
+        process.kill(pid, 'SIGTERM')
+      }
+      catch {
+        /* already dead */
+      }
     }
     // 保险：200ms 后 SIGKILL 整个进程组
     setTimeout(() => {
@@ -241,8 +259,12 @@ export function stopBackend(): void {
         process.kill(-pid, 'SIGKILL')
       }
       catch {
-        try { process.kill(pid, 'SIGKILL') }
-        catch { /* already dead */ }
+        try {
+          process.kill(pid, 'SIGKILL')
+        }
+        catch {
+          /* already dead */
+        }
       }
     }, 200)
   }

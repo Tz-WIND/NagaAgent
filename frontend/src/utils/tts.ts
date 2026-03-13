@@ -84,8 +84,14 @@ export function speak(text: string): Promise<void> {
 /** 等待 sourceBuffer 更新完成，同时监听 error 事件防止永远挂起 */
 function waitForUpdateEnd(sb: SourceBuffer): Promise<void> {
   return new Promise((resolve, reject) => {
-    const onEnd = () => { sb.removeEventListener('error', onErr); resolve() }
-    const onErr = () => { sb.removeEventListener('updateend', onEnd); reject(new Error('SourceBuffer error')) }
+    function onEnd() {
+      sb.removeEventListener('error', onErr)
+      resolve()
+    }
+    function onErr() {
+      sb.removeEventListener('updateend', onEnd)
+      reject(new Error('SourceBuffer error'))
+    }
     sb.addEventListener('updateend', onEnd, { once: true })
     sb.addEventListener('error', onErr, { once: true })
   })
@@ -99,9 +105,15 @@ async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void
   const el = new Audio(objectUrl)
   audio.value = el
 
-  el.onplay = () => { isPlaying.value = true }
-  el.onended = () => { cleanup() }
-  el.onerror = () => { cleanup() }
+  el.onplay = () => {
+    isPlaying.value = true
+  }
+  el.onended = () => {
+    cleanup()
+  }
+  el.onerror = () => {
+    cleanup()
+  }
 
   // 设置30秒最大播放时长定时器
   maxDurationTimer = window.setTimeout(() => {
@@ -122,7 +134,10 @@ async function _streamPlayback(res: Response, signal: AbortSignal): Promise<void
       let firstChunk = true
       try {
         while (true) {
-          if (signal.aborted) { reader.cancel(); break }
+          if (signal.aborted) {
+            await reader.cancel()
+            break
+          }
           const { done, value } = await reader.read()
           if (done)
             break
@@ -177,9 +192,15 @@ async function _blobPlayback(res: Response, signal: AbortSignal): Promise<void> 
   const el = new Audio(objectUrl)
   audio.value = el
 
-  el.onplay = () => { isPlaying.value = true }
-  el.onended = () => { cleanup() }
-  el.onerror = () => { cleanup() }
+  el.onplay = () => {
+    isPlaying.value = true
+  }
+  el.onended = () => {
+    cleanup()
+  }
+  el.onerror = () => {
+    cleanup()
+  }
 
   maxDurationTimer = window.setTimeout(() => {
     if (audio.value)
@@ -243,7 +264,10 @@ export function clearSpeakQueue(): void {
 }
 
 async function _drainQueue(): Promise<void> {
-  if (_queue.length === 0) { _processingQueue = false; return }
+  if (_queue.length === 0) {
+    _processingQueue = false
+    return
+  }
   _processingQueue = true
   const text = _queue.shift()!
   try {
@@ -252,9 +276,15 @@ async function _drainQueue(): Promise<void> {
     if (isPlaying.value) {
       await new Promise<void>((resolve) => {
         const unwatch = watch(isPlaying, (val) => {
-          if (!val) { unwatch(); resolve() }
+          if (!val) {
+            unwatch()
+            resolve()
+          }
         })
-        setTimeout(() => { unwatch(); resolve() }, 35000)
+        setTimeout(() => {
+          unwatch()
+          resolve()
+        }, 35000)
       })
     }
   }

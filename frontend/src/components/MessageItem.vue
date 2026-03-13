@@ -80,7 +80,8 @@ function formatToolPayload(value: unknown): string {
     return value
   try {
     return JSON.stringify(value, null, 2)
-  } catch {
+  }
+  catch {
     return String(value)
   }
 }

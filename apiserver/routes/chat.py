@@ -8,16 +8,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator
 
+from pydantic import BaseModel
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from system.config import (
-    CHARACTERS_DIR,
     build_context_supplement,
     build_system_prompt,
     get_config,
     get_data_dir,
-    load_character,
+)
+from system.character_bundle import build_character_identity_bundle, is_legacy_character_identity
+from apiserver.agent_directory import (
+    BUILTIN_NAGA_AGENT_ID,
+    NAGA_CORE_ENGINES,
+    builtin_naga_descriptor,
+    list_agent_descriptors,
+    normalize_agent_engine,
+    resolve_agent_descriptor,
 )
 from apiserver import naga_auth
 from apiserver.message_manager import message_manager
@@ -30,14 +39,13 @@ from apiserver.api_server import (
     _save_conversation_and_logs,
     _notify_conversation_event,
     _is_voice_runtime_paused,
+    _call_agentserver,
 )
 from apiserver.routes.tools import _update_proactive_activity_silent
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_NAGA_CORE_ENGINES = {"naga-core", "nagacore", "naga_core"}
 
 
 @dataclass
@@ -52,11 +60,17 @@ class _AgentPromptContext:
     skill_manager: object | None
 
 
-def _normalize_agent_engine(value: str | None) -> str:
-    normalized = (value or "openclaw").strip().lower()
-    if normalized in {"nagacore", "naga_core"}:
-        normalized = "naga-core"
-    return normalized
+class AgentRelayRequest(BaseModel):
+    message: str
+    target_agent_id: str | None = None
+    target_agent_name: str | None = None
+    source_agent_id: str | None = None
+    source_agent_name: str | None = None
+    purpose: str | None = None
+    context: str | None = None
+    timeout_seconds: int = 120
+    session_id: str | None = None
+    wait_for_reply: bool = True
 
 
 def _load_agent_manifest_record(agent_id: str) -> dict | None:
@@ -70,11 +84,137 @@ def _load_agent_manifest_record(agent_id: str) -> dict | None:
         for item in manifest.get("agents", []):
             if item.get("id") == agent_id:
                 item = dict(item)
-                item["engine"] = _normalize_agent_engine(item.get("engine"))
+                item["engine"] = normalize_agent_engine(item.get("engine"))
                 return item
     except Exception as e:
         logger.warning(f"[NagaCore] 读取干员 manifest 失败: {e}")
     return None
+
+
+def _resolve_agent_display_name(agent_id: str | None, fallback: str | None = None) -> str:
+    descriptor = resolve_agent_descriptor(agent_id=agent_id, include_builtin=True) if agent_id else None
+    if descriptor:
+        return descriptor.name
+    return (fallback or "").strip() or "娜迦"
+
+
+def _build_relay_session_key(source_agent_id: str | None, target_agent_id: str) -> str:
+    source_key = (source_agent_id or "user").strip() or "user"
+    return f"relay:{source_key}:{target_agent_id}"
+
+
+def _compose_relay_message(request: AgentRelayRequest, target_name: str) -> str:
+    source_name = _resolve_agent_display_name(request.source_agent_id, request.source_agent_name)
+    parts = [
+        "[跨干员通信]",
+        f"目标干员：{target_name}",
+        f"来源干员：{source_name}",
+    ]
+    if request.purpose:
+        parts.append(f"任务目的：{request.purpose.strip()}")
+    if request.context:
+        parts.append("补充上下文：\n" + request.context.strip())
+    parts.append(
+        "请直接完成下述请求，并给出可被上游干员直接转述的答复。"
+        "优先给结论、步骤、风险点，不要寒暄。"
+    )
+    parts.append("请求内容：\n" + request.message.strip())
+    return "\n\n".join(parts)
+
+
+async def _relay_to_naga_core(target_agent_id: str | None, relay_message: str, session_id: str) -> dict:
+    response = await chat(
+        ChatRequest(
+            message=relay_message,
+            session_id=session_id,
+            agent_id=target_agent_id,
+            temporary=False,
+        )
+    )
+    return {
+        "success": response.status == "success",
+        "reply": response.response,
+        "session_id": response.session_id,
+        "reasoning_content": response.reasoning_content,
+    }
+
+
+async def _relay_to_openclaw(target_agent_id: str, relay_message: str, session_key: str, timeout_seconds: int) -> dict:
+    response = await _call_agentserver(
+        "POST",
+        f"/openclaw/agents/{target_agent_id}/send",
+        json_body={
+            "message": relay_message,
+            "timeout_seconds": timeout_seconds,
+            "session_key": session_key,
+            "name": "AgentRelay",
+        },
+        timeout_seconds=timeout_seconds + 30,
+    )
+    replies = response.get("replies") or []
+    reply = "\n".join(replies).strip() if replies else str(response.get("reply") or "").strip()
+    return {
+        "success": bool(response.get("success", False)),
+        "reply": reply,
+        "error": response.get("error"),
+        "session_key": session_key,
+    }
+
+
+@router.get("/agents/directory")
+async def get_agent_directory():
+    return {
+        "status": "success",
+        "agents": [item.to_dict() for item in list_agent_descriptors(include_builtin=True)],
+    }
+
+
+@router.post("/agents/relay")
+async def relay_agent_message(request: AgentRelayRequest):
+    if not request.message.strip():
+        raise HTTPException(status_code=400, detail="message 不能为空")
+
+    target = resolve_agent_descriptor(
+        agent_id=request.target_agent_id,
+        agent_name=request.target_agent_name,
+        include_builtin=True,
+    )
+    if target is None:
+        raise HTTPException(status_code=404, detail="目标干员不存在，请先列出通讯录后再指定目标")
+
+    if request.source_agent_id and request.source_agent_id == target.id:
+        raise HTTPException(status_code=400, detail="不能把消息转发给自己")
+
+    relay_message = _compose_relay_message(request, target.name)
+    relay_session = request.session_id or _build_relay_session_key(request.source_agent_id, target.id)
+
+    if target.id == BUILTIN_NAGA_AGENT_ID or target.engine in NAGA_CORE_ENGINES:
+        result = await _relay_to_naga_core(
+            None if target.id == BUILTIN_NAGA_AGENT_ID else target.id,
+            relay_message,
+            relay_session,
+        )
+    else:
+        result = await _relay_to_openclaw(
+            target.id,
+            relay_message,
+            relay_session,
+            max(5, min(request.timeout_seconds, 600)),
+        )
+
+    return {
+        "status": "success" if result.get("success") else "error",
+        "success": bool(result.get("success")),
+        "target": target.to_dict(),
+        "source": {
+            "agent_id": request.source_agent_id,
+            "agent_name": _resolve_agent_display_name(request.source_agent_id, request.source_agent_name),
+        },
+        "reply": result.get("reply", ""),
+        "session_id": result.get("session_id"),
+        "session_key": result.get("session_key"),
+        "error": result.get("error"),
+    }
 
 
 def _read_text_snippet(path: Path, max_chars: int = 4000) -> str:
@@ -87,19 +227,6 @@ def _read_text_snippet(path: Path, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars].rstrip() + "\n\n[已截断]"
-
-
-def _load_character_prompt(character_template: str | None) -> str:
-    if not character_template:
-        return ""
-    try:
-        char_meta = load_character(character_template)
-        prompt_file = char_meta.get("prompt_file") or "conversation_style_prompt.txt"
-        prompt_path = CHARACTERS_DIR / character_template / prompt_file
-        return _read_text_snippet(prompt_path, max_chars=12000)
-    except Exception as e:
-        logger.warning(f"[NagaCore] 加载角色模板 [{character_template}] 失败: {e}")
-        return ""
 
 
 def _load_memory_section(memory_dir: Path) -> str:
@@ -131,7 +258,7 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
     if not record:
         raise HTTPException(status_code=404, detail=f"NagaCore 干员不存在: {agent_id}")
 
-    engine = _normalize_agent_engine(record.get("engine"))
+    engine = normalize_agent_engine(record.get("engine"))
     if engine not in _NAGA_CORE_ENGINES:
         raise HTTPException(status_code=400, detail=f"干员 [{record.get('name') or agent_id}] 不是 NagaCore 引擎")
 
@@ -146,8 +273,18 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
     project_skills_dir = Path(__file__).resolve().parents[2] / "skills"
 
     system_prompt = _read_text_snippet(identity_path, max_chars=16000)
+    if system_prompt and record.get("character_template"):
+        try:
+            if is_legacy_character_identity(system_prompt, record.get("character_template")):
+                system_prompt = build_character_identity_bundle(record.get("character_template")) or system_prompt
+        except Exception as e:
+            logger.warning(f"[NagaCore] 判断旧版角色模板 [{record.get('character_template')}] 失败: {e}")
     if not system_prompt:
-        system_prompt = _load_character_prompt(record.get("character_template")) or build_system_prompt()
+        try:
+            system_prompt = build_character_identity_bundle(record.get("character_template")) or build_system_prompt()
+        except Exception as e:
+            logger.warning(f"[NagaCore] 加载角色 bundle [{record.get('character_template')}] 失败: {e}")
+            system_prompt = build_system_prompt()
 
     extra_sections: list[str] = []
     soul_text = _read_text_snippet(soul_path, max_chars=5000)
@@ -638,7 +775,13 @@ async def chat_stream(request: ChatRequest):
             all_rounds_content = ""
             had_tool_events = False
 
-            async for chunk in run_agentic_loop(messages, session_id, model_override=model_override, tools=tools):
+            async for chunk in run_agentic_loop(
+                messages,
+                session_id,
+                model_override=model_override,
+                tools=tools,
+                source_agent_id=request.agent_id,
+            ):
                 if chunk.startswith("data: "):
                     try:
                         import json as json_module

@@ -706,7 +706,6 @@ async function handleRedeem() {
         <div class="recharge-tip">点击商品卡片跳转爱发电支付，支付完成后积分自动到账</div>
         <div class="recharge-notice">充值会在一个工作日内到账</div>
       </section>
-
     </main>
   </div>
 </template>

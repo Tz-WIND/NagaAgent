@@ -98,7 +98,7 @@ function initAudio() {
       duration.value = audio.duration
       // 更新当前 track 的 duration 字段，用于列表显示
       const track = tracks.value[currentIndex.value]
-      if (track && audio.duration && isFinite(audio.duration)) {
+      if (track && audio.duration && Number.isFinite(audio.duration)) {
         track.duration = new Date(audio.duration * 1000).toISOString().substring(14, 19)
       }
     }

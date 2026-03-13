@@ -109,10 +109,25 @@ MARKET_ITEMS: List[Dict[str, Any]] = [
 # ============ OpenClaw 辅助函数 ============
 
 
-def _run_command(command: List[str], timeout: int = 30) -> Tuple[int, str, str]:
+def _run_command(
+    command: List[str],
+    timeout: int = 30,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Tuple[int, str, str]:
     import locale
     enc = locale.getpreferredencoding() or "utf-8"
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, shell=(sys.platform == "win32"), encoding=enc, errors="replace")
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        shell=(sys.platform == "win32"),
+        encoding=enc,
+        errors="replace",
+        cwd=cwd,
+        env=env,
+    )
     return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
 
 
@@ -249,6 +264,7 @@ def _resolve_packaged_openclaw_runtime_dir() -> Optional[Path]:
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
         candidates.append(meipass.parent.parent / "runtime" / "openclaw")
+        candidates.append(meipass.parent.parent / "openclaw-runtime" / "openclaw")
     # 开发环境下也允许直接复用本地构建产物中的预装运行时
     candidates.append(Path(__file__).resolve().parent.parent.parent / "frontend" / "backend-dist" / "runtime" / "openclaw")
     # 开发模式：项目根 runtime/
@@ -265,6 +281,26 @@ def _resolve_prebundled_agent_browser_cmd() -> Optional[str]:
         return None
     cmd = runtime_dir / "node_modules" / ".bin" / _agent_browser_bin_name()
     return str(cmd) if cmd.exists() else None
+
+
+def _agent_browser_browser_cache_dirs(runtime_dir: Path) -> List[Path]:
+    return [
+        runtime_dir / "node_modules" / "playwright-core" / ".local-browsers",
+        runtime_dir / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / ".local-browsers",
+    ]
+
+
+def _has_agent_browser_browser_cache(runtime_dir: Optional[Path]) -> bool:
+    if runtime_dir is None:
+        return False
+    for candidate in _agent_browser_browser_cache_dirs(runtime_dir):
+        if candidate.exists():
+            try:
+                if any(candidate.iterdir()):
+                    return True
+            except Exception:
+                return True
+    return False
 
 
 def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
@@ -296,29 +332,56 @@ def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
 
 
 def _install_agent_browser() -> None:
+    from agentserver.openclaw.embedded_runtime import get_embedded_runtime
+
+    runtime = get_embedded_runtime()
+    runtime_dir = _resolve_packaged_openclaw_runtime_dir()
     prebundled_cmd = _resolve_prebundled_agent_browser_cmd()
-    if prebundled_cmd:
-        logger.info(f"检测到预装 agent-browser，跳过在线安装: {prebundled_cmd}")
+    if prebundled_cmd and _has_agent_browser_browser_cache(runtime_dir):
+        logger.info(f"检测到预装 agent-browser 与浏览器缓存，跳过在线安装: {prebundled_cmd}")
         return
 
-    existing_cmd = shutil.which("agent-browser")
-    if existing_cmd:
-        logger.info(f"检测到系统已安装 agent-browser，跳过安装: {existing_cmd}")
-        return
+    if getattr(sys, "frozen", False) and runtime_dir is None:
+        raise RuntimeError("打包环境缺少内置 openclaw runtime，无法安装 agent-browser")
 
-    if shutil.which("npm") is None:
-        raise RuntimeError("未检测到预装 agent-browser，且系统未找到 npm，无法在线安装")
-    logger.info("未检测到预装 agent-browser，降级为 npm 在线安装...")
-    code, stdout, stderr = _run_command(["npm", "install", "-g", "agent-browser", "--force"], timeout=3000)
+    install_root = runtime_dir or runtime.vendor_root
+    npm_cmd = runtime.npm_path
+    if npm_cmd is None:
+        raise RuntimeError("未检测到内置/项目 npm，无法安装 agent-browser")
+
+    env = runtime.env
+    env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+    env["CI"] = "1"
+
+    logger.info(f"安装 agent-browser 到本地运行时目录: {install_root}")
+    code, stdout, stderr = _run_command(
+        [
+            npm_cmd,
+            "install",
+            "agent-browser",
+            "--global=false",
+            "--location=project",
+            "--prefix",
+            str(install_root),
+        ],
+        timeout=3000,
+        cwd=str(install_root),
+        env=env,
+    )
     if code != 0:
-        raise RuntimeError(stderr or stdout or "npm install -g agent-browser --force 失败")
-    installed_cmd = shutil.which("agent-browser")
-    if installed_cmd is None:
-        raise RuntimeError("agent-browser 未安装成功或未在 PATH 中")
-    logger.info("正在 agent-browser install（下载浏览器，可能需要数分钟）...")
-    code, stdout, stderr = _run_command([installed_cmd, "install"], timeout=3000)
+        raise RuntimeError(stderr or stdout or "npm install agent-browser 失败")
+    logger.info("正在 playwright install chromium（下载浏览器，可能需要数分钟）...")
+    code, stdout, stderr = _run_command(
+        [npm_cmd, "exec", "--prefix", str(install_root), "playwright", "install", "chromium"],
+        timeout=3000,
+        cwd=str(install_root),
+        env=env,
+    )
     if code != 0:
-        raise RuntimeError(stderr or stdout or "agent-browser install 失败")
+        raise RuntimeError(stderr or stdout or "playwright install chromium 失败")
+    prebundled_cmd = _resolve_prebundled_agent_browser_cmd()
+    if prebundled_cmd is None and not (install_root / "node_modules" / ".bin" / _agent_browser_bin_name()).exists():
+        raise RuntimeError("agent-browser 安装完成后仍未找到命令入口")
     logger.info("agent-browser 安装完成")
 
 
@@ -424,8 +487,16 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
 
 @router.get("/openclaw/tasks")
 async def api_openclaw_list_tasks():
-    """列出本地缓存的 OpenClaw 任务（来自 agentserver）"""
-    return await _call_agentserver("GET", "/openclaw/tasks")
+    """列出本地缓存的 OpenClaw 任务（来自 agentserver）。
+
+    agentserver 尚未启动或仍在预热时返回空列表，避免前端启动期持续 503。
+    """
+    try:
+        return await _call_agentserver("GET", "/openclaw/tasks")
+    except HTTPException as e:
+        if e.status_code == 503:
+            return {"status": "warming_up", "tasks": []}
+        raise
 
 
 @router.get("/openclaw/tasks/{task_id}")

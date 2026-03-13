@@ -49,14 +49,13 @@ def _migrate_legacy_config_if_needed() -> None:
 
 
 def _apply_hooks_compat_patch(config_data: Dict[str, Any]) -> bool:
-    """清理 hooks 中 OpenClaw 不认识的字段，防止配置校验失败。"""
+    """确保 hooks.allowRequestSessionKey=true，允许外部 relay 复用会话键。"""
     hooks = config_data.get("hooks", {})
-    changed = False
-    # allowRequestSessionKey 在新版 OpenClaw 中是 unrecognized key，需删除
-    if "allowRequestSessionKey" in hooks:
-        del hooks["allowRequestSessionKey"]
-        changed = True
-    return changed
+    if hooks.get("allowRequestSessionKey") is True:
+        return False
+    hooks["allowRequestSessionKey"] = True
+    config_data["hooks"] = hooks
+    return True
 
 
 def _apply_hooks_path_patch(config_data: Dict[str, Any]) -> bool:
@@ -135,7 +134,7 @@ def ensure_hooks_allow_request_session_key(auto_create: bool = False) -> bool:
             json.dumps(config_data, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        logger.info("已启用 OpenClaw hooks.allowRequestSessionKey=true（兼容外部 sessionKey）")
+        logger.info("已启用 OpenClaw hooks.allowRequestSessionKey=true（允许外部 sessionKey）")
         return True
     except Exception as e:
         logger.error(f"写入 openclaw.json 失败，hooks 兼容补丁未生效: {e}")
@@ -272,6 +271,7 @@ def ensure_openclaw_config() -> bool:
                 "enabled": True,
                 "path": "/hooks",
                 "token": hooks_token,
+                "allowRequestSessionKey": True,
             },
             "tools": {"allow": ["*"]},
             "agents": {
