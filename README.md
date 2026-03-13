@@ -16,7 +16,7 @@
 [![Stars](https://img.shields.io/github/stars/Xxiii8322766509/NagaAgent?style=social)](https://github.com/Xxiii8322766509/NagaAgent)
 [![Forks](https://img.shields.io/github/forks/Xxiii8322766509/NagaAgent?style=social)](https://github.com/Xxiii8322766509/NagaAgent)
 [![Issues](https://img.shields.io/github/issues/Xxiii8322766509/NagaAgent)](https://github.com/Xxiii8322766509/NagaAgent/issues)
-
+[![Nerq Trust Score](https://nerq.ai/badge/RTGS2017/NagaAgent)](https://nerq.ai/safe/RTGS2017/NagaAgent)
 **[QQ 机器人联动：Undefined QQbot](https://github.com/69gg/Undefined/)**
 
 </div>
