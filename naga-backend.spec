@@ -44,7 +44,7 @@ for entry in os.listdir(PROJECT_ROOT):
     if entry in _EXCLUDE_DIRS or entry.startswith('.'):
         continue
     datas.append((entry, entry))
-    print(f"[spec] 自动打包目录: {entry}/")
+    print(f"[spec] Include directory: {entry}/")
 
 # mcpserver: 收集所有 agent-manifest.json（前端技能列表 + 工具 schema 扫描需要）
 import glob as _glob
@@ -56,7 +56,7 @@ for _mf in _manifest_files:
     _rel = os.path.relpath(_mf, PROJECT_ROOT)          # e.g. mcpserver/agent_weather_time/agent-manifest.json
     _dest = os.path.dirname(_rel)                       # e.g. mcpserver/agent_weather_time
     datas.append((_rel, _dest))
-print(f"[spec] 收集到 {len(_manifest_files)} 个 MCP agent manifest")
+print(f"[spec] Collected {len(_manifest_files)} MCP agent manifests")
 
 # 打包机可能不存在 config.json（仅有 config.json.example）
 if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
@@ -64,7 +64,7 @@ if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
 elif os.path.exists(os.path.join(PROJECT_ROOT, 'config.json.example')):
     datas.append(('config.json.example', '.'))
 else:
-    print("[spec] WARN: config.json 与 config.json.example 均不存在，运行时将使用内置默认配置")
+    print("[spec] WARN: config.json and config.json.example are both missing; runtime defaults will be used")
 
 # 第三方包的数据文件
 datas += collect_data_files('tiktoken')
