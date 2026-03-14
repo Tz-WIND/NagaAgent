@@ -31,6 +31,7 @@ export function useTravel() {
   const travelSession = ref<TravelSession | null>(null)
   const isActive = ref(false)
   const historyList = ref<TravelSession[]>([])
+  const lastRefreshedAt = ref<Date | null>(null)
   let pollTimer: ReturnType<typeof setInterval> | null = null
 
   const isRunning = computed(() => travelSession.value?.status === 'running')
@@ -52,11 +53,19 @@ export function useTravel() {
     return Math.min(100, (travelSession.value.creditsUsed / travelSession.value.creditLimit) * 100)
   })
 
+  const lastUpdatedLabel = computed(() => {
+    if (!lastRefreshedAt.value)
+      return '-'
+    const d = lastRefreshedAt.value
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`
+  })
+
   async function fetchStatus() {
     try {
       const res = await coreApi.getTravelStatus()
       travelSession.value = res.session
       isActive.value = res.active
+      lastRefreshedAt.value = new Date()
     }
     catch {
       // ignore
@@ -82,7 +91,7 @@ export function useTravel() {
         toast.add({ severity: 'success', summary: '旅行完成', detail: `发现了 ${travelSession.value.discoveries?.length ?? 0} 个有趣内容`, life: 5000 })
         fetchHistory()
       }
-    }, 30000)
+    }, 10000)
   }
 
   function stopPolling() {
@@ -99,6 +108,9 @@ export function useTravel() {
     wantFriends: boolean
     friendDescription?: string
     goalPrompt?: string
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
   }) {
     loading.value = true
     try {
@@ -155,6 +167,7 @@ export function useTravel() {
     loading,
     timeProgress,
     creditProgress,
+    lastUpdatedLabel,
     startTravel,
     stopTravel,
     viewSession,

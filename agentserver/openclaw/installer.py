@@ -7,10 +7,11 @@ OpenClaw 安装器
 
 import asyncio
 import logging
-from pathlib import Path
 from typing import Dict, Any, Optional, Tuple, List
 from dataclasses import dataclass
 from enum import Enum
+
+from .state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger("openclaw.installer")
 
@@ -57,8 +58,13 @@ class OpenClawInstaller:
     打包环境下通过 EmbeddedRuntime 获取路径和环境变量。
     """
 
-    OPENCLAW_DIR = Path.home() / ".openclaw"
-    OPENCLAW_CONFIG = OPENCLAW_DIR / "openclaw.json"
+    @property
+    def OPENCLAW_DIR(self):
+        return get_openclaw_state_dir()
+
+    @property
+    def OPENCLAW_CONFIG(self):
+        return get_openclaw_config_path()
 
     def _get_runtime(self):
         """获取 EmbeddedRuntime 实例"""
@@ -85,7 +91,7 @@ class OpenClawInstaller:
                         "alias": "GLM"
                     }
                 },
-                "workspace": str(Path.home() / ".openclaw" / "workspace"),
+                "workspace": str(get_openclaw_state_dir() / "workspace"),
                 "compaction": {
                     "mode": "safeguard"
                 },
@@ -113,14 +119,13 @@ class OpenClawInstaller:
     @staticmethod
     def build_config_from_naga() -> Dict[str, Any]:
         """从 NagaAgent config.api 构建 OpenClaw 配置"""
-        import json
         import secrets
         from system.config import config
 
         token = secrets.token_hex(24)
         api = config.api
         port = config.openclaw.gateway_port
-        workspace = str(Path.home() / ".openclaw" / "workspace")
+        workspace = str(get_openclaw_state_dir() / "workspace")
 
         return {
             "meta": {
@@ -449,7 +454,7 @@ class OpenClawInstaller:
         """
         启动 Gateway
 
-        使用 `openclaw gateway start` 命令
+        后台模式优先复用进程内 EmbeddedRuntime，避免打包环境下 CLI 二次派生失败。
 
         Args:
             background: 是否后台运行
@@ -467,26 +472,15 @@ class OpenClawInstaller:
 
         try:
             runtime = self._get_runtime()
-            cmd = self._build_openclaw_cmd()
-            if not cmd:
-                return InstallResult(success=False, status=InstallStatus.FAILED, message="openclaw CLI 不可用")
-
             if background:
-                # 使用 gateway start 命令启动
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, "gateway", "start",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    env=runtime.env,
-                )
-
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=30
-                )
-
-                # 等待一下确保启动
-                await asyncio.sleep(2)
+                port = self._get_gateway_port()
+                if runtime.gateway_running:
+                    logger.info("EmbeddedRuntime 中的 Gateway 已在运行")
+                else:
+                    logger.info(f"通过 EmbeddedRuntime 启动 Gateway（port={port}）")
+                    started = await runtime.start_gateway()
+                    if not started and runtime.is_gateway_port_in_use(port=port):
+                        logger.info(f"Gateway 端口 {port} 已被外部进程占用，转为连通性校验")
 
                 # 检查是否启动成功
                 from .detector import detect_openclaw
@@ -497,18 +491,24 @@ class OpenClawInstaller:
                         success=True,
                         status=InstallStatus.INSTALLED,
                         message="Gateway 启动成功",
-                        details={"gateway_url": oc_status.gateway_url}
+                        details={
+                            "gateway_url": oc_status.gateway_url,
+                            "port": port,
+                            "mode": "embedded-runtime",
+                        }
                     )
                 else:
-                    # 可能需要先安装服务
                     return InstallResult(
                         success=False,
                         status=InstallStatus.FAILED,
-                        message="Gateway 启动后无法连接，可能需要先运行 'openclaw gateway install'"
+                        message=f"Gateway 端口 {port} 启动失败"
                     )
             else:
+                cmd = self._build_openclaw_cmd()
+                if not cmd:
+                    return InstallResult(success=False, status=InstallStatus.FAILED, message="openclaw CLI 不可用")
                 # 前台运行（用于调试）
-                process = await asyncio.create_subprocess_exec(
+                await asyncio.create_subprocess_exec(
                     *cmd, "gateway",
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -531,6 +531,14 @@ class OpenClawInstaller:
         """停止 Gateway"""
         try:
             runtime = self._get_runtime()
+            if runtime.gateway_running:
+                await runtime.stop_gateway()
+                return InstallResult(
+                    success=True,
+                    status=InstallStatus.INSTALLED,
+                    message="Gateway 已停止",
+                )
+
             cmd = self._build_openclaw_cmd()
             if not cmd:
                 return InstallResult(success=False, status=InstallStatus.FAILED, message="openclaw CLI 不可用")
@@ -562,43 +570,10 @@ class OpenClawInstaller:
     async def restart_gateway(self) -> InstallResult:
         """重启 Gateway"""
         try:
-            runtime = self._get_runtime()
-            cmd = self._build_openclaw_cmd()
-            if not cmd:
-                return InstallResult(success=False, status=InstallStatus.FAILED, message="openclaw CLI 不可用")
-
-            process = await asyncio.create_subprocess_exec(
-                *cmd, "gateway", "restart",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=runtime.env,
-            )
-
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=30
-            )
-
-            # 等待重启完成
-            await asyncio.sleep(2)
-
-            # 验证连接
-            from .detector import detect_openclaw
-            oc_status = detect_openclaw(check_connection=True)
-
-            if oc_status.gateway_reachable:
-                return InstallResult(
-                    success=True,
-                    status=InstallStatus.INSTALLED,
-                    message="Gateway 重启成功",
-                    details={"gateway_url": oc_status.gateway_url}
-                )
-            else:
-                return InstallResult(
-                    success=False,
-                    status=InstallStatus.FAILED,
-                    message="Gateway 重启后无法连接"
-                )
+            stop_result = await self.stop_gateway()
+            if not stop_result.success:
+                return stop_result
+            return await self.start_gateway(background=True)
         except Exception as e:
             return InstallResult(
                 success=False,

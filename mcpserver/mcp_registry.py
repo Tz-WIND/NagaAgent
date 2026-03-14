@@ -7,6 +7,7 @@ import sys
 from typing import Dict, Any, Optional, List
 
 from system.config import logger
+from mcpserver.mcporter_bridge import ExternalMCPAgent, load_external_mcp_services
 
 # 全局注册表
 MCP_REGISTRY: Dict[str, Any] = {}  # MCP服务池 {name: agent_instance}
@@ -80,6 +81,54 @@ def scan_and_register_mcp_agents(mcp_dir: str = "mcpserver") -> List[str]:
     return registered_agents
 
 
+def register_external_mcp_agents() -> List[str]:
+    """注册通过 mcporter 配置的外部 MCP 服务。"""
+    registered_agents = []
+    for service in load_external_mcp_services(enabled_only=True):
+        if service.name in MANIFEST_CACHE or service.name in MCP_REGISTRY:
+            logger.warning("[MCP Registry] 外部MCP名称冲突，跳过注册: %s", service.name)
+            continue
+        MANIFEST_CACHE[service.name] = service.manifest
+        MCP_REGISTRY[service.name] = ExternalMCPAgent(service.name, service.config)
+        registered_agents.append(service.name)
+    return registered_agents
+
+
+def get_service_scope(service_name: str) -> str:
+    manifest = MANIFEST_CACHE.get(service_name) or {}
+    return str(manifest.get("scope") or "public").strip().lower()
+
+
+def get_service_owner_agent_id(service_name: str) -> Optional[str]:
+    manifest = MANIFEST_CACHE.get(service_name) or {}
+    owner_agent_id = str(manifest.get("ownerAgentId") or "").strip()
+    return owner_agent_id or None
+
+
+def is_service_visible_to_agent(service_name: str, agent_id: Optional[str] = None) -> bool:
+    manifest = MANIFEST_CACHE.get(service_name)
+    if not manifest:
+        return False
+
+    if manifest.get("source") != "mcporter":
+        return True
+
+    scope = str(manifest.get("scope") or "public").strip().lower()
+    if scope != "private":
+        return True
+
+    owner_agent_id = str(manifest.get("ownerAgentId") or "").strip()
+    return bool(agent_id and owner_agent_id and owner_agent_id == agent_id)
+
+
+def list_visible_service_names(agent_id: Optional[str] = None) -> List[str]:
+    return [
+        service_name
+        for service_name in MANIFEST_CACHE.keys()
+        if is_service_visible_to_agent(service_name, agent_id=agent_id)
+    ]
+
+
 def get_service_info(service_name: str):
     """获取服务详细信息"""
     manifest = MANIFEST_CACHE.get(service_name)
@@ -142,6 +191,7 @@ def auto_register_mcp():
     if _REGISTERED:
         return list(MCP_REGISTRY.keys())
     registered = scan_and_register_mcp_agents("mcpserver")
+    registered.extend(register_external_mcp_agents())
     _REGISTERED = True
     logger.info(f"[MCP Registry] 自动注册完成，已注册 {len(registered)} 个服务: {registered}")
     return registered
@@ -156,8 +206,10 @@ def get_service_instance(service_name: str) -> Optional[Any]:
 
 
 def clear_registry():
+    global _REGISTERED
     MCP_REGISTRY.clear()
     MANIFEST_CACHE.clear()
+    _REGISTERED = False
 
 
 def get_registry_status() -> Dict[str, Any]:

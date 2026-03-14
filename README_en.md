@@ -2,9 +2,15 @@
 
 # NagaAgent
 
-**Your Ultimate AI Secretary**
+**Your Anime Superpowered AI Assistant**
 
 Streaming Tool Calls · Knowledge Graph Memory · Live2D Avatar · Voice Interaction · Naga Network Community
+
+The Naga Protocol brings together chat, memory, MCP, skills, and OpenClaw integration to build rich, practical AI tooling around a client-side anime superpowered AI assistant.
+
+The software includes: 1) one-click login that auto-configures all API keys, then lets you interact and chat naturally with Naga through a Live2D avatar; 2) built-in OpenClaw for rapid exploration of topics you care about, or fully automatic execution from a task direction list; 3) automatic construction of a 3D memory sea from conversation history, with recalled memory injected into later chats; 4) discovery of the mysterious Naga world in the Naga Network through clue fragments left behind in conversation; 5) built-in game guide features that understand what is happening through interaction or automatic screen recognition and provide suggestions, with support for automation plugins such as MAA; 6) a wide set of extra components including self-configuration, browser control, and MusicBox.
+
+The future of Naga is yours to explore.
 
 [简体中文](README.md) | [English](README_en.md)
 
@@ -32,6 +38,20 @@ Commercial inquiries: contact@nagaagent.com / bilibili [柏斯阔落]
 
 | Date | Version | Changes |
 |------|---------|---------|
+| 🛰️ 2026-03-14 | — | Agent directory upgraded with a full settings dialog (name / persona / engine / SOUL.md / private MCP & Skills); Skill Workshop now supports NagaHub and common MCP warm-up; travel/exploration flow adds QQ and Feishu completion callbacks; cloud memory no longer falls back to local Neo4j |
+| 🧩 2026-03-13 | — | OpenClaw orchestration and packaging integration expanded further; backend spec fixed Windows console Unicode output errors |
+| 🧱 2026-03-11 | — | OpenClaw Skill auto-execution; per-agent isolated workspaces; model selector and pricing display now support Default / Deepseek-V3.2 / Kimi-K2.5 |
+| 🛠️ 2026-03-09 | — | Deep OpenClaw vendor source compilation and unified config flow; forum 401 storm fixed for logged-out users; Windows tray icon repaired |
+| 📦 2026-03-08 | — | Continued `naga-backend.spec` fixes; app scanner now supports env-var paths and macOS; tool results collapse by default; Ark Market removes memory migration / MCP tools / agent skills sections |
+| 🚦 2026-03-07 | — | Node.js and uv runtimes bundled with the app; unified MCP command resolver; stronger OpenClaw Gateway startup diagnostics; packaged-mode fixes for music, wake voice, and Mind Sea |
+| 🧰 2026-03-06 | — | GitHub Actions build and release pipeline; Electron auto-update replaces the old patch system; CI resource and charset_normalizer packaging fixes; forum and credits polling polished |
+| 🔊 2026-03-05 | — | TTS toggle, message queue, and serialized send flow refactor; stronger RAG memory recall; Gemini and auto Function Calling support; recharge UI and remote memory stability fixes |
+| 🧠 2026-03-04 | — | Migrated to native Function Calling; DogTag takes over heartbeat / proactive vision; frontend-backend hot patch system with four safety layers; smoother streaming text and progressive TTS |
+| 🔎 2026-03-03 | — | `web_search` now goes straight to the NagaBusiness search proxy; forum connectivity, streaming TTS, and OpenClaw polling fallback fixes; Live2D and Electron stability fixes |
+| ❤️ 2026-03-02 | — | Heartbeat v3 event-driven refactor; `naga_control` self-orchestration tool; `agent-browser` bundled in packaged builds; startup diagnostics, health checks, and OpenClaw config-path fixes |
+| 🌐 2026-03-01 | — | Search proxy flow finalized: NagaBusiness when logged in, Brave / OpenClaw when logged out; OpenClaw direct tool calling and auto-start improved; game guide and voice config updates |
+| 🗂️ 2026-02-28 | — | Persistent storage unified under `~/.naga`; ForumQuotaView network exploration control center; travel module and voice interaction upgraded |
+| 🎙️ 2026-02-27 | — | ASR voice recognition integrated (MediaRecorder + NagaBusiness proxy); conversation style, Electron background, MCP vision, and server config cleanup |
 | 🎆 2026-02-26 | 5.1.0 | Naga Network community forum launched; unified settings page (3-in-1 redesign); travel mode; credits quota page; market & panel updates |
 | ⚡ 2026-02-25 | 5.1.0 | TTS full-stack fix (CORS / asyncio); cross-platform build.py; context compression persistence; character system update; prompt injection refactor |
 | 🎵 2026-02-24 | — | Neo4j connection timeout fix; unified BGM player; MusicBox playlist editor; MCP management UI; floating ball transparent window + hover brightness |
@@ -228,7 +248,7 @@ GRAG (Graph-RAG) automatically extracts quintuples from conversations, stores th
 
 **RAG retrieval:** Keyword extraction → Cypher query → formatted as `subject(type) —[predicate]→ object(type)` injected into context
 
-**Remote memory:** Logged-in users automatically use NagaMemory cloud; falls back to local GRAG on logout or offline.
+**Remote memory:** Logged-in users prefer NagaMemory cloud; local GRAG remains available when not logged in. To avoid performance cost, the cloud path no longer auto-falls back to local Neo4j.
 
 Source: [`summer_memory/`](summer_memory/)
 

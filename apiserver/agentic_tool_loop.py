@@ -321,7 +321,7 @@ async def _probe_openclaw_health(client: httpx.AsyncClient, agent_base: str) -> 
 # ---------------------------------------------------------------------------
 
 
-async def _execute_mcp_call(call: Dict[str, Any]) -> Dict[str, Any]:
+async def _execute_mcp_call(call: Dict[str, Any], source_agent_id: Optional[str] = None) -> Dict[str, Any]:
     """执行单个MCP调用"""
     service_name = call.get("service_name", "")
     tool_name = call.get("tool_name", "")
@@ -347,7 +347,17 @@ async def _execute_mcp_call(call: Dict[str, Any]) -> Dict[str, Any]:
             }
 
     try:
+        from mcpserver.mcp_registry import is_service_visible_to_agent
         from mcpserver.mcp_manager import get_mcp_manager
+
+        if not is_service_visible_to_agent(service_name, agent_id=source_agent_id):
+            return {
+                "tool_call": call,
+                "result": f"当前干员无权访问 MCP 服务: {service_name}",
+                "status": "error",
+                "service_name": service_name,
+                "tool_name": tool_name,
+            }
 
         manager = get_mcp_manager()
         t0 = _time.monotonic()
@@ -677,15 +687,15 @@ async def _execute_openclaw_tool_call(
         if cfg.online_search.search_api_key:
             return await _execute_brave_search(call)
 
+    # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
+    if tool_name in _LOCAL_EXEC_TOOLS:
+        return await _execute_local_tool(call, tool_name, tool_args, source_agent_id=source_agent_id)
+
     if not await _check_openclaw_available():
         return {
             "tool_call": call, "result": "OpenClaw 服务当前不可用，请稍后重试",
             "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
         }
-
-    # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
-    if tool_name in _LOCAL_EXEC_TOOLS:
-        return await _execute_local_tool(call, tool_name, tool_args, source_agent_id=source_agent_id)
 
     try:
         client = _get_openclaw_client()
@@ -1155,7 +1165,7 @@ async def execute_tool_calls(
     for call in tool_calls:
         agent_type = call.get("agentType", "")
         if agent_type == "mcp":
-            tasks.append(_execute_mcp_call(call))
+            tasks.append(_execute_mcp_call(call, source_agent_id=source_agent_id))
         elif agent_type == "openclaw":
             tasks.append(_execute_openclaw_call(call, session_id))
         elif agent_type in ("tool", "openclaw_tool"):

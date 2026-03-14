@@ -13,6 +13,53 @@ const __dirname = dirname(__filename)
 
 let backendProcess: ChildProcess | null = null
 let devRetryCount = 0
+const BACKEND_LOG_MAX_LINES = 1200
+const backendLogLines: string[] = []
+
+function appendBackendLog(line: string, stream: 'stdout' | 'stderr' | 'system' = 'system') {
+  const normalized = line.replace(/\r/g, '').trimEnd()
+  if (!normalized.trim())
+    return
+
+  const entry = stream === 'system' ? normalized : `[${stream}] ${normalized}`
+  backendLogLines.push(entry)
+  if (backendLogLines.length > BACKEND_LOG_MAX_LINES) {
+    backendLogLines.splice(0, backendLogLines.length - BACKEND_LOG_MAX_LINES)
+  }
+
+  try {
+    getMainWindow()?.webContents.send('backend:log', { line: entry })
+  }
+  catch {
+    // ignore renderer delivery failures
+  }
+}
+
+function createChunkForwarder(
+  stream: 'stdout' | 'stderr',
+  onLine: (line: string) => boolean | void,
+) {
+  let carry = ''
+
+  return (text: string) => {
+    const normalized = `${carry}${text.replace(/\r\n/g, '\n').replace(/\r/g, '\n')}`
+    const parts = normalized.split('\n')
+    carry = parts.pop() ?? ''
+    for (const part of parts) {
+      const line = part.trimEnd()
+      if (!line.trim())
+        continue
+      const shouldMirror = onLine(line)
+      if (shouldMirror !== false) {
+        appendBackendLog(line, stream)
+      }
+    }
+  }
+}
+
+export function getBackendLogs(): string {
+  return backendLogLines.join('\n')
+}
 
 interface AppPackageMetadata {
   nagaDebugConsole?: boolean
@@ -85,6 +132,8 @@ export function startBackend(): void {
 
   console.log(`[Backend] Starting from ${cwd}`)
   console.log(`[Backend] Command: ${cmd} ${args.join(' ')}`)
+  appendBackendLog(`[Backend] Starting from ${cwd}`)
+  appendBackendLog(`[Backend] Command: ${cmd} ${args.join(' ')}`)
 
   const env: Record<string, string | undefined> = { ...process.env, PYTHONUNBUFFERED: '1' }
 
@@ -93,6 +142,7 @@ export function startBackend(): void {
   if (useDebugConsole) {
     const commandLine = [cmd, ...args].map(quoteWindowsArg).join(' ')
     console.log('[Backend] Debug console enabled, launching with cmd.exe /k')
+    appendBackendLog('[Backend] Debug console enabled, backend logs are not mirrored while cmd.exe /k is active.')
 
     backendProcess = spawn('cmd.exe', ['/d', '/k', commandLine], {
       cwd,
@@ -103,10 +153,12 @@ export function startBackend(): void {
 
     backendProcess.on('error', (err) => {
       console.error(`[Backend] Failed to start (debug console): ${err.message}`)
+      appendBackendLog(`[Backend] Failed to start (debug console): ${err.message}`)
     })
 
     backendProcess.on('exit', (code) => {
       console.log(`[Backend] Debug console exited with code ${code}`)
+      appendBackendLog(`[Backend] Debug console exited with code ${code}`)
       backendProcess = null
     })
     return
@@ -117,6 +169,28 @@ export function startBackend(): void {
   // Collect all output for error reporting
   const outputLines: string[] = []
   const PROGRESS_PREFIX = '##PROGRESS##'
+  const consumeStdoutChunk = createChunkForwarder('stdout', (trimmed) => {
+    outputLines.push(trimmed)
+
+    if (trimmed.startsWith(PROGRESS_PREFIX)) {
+      try {
+        const payload = JSON.parse(trimmed.slice(PROGRESS_PREFIX.length))
+        getMainWindow()?.webContents.send('backend:progress', payload)
+      }
+      catch {
+        // malformed progress line, ignore
+      }
+      return false
+    }
+    return true
+  })
+  const consumeStderrChunk = createChunkForwarder('stderr', (trimmed) => {
+    outputLines.push(trimmed)
+    if (!app.isPackaged) {
+      stderrBuffer += `${trimmed}\n`
+    }
+    return true
+  })
 
   backendProcess = spawn(cmd, args, {
     cwd,
@@ -128,43 +202,24 @@ export function startBackend(): void {
 
   backendProcess.stdout?.on('data', (data: Buffer) => {
     const text = data.toString()
-    const lines = text.split('\n')
-    for (const line of lines) {
-      const trimmed = line.trimEnd()
-      if (!trimmed)
-        continue
-      outputLines.push(trimmed)
-
-      // Parse progress signals
-      if (trimmed.startsWith(PROGRESS_PREFIX)) {
-        try {
-          const payload = JSON.parse(trimmed.slice(PROGRESS_PREFIX.length))
-          getMainWindow()?.webContents.send('backend:progress', payload)
-        }
-        catch {
-          // malformed progress line, ignore
-        }
-        continue
-      }
-    }
+    consumeStdoutChunk(text)
     console.log(`[Backend] ${text.trimEnd()}`)
   })
 
   backendProcess.stderr?.on('data', (data: Buffer) => {
     const text = data.toString()
     console.error(`[Backend] ${text.trimEnd()}`)
-    outputLines.push(text.trimEnd())
-    if (!app.isPackaged) {
-      stderrBuffer += text
-    }
+    consumeStderrChunk(text)
   })
 
   backendProcess.on('error', (err) => {
     console.error(`[Backend] Failed to start: ${err.message}`)
+    appendBackendLog(`[Backend] Failed to start: ${err.message}`)
   })
 
   backendProcess.on('exit', (code) => {
     console.log(`[Backend] Exited with code ${code}`)
+    appendBackendLog(`[Backend] Exited with code ${code}`)
     backendProcess = null
 
     // Notify renderer of backend crash (non-zero exit, not a manual stop)
@@ -179,6 +234,7 @@ export function startBackend(): void {
       if (depErrorPattern.test(stderrBuffer)) {
         devRetryCount++
         console.log('[Backend] Dependency error detected, auto-installing...')
+        appendBackendLog('[Backend] Dependency error detected, auto-installing...')
 
         const venvPython = resolveVenvPython(cwd)
         const reqFile = join(cwd, 'requirements.txt')
@@ -214,10 +270,12 @@ export function startBackend(): void {
 
         if (installOk) {
           console.log('[Backend] Dependencies installed, restarting backend...')
+          appendBackendLog('[Backend] Dependencies installed, restarting backend...')
           startBackend()
         }
         else {
           console.error('[Backend] Dependency installation failed. Please install manually.')
+          appendBackendLog('[Backend] Dependency installation failed. Please install manually.')
         }
       }
     }
@@ -229,6 +287,7 @@ export function stopBackend(): void {
     return
   const pid = backendProcess.pid
   console.log('[Backend] Stopping...')
+  appendBackendLog('[Backend] Stopping...')
 
   if (!pid) {
     backendProcess = null

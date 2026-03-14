@@ -1,7 +1,8 @@
+import os
+import logging
 from pyvis.network import Network
 import webbrowser
 from .quintuple_graph import get_all_quintuples
-import logging
 
 logger = logging.getLogger(__name__)
 

@@ -692,14 +692,16 @@ class MessageManager:
             # 触发五元组自动提取（如果记忆系统已启用）
             try:
                 # 优先使用远程 NagaMemory 服务
-                from summer_memory.memory_client import get_remote_memory_client
+                from summer_memory.memory_client import get_remote_memory_client, should_prefer_remote_memory
                 remote = get_remote_memory_client()
                 if remote is not None:
                     self._create_background_task(
-                        self._add_memory_with_fallback(remote, user_message, assistant_response),
+                        self._add_memory_remote_only(remote, user_message, assistant_response),
                         name=f"remote_memory_{user_message[:20]}"
                     )
                     logger.info(f"已提交远程记忆提取任务: {user_message[:50]}...")
+                elif should_prefer_remote_memory():
+                    logger.info("远程记忆为当前优先链路，但客户端暂不可用，跳过本地记忆回退")
                 else:
                     # 无远程客户端（未登录），走本地 summer_memory
                     self._try_local_memory(user_message, assistant_response)
@@ -728,8 +730,8 @@ class MessageManager:
         if exc:
             logger.error(f"后台任务 [{task.get_name()}] 异常: {exc}", exc_info=exc)
 
-    async def _add_memory_with_fallback(self, remote, user_message: str, assistant_response: str):
-        """远程记忆存储，失败时回退到本地"""
+    async def _add_memory_remote_only(self, remote, user_message: str, assistant_response: str):
+        """远程记忆存储。当前链路为云端优先时，不再回退到本地 summer_memory。"""
         try:
             logger.info(f"[Memory] 开始远程记忆上传: {user_message[:50]}...")
             result = await remote.add_memory(user_message, assistant_response)
@@ -737,11 +739,9 @@ class MessageManager:
             if result.get("success") is not False:
                 logger.info(f"[Memory] 远程记忆存储成功: {user_message[:50]}...")
             else:
-                logger.warning(f"[Memory] 远程记忆存储返回失败: {result.get('error', '未知错误')}，回退本地")
-                self._try_local_memory(user_message, assistant_response)
+                logger.warning(f"[Memory] 远程记忆存储返回失败: {result.get('error', '未知错误')}，不再回退本地")
         except Exception as e:
-            logger.warning(f"[Memory] 远程记忆存储异常: {e}，回退本地")
-            self._try_local_memory(user_message, assistant_response)
+            logger.warning(f"[Memory] 远程记忆存储异常: {e}，不再回退本地")
 
     def _try_local_memory(self, user_message: str, assistant_response: str):
         """回退到本地 summer_memory 五元组提取"""

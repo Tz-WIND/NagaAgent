@@ -2,7 +2,7 @@
 
 from typing import Dict, Any, Optional, List
 from system.config import logger
-from mcpserver.mcp_registry import MCP_REGISTRY, MANIFEST_CACHE
+from mcpserver.mcp_registry import MCP_REGISTRY, MANIFEST_CACHE, list_visible_service_names
 
 
 class MCPManager:
@@ -46,6 +46,10 @@ class MCPManager:
         for name, manifest in MANIFEST_CACHE.items():
             self._format_single_service(name, manifest, lines)
         return "\n".join(lines)
+
+    def format_available_services_for_agent(self, agent_id: Optional[str] = None) -> str:
+        """按干员可见范围格式化 MCP 服务列表。"""
+        return self.format_services_by_names(list_visible_service_names(agent_id))
 
     def format_services_by_names(self, names: list) -> str:
         """只格式化指定名称的 MCP 服务文档"""

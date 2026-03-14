@@ -14,6 +14,18 @@ const agentAxios = (() => {
     baseURL: 'http://localhost:8001',
     timeout: 180 * 1000, // 干员实例操作可能较慢
     headers: { 'Content-Type': 'application/json' },
+    transformRequest(data) {
+      if (
+        data
+        && typeof data === 'object'
+        && !(data instanceof FormData)
+        && !(data instanceof ArrayBuffer)
+        && !(data instanceof Blob)
+      ) {
+        return JSON.stringify(snakecaseKeys(data, { deep: true }))
+      }
+      return data
+    },
     transformResponse: [(data: string) => {
       try {
         return camelcaseKeys(JSON.parse(data), { deep: true })
@@ -74,6 +86,27 @@ export interface SkillCatalogSection {
   baseDirs?: string[]
 }
 
+export interface AgentSettings {
+  id: string
+  name: string
+  engine: AgentEngine
+  characterTemplate?: string
+  soulContent?: string
+}
+
+export interface McpService {
+  name: string
+  displayName: string
+  description: string
+  source: 'builtin' | 'mcporter'
+  scope: 'public' | 'private'
+  ownerAgentId?: string | null
+  ownerAgentName?: string | null
+  available: boolean
+  enabled: boolean
+  config?: Record<string, any>
+}
+
 export interface MarketItem {
   id: string
   title: string
@@ -119,6 +152,18 @@ export class CoreApiClient extends ApiClient {
   }> {
     // 添加时间戳防止 Chromium HTTP 缓存返回旧响应（快速重启场景）
     return this.instance.get(`/health?_t=${Date.now()}`)
+  }
+
+  agentServerHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/health?_t=${Date.now()}`)
+  }
+
+  agentServerFullHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/health/full?_t=${Date.now()}`)
+  }
+
+  agentServerOpenclawHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/openclaw/health?_t=${Date.now()}`)
   }
 
   systemInfo(): Promise<{
@@ -379,37 +424,32 @@ export class CoreApiClient extends ApiClient {
 
   getMcpServices(): Promise<{
     status: string
-    services: Array<{
-      name: string
-      displayName: string
-      description: string
-      source: 'builtin' | 'mcporter'
-      available: boolean
-      enabled: boolean
-      config?: Record<string, any>
-    }>
+    services: McpService[]
   }> {
     return this.instance.get('/mcp/services', {
       params: { _t: Date.now() },
     })
   }
 
-  importMcpConfig(name: string, config: Record<string, any>): Promise<{
+  importMcpConfig(params: {
+    name: string
+    config: Record<string, any>
+    displayName?: string
+    description?: string
+    scope?: 'public' | 'private'
+    agentId?: string
+  }): Promise<{
     status: string
     message: string
   }> {
-    return this.instance.post('/mcp/import', { name, config }, {
-      transformRequest: [(data: any) => JSON.stringify(data)],
-    })
+    return this.instance.post('/mcp/import', params)
   }
 
   updateMcpService(name: string, body: Record<string, any>): Promise<{
     status: string
     message: string
   }> {
-    return this.instance.put(`/mcp/services/${encodeURIComponent(name)}`, body, {
-      transformRequest: [(data: any) => JSON.stringify(data)],
-    })
+    return this.instance.put(`/mcp/services/${encodeURIComponent(name)}`, body)
   }
 
   deleteMcpService(name: string): Promise<{
@@ -429,7 +469,13 @@ export class CoreApiClient extends ApiClient {
   getSkillCatalog(): Promise<{
     status: 'success'
     catalog: {
-      remoteHub: { status: string, message: string }
+      remoteHub: {
+        status: string
+        message: string
+        baseUrl?: string
+        skillEndpointTemplate?: string
+        mcpEndpointTemplate?: string
+      }
       localCache: SkillCatalogSection
       publicSkills: SkillCatalogSection
       privateSkills: SkillCatalogSection
@@ -450,6 +496,49 @@ export class CoreApiClient extends ApiClient {
     path: string
   }> {
     return this.instance.post('/skills/import', params)
+  }
+
+  deleteSkill(name: string, scope: 'cache' | 'public' | 'private', agentId?: string): Promise<{
+    status: string
+    message: string
+    scope: string
+    path: string
+  }> {
+    return this.instance.delete(`/skills/${encodeURIComponent(name)}`, {
+      params: {
+        scope,
+        agent_id: agentId,
+      },
+    })
+  }
+
+  installHubSkill(params: {
+    name: string
+    scope: 'cache' | 'public' | 'private'
+    agentId?: string
+  }): Promise<{
+    status: string
+    message: string
+    scope: string
+    path: string
+    name: string
+    source: string
+  }> {
+    return this.instance.post('/hub/skills/install', params)
+  }
+
+  installHubMcp(params: {
+    name: string
+    scope: 'public' | 'private'
+    agentId?: string
+  }): Promise<{
+    status: string
+    message: string
+    scope: string
+    name: string
+    source: string
+  }> {
+    return this.instance.post('/hub/mcp/install', params)
   }
 
   getContextStats(days?: number) {
@@ -612,6 +701,19 @@ export class CoreApiClient extends ApiClient {
   /** 获取干员对话历史 */
   getAgentHistory(id: string, limit = 50): Promise<{ messages: Array<{ role: string, content: string, toolEvents?: any[] }> }> {
     return agentAxios.get(`/openclaw/agents/${id}/history`, { params: { limit } })
+  }
+
+  getAgentSettings(id: string): Promise<AgentSettings> {
+    return agentAxios.get(`/openclaw/agents/${id}/settings`)
+  }
+
+  updateAgentSettings(id: string, body: {
+    name?: string
+    engine?: AgentEngine
+    characterTemplate?: string
+    soulContent?: string
+  }): Promise<AgentSettings> {
+    return agentAxios.put(`/openclaw/agents/${id}/settings`, body)
   }
 
   relayAgentMessage(params: {

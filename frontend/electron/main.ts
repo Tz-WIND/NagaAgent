@@ -4,7 +4,7 @@ import { dirname, resolve } from 'node:path'
 import process from 'node:process'
 import { domainToUnicode, fileURLToPath, pathToFileURL } from 'node:url'
 import { app, BrowserWindow, desktopCapturer, ipcMain, Menu, nativeTheme, net, protocol, shell, systemPreferences } from 'electron'
-import { startBackend, stopBackend } from './modules/backend'
+import { getBackendLogs, startBackend, stopBackend } from './modules/backend'
 import { registerHotkeys, unregisterHotkeys } from './modules/hotkeys'
 import { createMenu } from './modules/menu'
 import { createTray, destroyTray } from './modules/tray'
@@ -374,6 +374,7 @@ app.whenReady().then(async () => {
   ipcMain.handle('autoLaunch:set', (_event, enabled: boolean) => {
     app.setLoginItemSettings({ openAtLogin: enabled })
   })
+  ipcMain.handle('backend:getLogs', () => getBackendLogs())
 
   // Minimize to tray on close instead of quitting
   win.on('close', (event) => {

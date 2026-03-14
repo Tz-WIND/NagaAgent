@@ -4,13 +4,14 @@
 
 <script setup lang="ts">
 import type { FloatingState } from '@/electron.d'
-import { useWindowSize } from '@vueuse/core'
+import { useEventListener, useWindowSize } from '@vueuse/core'
 import Toast from 'primevue/toast'
 import { useToast } from 'primevue/usetoast'
 import { computed, onMounted, onUnmounted, provide, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ACCESS_TOKEN, authExpired, setAuthExpiredSuppressed } from '@/api'
 import API from '@/api/core'
+import BackendDebugDialog from '@/components/BackendDebugDialog.vue'
 import BackendErrorDialog from '@/components/BackendErrorDialog.vue'
 import Live2dModel from '@/components/Live2dModel.vue'
 import LoginDialog from '@/components/LoginDialog.vue'
@@ -31,6 +32,7 @@ import { backendConnected, CONFIG } from '@/utils/config'
 import { clearExpression, setExpression } from '@/utils/live2dController'
 import { destroyParallax, initParallax } from '@/utils/parallax'
 import { activeTabId, agentContacts, tabs } from '@/utils/session'
+import { messageViewExpanded } from '@/utils/uiState'
 import FloatingView from '@/views/FloatingView.vue'
 
 let _splashDismissed = false
@@ -194,6 +196,7 @@ watch(floatingState, async (mode) => {
 const live2dTransform = ref('')
 const live2dTransformOrigin = ref('')
 const live2dTransition = ref(false)
+const backendDebugVisible = ref(false)
 
 // 记录首次 model-ready 是否已处理（避免 watch 重复触发时反复设置 transform）
 let initialPositionSet = false
@@ -217,6 +220,10 @@ function onModelReady(pos: { faceX: number, faceY: number }) {
     live2dTransform.value = `translate(${cx - pos.faceX}px, ${cy - pos.faceY}px) scale(2.2)`
     // 开屏闭眼 + 身体静止
     setExpression({ ParamEyeLOpen: 0, ParamEyeROpen: 0, ParamBodyAngleX: 0, ParamAngleZ: 0 })
+  }
+
+  if (isChatPeekMode.value) {
+    applyPeekExpression()
   }
 }
 
@@ -242,6 +249,71 @@ const showLoginDialog = ref(false)
 // ─── 后端错误弹窗状态 ──────────────────────────
 const backendErrorVisible = ref(false)
 const backendErrorLogs = ref('')
+
+const isChatPeekMode = computed(() => {
+  return showMainContent.value
+    && !splashVisible.value
+    && currentRoute.path.startsWith('/chat')
+    && messageViewExpanded.value
+    && !isFloatingMode.value
+})
+
+const PEEK_EXPRESSION = {
+  ParamBodyAngleX: -18,
+  ParamAngleZ: -14,
+  ParamAngleX: 8,
+  ParamEyeLOpen: 0,
+  ParamEyeROpen: 1,
+} as const
+
+function applyPeekExpression() {
+  setExpression({ ...PEEK_EXPRESSION })
+}
+
+const live2dPeekShellStyle = computed(() => {
+  if (!isChatPeekMode.value) {
+    return {
+      transform: undefined,
+      transformOrigin: undefined,
+    }
+  }
+  return {
+    transform: 'translate3d(-234px, -1.6vh, 0) rotate(-4deg) scale(1.05)',
+    transformOrigin: '24% 72%',
+  }
+})
+
+const live2dModelX = computed(() => {
+  if (!isChatPeekMode.value) {
+    return CONFIG.value.web_live2d.model.x
+  }
+  return Math.min(CONFIG.value.web_live2d.model.x, -0.17)
+})
+
+const live2dModelY = computed(() => {
+  if (!isChatPeekMode.value) {
+    return CONFIG.value.web_live2d.model.y
+  }
+  return CONFIG.value.web_live2d.model.y - 0.15
+})
+
+const live2dCombinedTransform = computed(() => {
+  return live2dTransform.value
+})
+
+const live2dCombinedTransition = computed(() => {
+  if (live2dTransition.value) {
+    return 'transform 1.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.8s ease'
+  }
+  return 'opacity 0.35s ease'
+})
+
+const live2dPeekShellTransition = computed(() => {
+  if (isChatPeekMode.value) {
+    return 'transform 2.3s cubic-bezier(0.16, 0.84, 0.24, 1) 0.36s'
+  }
+  return 'transform 0.52s cubic-bezier(0.4, 0, 0.2, 1)'
+})
 
 // ─── CAS 会话失效弹窗 ──────────────────────────
 const authExpiredVisible = ref(false)
@@ -350,6 +422,25 @@ watch(backendConnected, (connected) => {
   }
 }, { immediate: true })
 
+watch(isChatPeekMode, (peeking) => {
+  if (!showMainContent.value || splashVisible.value) {
+    return
+  }
+  if (peeking) {
+    applyPeekExpression()
+    return
+  }
+  clearExpression()
+}, { immediate: true })
+
+useEventListener(window, 'keydown', (event) => {
+  if (!event.ctrlKey || !event.shiftKey || event.key.toLowerCase() !== 'u') {
+    return
+  }
+  event.preventDefault()
+  backendDebugVisible.value = !backendDebugVisible.value
+})
+
 // ─── 全局轮询：登录后启动，登出后停止（积分刷新 + 心跳检测）───
 watch(isNagaLoggedIn, (loggedIn) => {
   if (loggedIn && backendConnected.value) {
@@ -450,22 +541,31 @@ onUnmounted(() => {
         class="absolute top-0 left-0 size-full"
         :class="splashVisible ? 'z-10' : '-z-1'"
         :style="{
-          transform: live2dTransform,
+          transform: live2dCombinedTransform || undefined,
           transformOrigin: live2dTransformOrigin || undefined,
-          transition: live2dTransition ? 'transform 1.2s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.8s ease' : 'none',
+          transition: live2dCombinedTransition,
           opacity: splashVisible ? (live2dShouldShow ? 1 : 0) : 1,
         }"
       >
         <img src="/assets/light.png" alt="" class="absolute right-0 bottom-0 w-80vw h-60vw op-40 -z-1 will-change-transform" :style="{ transform: `translate(${lightTx}px, ${lightTy}px)` }">
-        <Live2dModel
-          :key="live2dRenderKey"
-          :source="effectiveLive2dSource"
-          :x="CONFIG.web_live2d.model.x"
-          :y="CONFIG.web_live2d.model.y"
-          :width="width" :height="height"
-          :scale="scale" :ssaa="CONFIG.web_live2d.ssaa"
-          @model-ready="onModelReady"
-        />
+        <div
+          class="absolute inset-0"
+          :style="{
+            transform: live2dPeekShellStyle.transform,
+            transformOrigin: live2dPeekShellStyle.transformOrigin,
+            transition: live2dPeekShellTransition,
+          }"
+        >
+          <Live2dModel
+            :key="live2dRenderKey"
+            :source="effectiveLive2dSource"
+            :x="live2dModelX"
+            :y="live2dModelY"
+            :width="width" :height="height"
+            :scale="scale" :ssaa="CONFIG.web_live2d.ssaa"
+            @model-ready="onModelReady"
+          />
+        </div>
       </div>
 
       <!-- 主内容区域 -->
@@ -515,6 +615,12 @@ onUnmounted(() => {
         :visible="backendErrorVisible"
         :logs="backendErrorLogs"
         @update:visible="backendErrorVisible = $event"
+      />
+
+      <BackendDebugDialog
+        :visible="backendDebugVisible"
+        :logs="backendErrorLogs"
+        @update:visible="backendDebugVisible = $event"
       />
 
       <!-- CAS 会话失效弹窗 -->

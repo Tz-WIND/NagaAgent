@@ -34,6 +34,56 @@
 一句话概括：
 `system/prompts` 是平台固定层和工具层。
 
+## 标准层级模板目录
+
+为了避免后续继续把“运行时最终 prompt”和“源模板层级”混在一起，`system/prompts` 下新增标准模板目录：
+
+1. `system/prompts/tier1`
+2. `system/prompts/tier2`
+3. `system/prompts/tier3`
+4. `system/prompts/tier4`
+
+说明：
+- 这些目录是前四层 system prompt 的模板位与装配顺序声明，也是当前运行时真实读取的装配入口
+- 文件名前缀数字表示同层内的装配顺序
+- 即使真实内容来自 `characters` 或 `.naga`，这里也要保留引用槽模板
+- 顶层的 `tool_dispatch_prompt.txt`、`agentic_tool_prompt.txt`、`context_compress_prompt.txt` 是 tier 装配时使用的包裹模板或成品片段
+
+## 注入入口总览
+
+- `tier1/*`：
+  `system.config._build_tier1_variables()` 组装变量，
+  `system.config.build_system_prompt()` 按顺序装配
+- `tier2/*`：
+  `system.config.build_context_supplement()` 装配，
+  其中 `tier2/1` 的正文来自 `system/prompts/agentic_tool_prompt.txt`
+- `tier3/*`：
+  `system.config.build_instance_prompt_section()` 接收实例变量，
+  上游主要来自 `apiserver.routes.chat._build_agent_prompt_context()`
+- `tier4/*`：
+  `system.config.build_context_supplement()` 注入时间、技能、MCP、通讯录、搜索、RAG、激活技能
+- `tool_dispatch_prompt.txt`：
+  `system.config.build_context_supplement()` 作为最外层包裹模板读取
+- `context_compress_prompt.txt`：
+  `apiserver.context_compressor._load_summarize_prompt()` 读取
+- `characters/*/conversation_style_prompt.txt`：
+  `system.character_bundle.load_character_prompt_text()` 读取，
+  再进入 `system.config._build_tier1_variables()`
+- `characters/*/skills/*/SKILL.md`：
+  `system.character_bundle.load_character_skill_sections()` 读取，
+  再进入 `system.config._build_tier1_variables()`
+- `.naga/agents/*/IDENTITY.md|SOUL.md|notes/CLAUDE.md|memory/*`：
+  `apiserver.routes.chat._build_agent_prompt_context()` 读取，
+  再进入 `build_system_prompt()` / `build_context_supplement()`
+
+## 注释语法
+
+- 注释前缀：`//`
+- 过滤入口：`system.config.strip_prompt_comment_lines()`
+- 当前已接入该规则的主要文本源包括：
+  `system/prompts/*.txt|md`、`characters/*/conversation_style_prompt.txt`、
+  `characters/*/skills/*/SKILL.md`、`.naga/agents/*/IDENTITY.md|SOUL.md|notes/CLAUDE.md`
+
 ### 2. `characters`
 
 这里存放：

@@ -3,7 +3,7 @@
 """
 OpenClaw 配置自动生成 + LLM 桥接
 
-当 ~/.openclaw/openclaw.json 不存在时，自动生成最小可用配置，
+当 ~/.naga/openclaw/openclaw.json 不存在时，自动生成最小可用配置，
 并注入 Naga 的 LLM 设置（api_key / base_url / model）。
 不再依赖 `openclaw onboard` 命令。
 """
@@ -11,33 +11,30 @@ OpenClaw 配置自动生成 + LLM 桥接
 import json
 import logging
 import secrets
-import os
 import shutil
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Dict, Any
+
+from .state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger("openclaw.bridge")
 
 
 def _get_openclaw_paths():
-    """统一使用 OpenClaw 默认目录 (~/.openclaw)，避免与 CLI 读取路径不一致。"""
-    home_override = os.environ.get("OPENCLAW_HOME", "").strip()
-    config_dir = Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
-    return config_dir, config_dir / "openclaw.json"
+    """统一使用 Naga OpenClaw 目录 (~/.naga/openclaw)。"""
+    config_file = get_openclaw_config_path()
+    return config_file.parent, config_file
 
 
 OPENCLAW_CONFIG_DIR, OPENCLAW_CONFIG_FILE = _get_openclaw_paths()
 
 
 def _migrate_legacy_config_if_needed() -> None:
-    """兼容历史路径：%APPDATA%/NagaAgent/openclaw -> ~/.openclaw"""
+    """兼容历史错误路径：~/.openclaw -> ~/.naga/openclaw"""
     if OPENCLAW_CONFIG_FILE.exists():
         return
     try:
-        from system.config import get_data_dir
-
-        legacy_dir = get_data_dir() / "openclaw"
-        legacy_cfg = legacy_dir / "openclaw.json"
+        legacy_cfg = Path.home() / ".openclaw" / "openclaw.json"
         if not legacy_cfg.exists():
             return
 
@@ -276,7 +273,7 @@ def ensure_openclaw_config() -> bool:
             "tools": {"allow": ["*"]},
             "agents": {
                 "defaults": {
-                    "workspace": str(OPENCLAW_CONFIG_DIR / "workspace"),
+                    "workspace": str(get_openclaw_state_dir() / "workspace"),
                     "maxConcurrent": 4,
                 }
             },
@@ -321,7 +318,6 @@ def inject_naga_llm_config() -> bool:
         from system.config import get_server_port
         api_port = get_server_port("api_server")
         base_url = f"http://127.0.0.1:{api_port}/v1"
-        api_key = ""  # 代理端点内部处理认证
         logger.info(f"OpenClaw 使用 Naga 代理端点: {base_url}/chat/completions")
 
         # 根据模型 ID 判断 provider 类型（让 OpenClaw 识别特殊模型）

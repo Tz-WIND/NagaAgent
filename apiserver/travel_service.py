@@ -133,6 +133,7 @@ class TravelSession(BaseModel):
     forum_post_id: Optional[str] = None
     forum_post_status: Optional[str] = None
     full_report_delivery_status: Optional[str] = None
+    notification_delivery_statuses: dict[str, str] = Field(default_factory=dict)
     error: Optional[str] = None
 
 

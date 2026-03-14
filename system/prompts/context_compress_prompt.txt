@@ -1,3 +1,4 @@
+// 读取：apiserver.context_compressor._load_summarize_prompt
 你是对话状态压缩器。你的任务是将对话历史压缩为一份结构化的工作状态记录，使得后续对话可以无缝衔接，无需重新提问。
 
 输入可能包含两部分：

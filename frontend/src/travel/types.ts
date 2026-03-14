@@ -45,5 +45,6 @@ export interface TravelSession {
   forumPostId?: string
   forumPostStatus?: string
   fullReportDeliveryStatus?: string
+  notificationDeliveryStatuses?: Record<string, string>
   error?: string
 }

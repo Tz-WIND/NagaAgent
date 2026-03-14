@@ -104,6 +104,37 @@
     ],
     "num_results": 5
   },
+  "openclaw": {
+    "enabled": false,
+    "gateway_port": 20789,
+    "gateway_url": "http://127.0.0.1:20789",
+    "timeout": 120,
+    "default_channel": "last",
+    "feishu": {
+      "enabled": false,
+      "app_id": "",
+      "app_secret": "",
+      "dm_policy": "open",
+      "group_policy": "allowlist",
+      "allow_from": [
+        "*"
+      ],
+      "doc_owner_open_id": null
+    }
+  },
+  "notifications": {
+    "feishu": {
+      "enabled": false,
+      "recipient_type": "open_id",
+      "recipient_open_id": "",
+      "recipient_chat_id": "",
+      "deliver_full_report": true
+    },
+    "qq": {
+      "enabled": false,
+      "user_qq": ""
+    }
+  },
   "computer_control": {
     "enabled": true,
     "model_url": "https://api.example.com",

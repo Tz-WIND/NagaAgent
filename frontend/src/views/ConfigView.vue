@@ -11,13 +11,14 @@ import API from '@/api/core'
 import BoxContainer from '@/components/BoxContainer.vue'
 import ConfigGroup from '@/components/ConfigGroup.vue'
 import ConfigItem from '@/components/ConfigItem.vue'
+import NotificationSettingsPanel from '@/components/NotificationSettingsPanel.vue'
 import { audioSettings, effectFileOptions, wakeVoiceOptions } from '@/composables/useAudio'
 import { isNagaLoggedIn, nagaUser } from '@/composables/useAuth'
 import { CONFIG, DEFAULT_CONFIG, DEFAULT_MODEL, MODELS, SYSTEM_PROMPT } from '@/utils/config'
 import { trackingCalibration } from '@/utils/live2dController'
 
 // ── Tab 切换 ──
-type TabKey = 'model' | 'memory' | 'terminal'
+type TabKey = 'model' | 'memory' | 'terminal' | 'notifications'
 const route = useRoute()
 const activeTab = ref<TabKey>((route.query.tab as TabKey) || 'terminal')
 
@@ -25,6 +26,7 @@ const tabs: { key: TabKey, label: string }[] = [
   { key: 'model', label: '模型连接' },
   { key: 'memory', label: '记忆连接' },
   { key: 'terminal', label: '音画配置' },
+  { key: 'notifications', label: '通知设置' },
 ]
 
 // ── 终端 Tab 逻辑（原 ConfigView） ──
@@ -621,6 +623,10 @@ async function testConnection() {
           </div>
         </ConfigGroup>
       </Accordion>
+    </div>
+
+    <div v-show="activeTab === 'notifications'">
+      <NotificationSettingsPanel />
     </div>
   </BoxContainer>
 </template>

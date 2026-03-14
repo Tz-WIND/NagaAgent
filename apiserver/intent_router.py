@@ -73,7 +73,8 @@ def _build_tool_list() -> str:
     # MCP 服务
     lines.append("## MCP服务")
     try:
-        from mcpserver.mcp_registry import MANIFEST_CACHE
+        from mcpserver.mcp_registry import MANIFEST_CACHE, auto_register_mcp
+        auto_register_mcp()
         for name, manifest in MANIFEST_CACHE.items():
             desc = manifest.get("description", "")
             # 取描述的第一句
@@ -225,7 +226,8 @@ def _parse_router_output(output: str) -> RouteResult:
     # 获取已知 MCP 服务名和技能名用于匹配
     known_mcp = set()
     try:
-        from mcpserver.mcp_registry import MANIFEST_CACHE
+        from mcpserver.mcp_registry import MANIFEST_CACHE, auto_register_mcp
+        auto_register_mcp()
         known_mcp = set(MANIFEST_CACHE.keys())
     except Exception:
         pass

@@ -1,14 +1,32 @@
 <script setup lang="ts">
 import { Button, InputText, Textarea } from 'primevue'
+import Select from 'primevue/select'
 import { computed, ref, watch } from 'vue'
+
+interface AgentOption {
+  id: string
+  name: string
+}
 
 const props = defineProps<{
   visible: boolean
   /** 编辑模式时传入已有数据 */
-  editData?: { name: string, displayName: string, description: string, config: Record<string, any> } | null
+  editData?: {
+    name: string
+    displayName: string
+    description: string
+    config: Record<string, any>
+    scope?: 'public' | 'private'
+    agentId?: string
+  } | null
+  agents?: AgentOption[]
+  initialScope?: 'public' | 'private'
+  fixedScope?: 'public' | 'private'
+  fixedAgentId?: string
+  title?: string
 }>()
 const emit = defineEmits<{
-  confirm: [data: { name: string, displayName: string, description: string, config: Record<string, any> }]
+  confirm: [data: { name: string, displayName: string, description: string, config: Record<string, any>, scope: 'public' | 'private', agentId?: string }]
   cancel: []
 }>()
 
@@ -18,6 +36,13 @@ const description = ref('')
 const jsonText = ref('')
 const errorMsg = ref('')
 const showExtra = ref(false)
+const scope = ref<'public' | 'private'>('public')
+const selectedAgentId = ref('')
+
+const scopeOptions: Array<{ label: string, value: 'public' | 'private', description: string }> = [
+  { label: '通用 MCP', value: 'public', description: '配置后会进入全局 MCP 列表，并做预热。' },
+  { label: '专有 MCP', value: 'private', description: '只给单个干员使用，不会暴露给其他干员。' },
+]
 
 const isEdit = computed(() => !!props.editData)
 
@@ -29,6 +54,8 @@ watch(() => props.visible, (v) => {
     description.value = props.editData.description || ''
     jsonText.value = JSON.stringify(props.editData.config || {}, null, 2)
     showExtra.value = !!(props.editData.description)
+    scope.value = props.fixedScope || props.editData.scope || props.initialScope || 'public'
+    selectedAgentId.value = props.fixedAgentId || props.editData.agentId || ''
   }
   else if (v) {
     name.value = ''
@@ -36,6 +63,8 @@ watch(() => props.visible, (v) => {
     description.value = ''
     jsonText.value = ''
     showExtra.value = false
+    scope.value = props.fixedScope || props.initialScope || 'public'
+    selectedAgentId.value = props.fixedAgentId || ''
   }
   errorMsg.value = ''
 })
@@ -51,6 +80,10 @@ function handleConfirm() {
     errorMsg.value = '请输入 JSON 配置'
     return
   }
+  if (scope.value === 'private' && !selectedAgentId.value) {
+    errorMsg.value = '专有 MCP 必须绑定一个干员'
+    return
+  }
   try {
     const config = JSON.parse(jsonText.value)
     emit('confirm', {
@@ -58,6 +91,8 @@ function handleConfirm() {
       displayName: displayName.value.trim() || name.value.trim(),
       description: description.value.trim(),
       config,
+      scope: scope.value,
+      agentId: scope.value === 'private' ? selectedAgentId.value : undefined,
     })
   }
   catch {
@@ -72,6 +107,8 @@ function handleCancel() {
   displayName.value = ''
   description.value = ''
   jsonText.value = ''
+  scope.value = props.fixedScope || props.initialScope || 'public'
+  selectedAgentId.value = props.fixedAgentId || ''
   errorMsg.value = ''
   emit('cancel')
 }
@@ -83,7 +120,7 @@ function handleCancel() {
       <div v-if="visible" class="dialog-overlay" @click.self="handleCancel">
         <div class="dialog-card">
           <h2 class="dialog-title">
-            {{ isEdit ? '编辑 MCP 服务' : '添加 MCP 服务' }}
+            {{ title || (isEdit ? '编辑 MCP 服务' : '添加 MCP 服务') }}
           </h2>
           <div class="dialog-form">
             <label class="dialog-label">MCP 标题（唯一标识）</label>
@@ -94,6 +131,35 @@ function handleCancel() {
               class="dialog-input"
               :class="{ 'op-50': isEdit }"
             />
+
+            <template v-if="!fixedScope">
+              <label class="dialog-label">MCP 范围</label>
+              <Select
+                v-model="scope"
+                :options="scopeOptions"
+                option-label="label"
+                option-value="value"
+                class="dialog-input"
+              />
+              <div class="dialog-hint">
+                {{ scopeOptions.find(item => item.value === scope)?.description }}
+              </div>
+            </template>
+            <div v-else class="dialog-hint">
+              {{ scopeOptions.find(item => item.value === scope)?.description }}
+            </div>
+
+            <template v-if="scope === 'private' && !fixedAgentId">
+              <label class="dialog-label">绑定干员</label>
+              <Select
+                v-model="selectedAgentId"
+                :options="agents || []"
+                option-label="name"
+                option-value="id"
+                class="dialog-input"
+                placeholder="选择一个干员"
+              />
+            </template>
 
             <!-- 附加信息（可折叠） -->
             <div class="extra-toggle" @click="showExtra = !showExtra">
@@ -208,6 +274,12 @@ function handleCancel() {
 
 .dialog-input {
   width: 100%;
+}
+
+.dialog-hint {
+  font-size: 0.74rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.42);
 }
 
 .dialog-error {

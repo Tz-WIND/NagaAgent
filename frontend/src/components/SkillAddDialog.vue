@@ -12,6 +12,9 @@ const props = defineProps<{
   visible: boolean
   agents?: AgentOption[]
   initialScope?: 'cache' | 'public' | 'private'
+  fixedScope?: 'cache' | 'public' | 'private'
+  fixedAgentId?: string
+  title?: string
 }>()
 const emit = defineEmits<{ confirm: [data: { name: string, content: string, scope: 'cache' | 'public' | 'private', agentId?: string }], cancel: [] }>()
 
@@ -51,8 +54,8 @@ watch(() => props.visible, (visible) => {
     name.value = ''
     textContent.value = ''
     selectedFile.value = null
-    scope.value = props.initialScope ?? 'public'
-    selectedAgentId.value = ''
+    scope.value = props.fixedScope ?? props.initialScope ?? 'public'
+    selectedAgentId.value = props.fixedAgentId || ''
     errorMsg.value = ''
   }
 })
@@ -110,7 +113,7 @@ function handleCancel() {
     <div v-if="visible" class="dialog-overlay" @click.self="handleCancel">
       <div class="dialog-card">
         <h2 class="dialog-title">
-          导入自定义技能
+          {{ title || '导入自定义技能' }}
         </h2>
         <div class="dialog-form">
           <!-- 名称 -->
@@ -123,21 +126,26 @@ function handleCancel() {
             class="dialog-input"
           />
 
-          <label class="dialog-label">
-            技能范围 <span class="required">*</span>
-          </label>
-          <Select
-            v-model="scope"
-            :options="scopeOptions"
-            option-label="label"
-            option-value="value"
-            class="dialog-input"
-          />
-          <div class="dialog-hint-block">
+          <template v-if="!fixedScope">
+            <label class="dialog-label">
+              技能范围 <span class="required">*</span>
+            </label>
+            <Select
+              v-model="scope"
+              :options="scopeOptions"
+              option-label="label"
+              option-value="value"
+              class="dialog-input"
+            />
+            <div class="dialog-hint-block">
+              {{ scopeOptions.find(item => item.value === scope)?.description }}
+            </div>
+          </template>
+          <div v-else class="dialog-hint-block">
             {{ scopeOptions.find(item => item.value === scope)?.description }}
           </div>
 
-          <template v-if="scope === 'private'">
+          <template v-if="scope === 'private' && !fixedAgentId">
             <label class="dialog-label">
               绑定干员 <span class="required">*</span>
             </label>
@@ -153,6 +161,9 @@ function handleCancel() {
               私有技能会写入该干员在 <code>~/.naga</code> 下的专属目录。
             </div>
           </template>
+          <div v-else-if="scope === 'private'" class="dialog-hint-block">
+            私有技能会直接写入当前干员在 <code>~/.naga</code> 下的专属目录。
+          </div>
 
           <!-- 内容区：框起来 -->
           <div class="content-section">

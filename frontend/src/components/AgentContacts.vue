@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import type { AgentEngine, CharacterTemplate } from '@/api/core'
+import type { AgentEngine, AgentSettings, CharacterTemplate } from '@/api/core'
+import type { AgentContact } from '@/utils/session'
 import { Button, InputText, Select } from 'primevue'
-import { nextTick, ref } from 'vue'
+import { ref } from 'vue'
 import API from '@/api/core'
 import back from '@/assets/icons/back.png'
+import AgentSettingsDialog from '@/components/AgentSettingsDialog.vue'
 import { agentContacts, loadAgentContacts, nextAgentNumber, openAgentTab, tabs } from '@/utils/session'
 
 const backIcon = back
@@ -30,10 +32,8 @@ const contextMenu = ref<{ show: boolean, x: number, y: number, agentId: string, 
   agentName: '',
 })
 
-// 重命名
-const renamingId = ref<string | null>(null)
-const renameValue = ref('')
-const renameInputRef = ref<HTMLInputElement | null>(null)
+const settingsVisible = ref(false)
+const selectedAgent = ref<AgentContact | null>(null)
 
 function handleClick(agent: { id: string, name: string, running: boolean, created_at?: number, builtin?: boolean }) {
   openAgentTab(agent)
@@ -50,46 +50,53 @@ function closeContextMenu() {
   contextMenu.value.show = false
 }
 
-function startRenameFromIcon(agent: { id: string, name: string }) {
-  renamingId.value = agent.id
-  renameValue.value = agent.name
-  nextTick(() => renameInputRef.value?.focus())
+function openSettings(agent: { id: string, name: string, running: boolean, created_at?: number, builtin?: boolean, engine?: AgentEngine, characterTemplate?: string }) {
+  selectedAgent.value = { ...agent }
+  settingsVisible.value = true
 }
 
-function startRenameFromMenu() {
-  renamingId.value = contextMenu.value.agentId
-  renameValue.value = contextMenu.value.agentName
+function openSettingsFromMenu() {
+  const contact = agentContacts.value.find(item => item.id === contextMenu.value.agentId)
   closeContextMenu()
-  nextTick(() => renameInputRef.value?.focus())
+  if (contact) {
+    openSettings(contact)
+  }
 }
 
-async function finishRename(agentId: string) {
-  const newName = renameValue.value.trim()
-  if (!newName) {
-    renamingId.value = null
-    return
+async function handleSettingsUpdated(settings: AgentSettings) {
+  const contact = agentContacts.value.find(item => item.id === settings.id)
+  const oldName = contact?.name || selectedAgent.value?.name
+
+  if (contact) {
+    contact.name = settings.name
+    contact.engine = settings.engine
+    contact.characterTemplate = settings.characterTemplate
   }
-  const contact = agentContacts.value.find(a => a.id === agentId)
-  const oldName = contact?.name
-  if (newName !== oldName) {
-    try {
-      await API.renameAgent(agentId, newName)
-      // 更新通讯录
-      if (contact)
-        contact.name = newName
-      // 同步到已打开的 tab + 消息中的 sender
-      const tab = tabs.value.find(t => t.instanceId === agentId)
-      if (tab) {
-        tab.name = newName
-        for (const msg of tab.messages) {
-          if (msg.sender === oldName)
-            msg.sender = newName
-        }
+
+  if (selectedAgent.value?.id === settings.id) {
+    selectedAgent.value = {
+      ...selectedAgent.value,
+      name: settings.name,
+      engine: settings.engine,
+      characterTemplate: settings.characterTemplate,
+    }
+  }
+
+  const tab = tabs.value.find(item => item.instanceId === settings.id)
+  if (tab) {
+    tab.name = settings.name
+    tab.engine = settings.engine
+    tab.characterTemplate = settings.characterTemplate
+    if (oldName && oldName !== settings.name) {
+      for (const msg of tab.messages) {
+        if (msg.sender === oldName)
+          msg.sender = settings.name
       }
     }
-    catch { /* ignore */ }
   }
-  renamingId.value = null
+
+  await loadAgentContacts()
+  settingsVisible.value = false
 }
 
 async function deleteAgent() {
@@ -186,37 +193,22 @@ void API.listCharacterTemplates().then((res) => {
           @click="handleClick(agent)"
           @contextmenu="handleContextMenu($event, agent)"
         >
-          <!-- 重命名输入态 -->
-          <template v-if="renamingId === agent.id">
-            <input
-              ref="renameInputRef"
-              v-model="renameValue"
-              class="rename-input"
-              @blur="finishRename(agent.id)"
-              @keydown.enter="finishRename(agent.id)"
-              @click.stop
-            >
-          </template>
-          <!-- 正常展示态 -->
-          <template v-else>
-            <div class="contact-avatar">
-              {{ agent.name.charAt(0) }}
-            </div>
-            <div class="contact-name">
-              {{ agent.name }}
-            </div>
-            <div v-if="agent.builtin" class="builtin-badge">
-              默认
-            </div>
-            <div class="engine-badge" :class="agent.engine === 'naga-core' ? 'engine-naga' : 'engine-openclaw'">
-              {{ agent.engine === 'naga-core' ? 'NC' : 'OC' }}
-            </div>
-            <div v-if="agent.running" class="running-dot" title="运行中" />
-            <!-- 铅笔图标：点击进入重命名 -->
-            <button v-if="!agent.builtin" class="rename-icon" title="重命名" @click.stop="startRenameFromIcon(agent)">
-              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z" /><path d="m15 5 4 4" /></svg>
-            </button>
-          </template>
+          <div class="contact-avatar">
+            {{ agent.name.charAt(0) }}
+          </div>
+          <div class="contact-name">
+            {{ agent.name }}
+          </div>
+          <div v-if="agent.builtin" class="builtin-badge">
+            默认
+          </div>
+          <div class="engine-badge" :class="agent.engine === 'naga-core' ? 'engine-naga' : 'engine-openclaw'">
+            {{ agent.engine === 'naga-core' ? 'NC' : 'OC' }}
+          </div>
+          <div v-if="agent.running" class="running-dot" title="运行中" />
+          <button class="settings-icon" title="干员设置" @click.stop="openSettings(agent)">
+            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.92 4.6H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9c.36.48.82.82 1.42 1H21a2 2 0 1 1 0 4h-.18a1.65 1.65 0 0 0-1.42 1Z" /></svg>
+          </button>
         </div>
 
         <div v-if="agentContacts.length === 0" class="empty-hint">
@@ -237,8 +229,8 @@ void API.listCharacterTemplates().then((res) => {
         class="ctx-menu"
         :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }"
       >
-        <div class="ctx-item" @click="startRenameFromMenu">
-          重命名
+        <div class="ctx-item" @click="openSettingsFromMenu">
+          设置
         </div>
         <div class="ctx-item ctx-danger" @click="deleteAgent">
           删除
@@ -303,6 +295,13 @@ void API.listCharacterTemplates().then((res) => {
         </div>
       </Transition>
     </Teleport>
+
+    <AgentSettingsDialog
+      :visible="settingsVisible"
+      :agent="selectedAgent"
+      @close="settingsVisible = false; selectedAgent = null"
+      @updated="handleSettingsUpdated"
+    />
   </div>
 </template>
 
@@ -470,8 +469,7 @@ void API.listCharacterTemplates().then((res) => {
   flex-shrink: 0;
 }
 
-/* 铅笔重命名按钮 */
-.rename-icon {
+.settings-icon {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -487,24 +485,13 @@ void API.listCharacterTemplates().then((res) => {
   flex-shrink: 0;
 }
 
-.contact-item:hover .rename-icon {
+.contact-item:hover .settings-icon {
   opacity: 1;
 }
 
-.rename-icon:hover {
+.settings-icon:hover {
   color: rgba(255, 255, 255, 0.8);
   background: rgba(255, 255, 255, 0.1);
-}
-
-.rename-input {
-  background: transparent;
-  border: none;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.4);
-  color: white;
-  outline: none;
-  width: 100%;
-  font-size: 12px;
-  padding: 4px 2px;
 }
 
 .empty-hint {

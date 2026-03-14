@@ -22,6 +22,7 @@ import yaml
 from system.config import get_config, get_data_dir
 from apiserver import naga_auth
 from apiserver.api_server import _call_agentserver, FileUploadResponse
+from agentserver.openclaw.state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,9 @@ router = APIRouter()
 
 # ============ OpenClaw Skill Market ============
 
-OPENCLAW_STATE_DIR = Path.home() / ".openclaw"
+OPENCLAW_STATE_DIR = get_openclaw_state_dir()
 OPENCLAW_SKILLS_DIR = OPENCLAW_STATE_DIR / "skills"
-OPENCLAW_CONFIG_PATH = OPENCLAW_STATE_DIR / "openclaw.json"
+OPENCLAW_CONFIG_PATH = get_openclaw_config_path()
 NAGA_DATA_DIR = get_data_dir()
 NAGA_SKILLS_DIR = NAGA_DATA_DIR / "skills"
 NAGA_PUBLIC_SKILLS_DIR = NAGA_SKILLS_DIR / "public"
@@ -531,6 +532,83 @@ def _load_mcporter_config() -> Dict[str, Any]:
         return {}
 
 
+def _normalize_mcp_scope(scope: Optional[str], *, strict: bool = False) -> str:
+    value = (scope or "public").strip().lower()
+    if value not in {"public", "private"}:
+        if strict:
+            raise HTTPException(status_code=400, detail=f"未知 MCP 范围: {scope}")
+        return "public"
+    return value
+
+
+def _resolve_agent_name(agent_id: Optional[str]) -> Optional[str]:
+    if not agent_id:
+        return None
+    agent = _get_agent_record(agent_id)
+    return str(agent.get("name") or agent_id) if agent else None
+
+
+def _attach_mcp_meta(
+    config: Dict[str, Any],
+    *,
+    display_name: Optional[str] = None,
+    description: Optional[str] = None,
+    scope: str = "public",
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    data = {k: v for k, v in config.items() if not str(k).startswith("_")}
+    data["_scope"] = scope
+    if display_name:
+        data["_displayName"] = display_name
+    if description:
+        data["_description"] = description
+    if scope == "private" and agent_id:
+        data["_ownerAgentId"] = agent_id
+    else:
+        data.pop("_ownerAgentId", None)
+    return data
+
+
+def _list_public_enabled_external_mcp_names() -> List[str]:
+    names: List[str] = []
+    for name, cfg in _load_mcporter_config().get("mcpServers", {}).items():
+        if not isinstance(cfg, dict):
+            continue
+        if cfg.get("_disabled", False):
+            continue
+        if _normalize_mcp_scope(cfg.get("_scope")) == "public":
+            names.append(name)
+    return names
+
+
+def _refresh_mcp_runtime_state(preheat_service_names: Optional[List[str]] = None) -> None:
+    try:
+        from mcpserver.mcporter_bridge import invalidate_mcporter_cache, preheat_external_mcp_services
+        from mcpserver.mcp_registry import auto_register_mcp, clear_registry
+
+        invalidate_mcporter_cache()
+        clear_registry()
+        auto_register_mcp()
+        if preheat_service_names:
+            preheat_external_mcp_services(preheat_service_names)
+    except Exception as exc:
+        logger.warning("MCP runtime refresh failed: %s", exc)
+
+    try:
+        from apiserver.tool_schemas import invalidate_schema_cache
+
+        invalidate_schema_cache()
+    except Exception as exc:
+        logger.warning("MCP schema cache refresh failed: %s", exc)
+
+    try:
+        from apiserver.intent_router import invalidate_tool_list_cache
+
+        invalidate_tool_list_cache()
+    except Exception as exc:
+        logger.warning("MCP intent cache refresh failed: %s", exc)
+
+
 def _check_agent_available(manifest: Dict[str, Any]) -> bool:
     """检查内置 agent 模块是否可导入"""
     entry = manifest.get("entryPoint", {})
@@ -562,7 +640,7 @@ async def get_mcp_tasks_offline(status: Optional[str] = None):
 
 
 @router.get("/mcp/services")
-def get_mcp_services():
+def get_mcp_services(agent_id: Optional[str] = None):
     """列出所有 MCP 服务并检查可用性（同步端点，由 FastAPI 在线程池中执行）"""
     services: List[Dict[str, Any]] = []
 
@@ -583,6 +661,9 @@ def get_mcp_services():
             "display_name": manifest.get("displayName", manifest.get("name", "")),
             "description": manifest.get("description", ""),
             "source": "builtin",
+            "scope": "public",
+            "owner_agent_id": None,
+            "owner_agent_name": None,
             "available": available,
             "enabled": True,
         })
@@ -596,6 +677,8 @@ def get_mcp_services():
     except Exception:
         _runtime = None
     for name, cfg in mcporter_config.get("mcpServers", {}).items():
+        if agent_id and _normalize_mcp_scope(cfg.get("_scope")) == "private" and cfg.get("_ownerAgentId") != agent_id:
+            continue
         cmd = cfg.get("command", "")
         if cmd and _runtime:
             available = _runtime.resolve_command(cmd) is not None
@@ -605,6 +688,8 @@ def get_mcp_services():
         display_name = cfg.get("_displayName", name)
         description = cfg.get("_description", "")
         disabled = cfg.get("_disabled", False)
+        scope = _normalize_mcp_scope(cfg.get("_scope"))
+        owner_agent_id = str(cfg.get("_ownerAgentId") or "").strip() or None
         if not description and cmd:
             description = f"{cmd} {' '.join(cfg.get('args', []))}"
         # 构建干净的 config（去掉 _ 开头的 meta 字段）
@@ -614,6 +699,9 @@ def get_mcp_services():
             "display_name": display_name,
             "description": description,
             "source": "mcporter",
+            "scope": scope,
+            "owner_agent_id": owner_agent_id,
+            "owner_agent_name": _resolve_agent_name(owner_agent_id),
             "available": available,
             "enabled": not disabled,
             "config": clean_config,
@@ -628,6 +716,10 @@ def get_mcp_services():
 class McpImportRequest(BaseModel):
     name: str
     config: Dict[str, Any]
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    scope: str = "public"
+    agent_id: Optional[str] = None
 
 
 @router.post("/mcp/import")
@@ -636,11 +728,25 @@ async def import_mcp_config(request: McpImportRequest):
     MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
     mcporter_config = _load_mcporter_config()
     servers = mcporter_config.setdefault("mcpServers", {})
-    servers[request.name] = request.config
+    scope = _normalize_mcp_scope(request.scope, strict=True)
+    agent_id = (request.agent_id or "").strip() or None
+    if scope == "private":
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
+        if not _get_agent_record(agent_id):
+            raise HTTPException(status_code=404, detail="目标干员不存在")
+    servers[request.name] = _attach_mcp_meta(
+        request.config,
+        display_name=request.display_name,
+        description=request.description,
+        scope=scope,
+        agent_id=agent_id,
+    )
     mcporter_config["mcpServers"] = servers
     MCPORTER_CONFIG_PATH.write_text(
         json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
     return {"status": "success", "message": f"已添加 MCP 服务: {request.name}"}
 
 
@@ -653,7 +759,7 @@ async def update_mcp_service(name: str, body: Dict[str, Any]):
         raise HTTPException(status_code=404, detail=f"MCP 服务 {name} 不存在")
     if "config" in body:
         # 替换整个配置（但保留 meta 字段）
-        meta_keys = {"_displayName", "_description", "_disabled"}
+        meta_keys = {"_displayName", "_description", "_disabled", "_scope", "_ownerAgentId"}
         old_meta = {k: v for k, v in servers[name].items() if k in meta_keys}
         servers[name] = {**body["config"], **old_meta}
     if "displayName" in body:
@@ -669,6 +775,7 @@ async def update_mcp_service(name: str, body: Dict[str, Any]):
     MCPORTER_CONFIG_PATH.write_text(
         json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
     return {"status": "success", "message": f"已更新 MCP 服务: {name}"}
 
 
@@ -684,6 +791,7 @@ async def delete_mcp_service(name: str):
     MCPORTER_CONFIG_PATH.write_text(
         json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
     return {"status": "success", "message": f"已删除 MCP 服务: {name}"}
 
 
@@ -695,6 +803,151 @@ class SkillImportRequest(BaseModel):
     content: str
     scope: Optional[str] = None
     agent_id: Optional[str] = None
+
+
+class HubInstallRequest(BaseModel):
+    name: str
+    scope: str = "public"
+    agent_id: Optional[str] = None
+
+
+def _hub_base_url() -> str:
+    return naga_auth.BUSINESS_URL.rstrip("/")
+
+
+def _build_hub_url(kind: str, name: str) -> str:
+    return f"{_hub_base_url()}/api/hub/{kind}/{name}"
+
+
+def _render_skill_file_content(name: str, content: str) -> str:
+    raw = (content or "").strip()
+    if SKILL_FRONTMATTER_PATTERN.match(raw):
+        return raw + ("\n" if not raw.endswith("\n") else "")
+    return f"""---
+name: {name}
+description: 用户自定义技能
+version: 1.0.0
+author: User
+tags:
+  - custom
+enabled: true
+---
+
+{raw}
+"""
+
+
+def _write_skill_to_scope(name: str, content: str, scope: str, agent_id: Optional[str] = None) -> Path:
+    rendered_content = _render_skill_file_content(name, content)
+
+    if scope == "openclaw-local":
+        return _write_skill_file(name, rendered_content)
+    if scope == "cache":
+        return _write_skill_file_to_dir(NAGA_CACHE_SKILLS_DIR, name, rendered_content)
+    if scope == "public":
+        path = _write_skill_file_to_dir(NAGA_PUBLIC_SKILLS_DIR, name, rendered_content)
+        try:
+            from system.skill_manager import get_skill_manager
+
+            get_skill_manager().refresh()
+        except Exception:
+            pass
+        return path
+    if scope == "private":
+        agent_id = (agent_id or "").strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有技能必须指定 agent_id")
+        agent = _get_agent_record(agent_id)
+        if not agent:
+            raise HTTPException(status_code=404, detail="目标干员不存在")
+        agent_skill_dir = NAGA_AGENTS_DIR / agent_id / "skills"
+        return _write_skill_file_to_dir(agent_skill_dir, name, rendered_content)
+
+    raise HTTPException(status_code=400, detail=f"未知技能范围: {scope}")
+
+
+def _delete_skill_from_scope(name: str, scope: str, agent_id: Optional[str] = None) -> Path:
+    if scope == "cache":
+        candidates = [NAGA_CACHE_SKILLS_DIR / name, OPENCLAW_SKILLS_DIR / name]
+    elif scope == "public":
+        candidates = [NAGA_PUBLIC_SKILLS_DIR / name]
+    elif scope == "private":
+        agent_id = (agent_id or "").strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有技能必须指定 agent_id")
+        candidates = [NAGA_AGENTS_DIR / agent_id / "skills" / name]
+    else:
+        raise HTTPException(status_code=400, detail=f"未知技能范围: {scope}")
+
+    for path in candidates:
+        if path.exists():
+            shutil.rmtree(path, ignore_errors=True)
+            if scope == "public":
+                try:
+                    from system.skill_manager import get_skill_manager
+
+                    get_skill_manager().refresh()
+                except Exception:
+                    pass
+            return path
+    raise HTTPException(status_code=404, detail=f"技能不存在: {name}")
+
+
+def _fetch_hub_payload(kind: str, name: str) -> tuple[str, Any]:
+    url = _build_hub_url(kind, name)
+    headers = {"User-Agent": "NagaAgent/hub-installer"}
+    if naga_auth.is_authenticated():
+        token = naga_auth.get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+    try:
+        request = UrlRequest(url, headers=headers)
+        with urlopen(request, timeout=20) as response:
+            content_type = response.headers.get("Content-Type", "")
+            body = response.read()
+        text = body.decode("utf-8")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"NagaHub 不可达: {exc}")
+
+    if "json" in content_type.lower():
+        try:
+            return content_type, json.loads(text)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail=f"NagaHub 返回了无效 JSON: {exc}")
+    return content_type, text
+
+
+def _parse_hub_skill_payload(name: str, payload: Any) -> tuple[str, str]:
+    if isinstance(payload, dict):
+        content = payload.get("content") or payload.get("skill") or payload.get("template") or payload.get("markdown")
+        resolved_name = str(payload.get("name") or name).strip() or name
+        if not isinstance(content, str) or not content.strip():
+            raise HTTPException(status_code=502, detail="NagaHub skill 模板缺少 content")
+        return resolved_name, content
+    if isinstance(payload, str) and payload.strip():
+        return name, payload
+    raise HTTPException(status_code=502, detail="NagaHub skill 模板为空")
+
+
+def _parse_hub_mcp_payload(name: str, payload: Any) -> tuple[str, Optional[str], Optional[str], Dict[str, Any]]:
+    if isinstance(payload, dict):
+        resolved_name = str(payload.get("name") or name).strip() or name
+        display_name = payload.get("display_name") or payload.get("displayName")
+        description = payload.get("description")
+        config = payload.get("config") if isinstance(payload.get("config"), dict) else payload
+        clean_config = {k: v for k, v in config.items() if not str(k).startswith("_")} if isinstance(config, dict) else None
+        if not clean_config:
+            raise HTTPException(status_code=502, detail="NagaHub MCP 模板缺少 config")
+        return resolved_name, display_name, description, clean_config
+    if isinstance(payload, str) and payload.strip():
+        try:
+            config = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(status_code=502, detail=f"NagaHub MCP 模板不是合法 JSON: {exc}")
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=502, detail="NagaHub MCP 模板必须返回 JSON 对象")
+        return name, None, None, config
+    raise HTTPException(status_code=502, detail="NagaHub MCP 模板为空")
 
 
 def _build_skill_catalog() -> Dict[str, Any]:
@@ -730,8 +983,11 @@ def _build_skill_catalog() -> Dict[str, Any]:
 
     return {
         "remote_hub": {
-            "status": "todo",
-            "message": "远端技能 Hub 待接入，当前先使用本地缓存和手动导入。",
+            "status": "configured",
+            "base_url": _hub_base_url(),
+            "skill_endpoint_template": f"{_hub_base_url()}/api/hub/skill/{{skill_name}}",
+            "mcp_endpoint_template": f"{_hub_base_url()}/api/hub/mcp/{{mcp_name}}",
+            "message": "远端 Skill/MCP Hub 已预留，当前会按名称尝试拉取模板；服务端接口尚未上线时会返回不可达。",
         },
         "local_cache": {
             "skills": cache_skills,
@@ -759,51 +1015,79 @@ async def list_skill_catalog():
 @router.post("/skills/import")
 async def import_custom_skill(request: SkillImportRequest):
     """创建自定义技能 SKILL.md"""
-    skill_content = f"""---
-name: {request.name}
-description: 用户自定义技能
-version: 1.0.0
-author: User
-tags:
-  - custom
-enabled: true
----
-
-{request.content}
-"""
-
     scope = (request.scope or "openclaw-local").strip().lower()
     if scope == "legacy":
         scope = "openclaw-local"
-
-    if scope == "openclaw-local":
-        skill_path = _write_skill_file(request.name, skill_content)
-    elif scope == "cache":
-        skill_path = _write_skill_file_to_dir(NAGA_CACHE_SKILLS_DIR, request.name, skill_content)
-    elif scope == "public":
-        skill_path = _write_skill_file_to_dir(NAGA_PUBLIC_SKILLS_DIR, request.name, skill_content)
-        try:
-            from system.skill_manager import get_skill_manager
-            get_skill_manager().refresh()
-        except Exception:
-            pass
-    elif scope == "private":
-        agent_id = (request.agent_id or "").strip()
-        if not agent_id:
-            raise HTTPException(status_code=400, detail="私有技能必须指定 agent_id")
-        agent = _get_agent_record(agent_id)
-        if not agent:
-            raise HTTPException(status_code=404, detail="目标干员不存在")
-        agent_skill_dir = NAGA_AGENTS_DIR / agent_id / "skills"
-        skill_path = _write_skill_file_to_dir(agent_skill_dir, request.name, skill_content)
-    else:
-        raise HTTPException(status_code=400, detail=f"未知技能范围: {scope}")
+    skill_path = _write_skill_to_scope(request.name, request.content, scope, request.agent_id)
 
     return {
         "status": "success",
         "message": f"技能已创建: {skill_path}",
         "scope": scope,
         "path": str(skill_path),
+    }
+
+
+@router.delete("/skills/{name}")
+async def delete_skill(name: str, scope: str, agent_id: Optional[str] = None):
+    skill_path = _delete_skill_from_scope(name, scope, agent_id)
+    return {
+        "status": "success",
+        "message": f"技能已删除: {skill_path}",
+        "scope": scope,
+        "path": str(skill_path),
+    }
+
+
+@router.post("/hub/skills/install")
+async def install_skill_from_hub(request: HubInstallRequest):
+    _, payload = _fetch_hub_payload("skill", request.name)
+    skill_name, content = _parse_hub_skill_payload(request.name, payload)
+    skill_path = _write_skill_to_scope(skill_name, content, request.scope, request.agent_id)
+    return {
+        "status": "success",
+        "message": f"已从 NagaHub 安装技能: {skill_name}",
+        "scope": request.scope,
+        "path": str(skill_path),
+        "name": skill_name,
+        "source": "hub",
+    }
+
+
+@router.post("/hub/mcp/install")
+async def install_mcp_from_hub(request: HubInstallRequest):
+    _, payload = _fetch_hub_payload("mcp", request.name)
+    mcp_name, display_name, description, config = _parse_hub_mcp_payload(request.name, payload)
+
+    scope = _normalize_mcp_scope(request.scope, strict=True)
+    agent_id = (request.agent_id or "").strip() or None
+    if scope == "private":
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
+        if not _get_agent_record(agent_id):
+            raise HTTPException(status_code=404, detail="目标干员不存在")
+
+    MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
+    mcporter_config = _load_mcporter_config()
+    servers = mcporter_config.setdefault("mcpServers", {})
+    servers[mcp_name] = _attach_mcp_meta(
+        config,
+        display_name=display_name,
+        description=description,
+        scope=scope,
+        agent_id=agent_id,
+    )
+    mcporter_config["mcpServers"] = servers
+    MCPORTER_CONFIG_PATH.write_text(
+        json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    return {
+        "status": "success",
+        "message": f"已从 NagaHub 安装 MCP: {mcp_name}",
+        "scope": scope,
+        "name": mcp_name,
+        "source": "hub",
     }
 
 
@@ -867,7 +1151,8 @@ async def upload_parse(file: UploadFile = File(...)):
             lines = _docx_mod.extract_docx_text(tmp_path)
             content = "\n".join(lines)
         elif suffix == ".xlsx":
-            import importlib.util, zipfile as _zf
+            import importlib.util
+            import zipfile as _zf
             _xlsx_spec = importlib.util.spec_from_file_location(
                 "xlsx_extract", Path(__file__).parent.parent / "skills_templates" / "office-docs" / "tools" / "xlsx_extract.py"
             )
@@ -1018,7 +1303,7 @@ async def get_memory_stats():
 
     try:
         # 优先使用远程 NagaMemory 服务
-        from summer_memory.memory_client import get_remote_memory_client
+        from summer_memory.memory_client import get_remote_memory_client, should_prefer_remote_memory
 
         remote = get_remote_memory_client()
         if remote is not None:
@@ -1026,9 +1311,15 @@ async def get_memory_stats():
                 stats = await remote.get_stats()
                 if stats.get("success") is not False:
                     return {"status": "success", "memory_stats": stats}
-                logger.warning(f"远程记忆统计获取失败: {stats.get('error')}，降级到本地")
+                logger.warning(f"远程记忆统计获取失败: {stats.get('error')}")
             except Exception as e:
-                logger.warning(f"远程记忆统计异常: {e}，降级到本地")
+                logger.warning(f"远程记忆统计异常: {e}")
+
+        if should_prefer_remote_memory():
+            return {
+                "status": "success",
+                "memory_stats": {"enabled": False, "message": "云端记忆服务暂不可用"},
+            }
 
         # 回退到本地 summer_memory
         try:
@@ -1052,7 +1343,7 @@ async def get_quintuples():
     """获取所有五元组 (用于知识图谱可视化)"""
     try:
         # 优先使用远程 NagaMemory 服务
-        from summer_memory.memory_client import get_remote_memory_client
+        from summer_memory.memory_client import get_remote_memory_client, should_prefer_remote_memory
 
         remote = get_remote_memory_client()
         remote_quintuples = []
@@ -1077,9 +1368,17 @@ async def get_quintuples():
                                 "predicate": q[2], "object": q[3], "object_type": q[4],
                             })
                 else:
-                    logger.warning(f"远程五元组获取失败: {result.get('error')}，降级到本地")
+                    logger.warning(f"远程五元组获取失败: {result.get('error')}")
             except Exception as e:
-                logger.warning(f"远程五元组获取异常: {e}，降级到本地")
+                logger.warning(f"远程五元组获取异常: {e}")
+
+        if should_prefer_remote_memory():
+            return {
+                "status": "success",
+                "quintuples": remote_quintuples,
+                "count": len(remote_quintuples),
+                "message": "当前为云端记忆模式，未再回退本地知识图谱",
+            }
 
         # 合并本地 summer_memory 数据（远程为空或失败时补充本地数据）
         local_quintuples = []
@@ -1124,7 +1423,7 @@ async def search_quintuples(keywords: str = ""):
             raise HTTPException(status_code=400, detail="请提供搜索关键词")
 
         # 优先使用远程 NagaMemory 服务
-        from summer_memory.memory_client import get_remote_memory_client
+        from summer_memory.memory_client import get_remote_memory_client, should_prefer_remote_memory
 
         remote = get_remote_memory_client()
         if remote is not None:
@@ -1149,9 +1448,17 @@ async def search_quintuples(keywords: str = ""):
                             })
                     return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
                 else:
-                    logger.warning(f"远程五元组搜索失败: {result.get('error')}，降级到本地")
+                    logger.warning(f"远程五元组搜索失败: {result.get('error')}")
             except Exception as e:
-                logger.warning(f"远程五元组搜索异常: {e}，降级到本地")
+                logger.warning(f"远程五元组搜索异常: {e}")
+
+        if should_prefer_remote_memory():
+            return {
+                "status": "success",
+                "quintuples": [],
+                "count": 0,
+                "message": "当前为云端记忆模式，远程搜索暂不可用，未再回退本地知识图谱",
+            }
 
         # 回退到本地 summer_memory
         from summer_memory.quintuple_graph import query_graph_by_keywords
@@ -1220,8 +1527,9 @@ async def proxy_search(request: Request):
 
             # Naga 不可用或仍然 401/403 时，回退 Brave
             if resp is None or resp.status_code in (401, 403):
-                search_key = getattr(config.online_search, "search_api_key", "")
-                search_base = getattr(config.online_search, "search_api_base", "")
+                cfg = get_config()
+                search_key = getattr(cfg.online_search, "search_api_key", "")
+                search_base = getattr(cfg.online_search, "search_api_base", "")
                 if not search_key or not search_base:
                     if resp is not None and resp.status_code in (401, 403):
                         detail = resp.text

@@ -2,18 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 OpenClaw 配置管理器
-安全地修改 ~/.openclaw/openclaw.json 配置文件
+安全地修改 ~/.naga/openclaw/openclaw.json 配置文件
 只允许修改白名单中的字段
 """
 
 import json
 import secrets
 import logging
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Set
 from dataclasses import dataclass
 from datetime import datetime
+
+from .state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger("openclaw.config")
 
@@ -41,22 +42,17 @@ class OpenClawConfigManager:
     """
     OpenClaw 配置管理器
 
-    安全地管理 ~/.openclaw/openclaw.json 配置
+    安全地管理 ~/.naga/openclaw/openclaw.json 配置
     只允许修改白名单中的字段，防止误操作
     """
 
-    @staticmethod
-    def _get_openclaw_dir() -> Path:
-        home_override = os.environ.get("OPENCLAW_HOME", "").strip()
-        return Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
-
     @property
     def OPENCLAW_DIR(self) -> Path:
-        return self._get_openclaw_dir()
+        return get_openclaw_state_dir()
 
     @property
     def OPENCLAW_CONFIG(self) -> Path:
-        return self._get_openclaw_dir() / "openclaw.json"
+        return get_openclaw_config_path()
 
     # ============ 白名单配置 ============
     # 只有这些字段可以被 Naga 修改

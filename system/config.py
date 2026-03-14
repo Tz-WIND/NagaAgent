@@ -7,6 +7,7 @@ NagaAgent 配置系统 - 基于Pydantic实现类型安全和验证
 import os
 import sys
 import json
+import re
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -605,6 +606,30 @@ class NagaBusinessConfig(BaseModel):
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 
+class FeishuNotificationConfig(BaseModel):
+    """飞书通知默认配置。"""
+
+    enabled: bool = Field(default=False, description="是否启用飞书通知")
+    recipient_type: str = Field(default="open_id", description="接收对象类型：open_id 或 chat_id")
+    recipient_open_id: str = Field(default="", description="默认接收人的飞书 open_id")
+    recipient_chat_id: str = Field(default="", description="默认接收群聊或会话 chat_id")
+    deliver_full_report: bool = Field(default=True, description="是否发送完整探索报告")
+
+
+class QQNotificationConfig(BaseModel):
+    """QQ群机器人通知默认配置。"""
+
+    enabled: bool = Field(default=False, description="是否启用 QQ 通知")
+    user_qq: str = Field(default="", description="默认被 @ 的 QQ 号")
+
+
+class NotificationsConfig(BaseModel):
+    """外部通知配置。"""
+
+    feishu: FeishuNotificationConfig = Field(default_factory=FeishuNotificationConfig)
+    qq: QQNotificationConfig = Field(default_factory=QQNotificationConfig)
+
+
 class SystemCheckConfig(BaseModel):
     """系统检测状态配置"""
 
@@ -700,7 +725,7 @@ class PromptManager:
 
             # 读取文件
             with open(prompt_file, "r", encoding="utf-8") as f:
-                content = f.read()
+                content = strip_prompt_comment_lines(f.read())
 
             # 更新缓存
             self._cache[name] = content
@@ -764,7 +789,160 @@ def save_prompt(name: str, content: str):
     get_prompt_manager().save_prompt(name, content)
 
 
-def build_system_prompt() -> str:
+PROMPT_COMMENT_PREFIX = "//"
+PROMPT_COMMENT_RULE_LOCATION = "system/config.py::strip_prompt_comment_lines"
+_PROMPT_SLOT_PATTERN = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def strip_prompt_comment_lines(text: str) -> str:
+    """过滤提示词注释行。
+
+    规则定义位置：
+    - ``system/config.py::strip_prompt_comment_lines``
+
+    规则：
+    - 行首忽略空白后，以 `//` 开头的整行视为提示词注释
+    - 仅在 fenced code block 外生效
+    """
+    if not text:
+        return text
+
+    lines = text.splitlines()
+    filtered_lines: List[str] = []
+    in_fenced_block = False
+
+    for line in lines:
+        stripped = line.lstrip()
+        if stripped.startswith("```"):
+            in_fenced_block = not in_fenced_block
+            filtered_lines.append(line)
+            continue
+        if not in_fenced_block and stripped.startswith(PROMPT_COMMENT_PREFIX):
+            continue
+        filtered_lines.append(line)
+
+    return "\n".join(filtered_lines)
+
+
+def _read_prompt_text_file(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return ""
+    try:
+        return strip_prompt_comment_lines(path.read_text(encoding="utf-8")).strip()
+    except Exception:
+        return ""
+
+
+def _render_prompt_template(template: str, variables: Dict[str, str]) -> str:
+    if not template:
+        return ""
+
+    rendered = _PROMPT_SLOT_PATTERN.sub(
+        lambda match: str(variables.get(match.group(1), "") or ""),
+        template,
+    )
+    rendered = "\n".join(line.rstrip() for line in rendered.splitlines())
+    rendered = re.sub(r"\n{3,}", "\n\n", rendered)
+    return rendered.strip()
+
+
+def _assemble_prompt_tier(tier_name: str, variables: Dict[str, str]) -> str:
+    tier_dir = Path(__file__).parent / "prompts" / tier_name
+    if not tier_dir.exists():
+        return ""
+
+    sections: List[str] = []
+    for template_path in sorted(path for path in tier_dir.iterdir() if path.is_file()):
+        rendered = _render_prompt_template(_read_prompt_text_file(template_path), variables)
+        if rendered:
+            sections.append(rendered)
+    return "\n\n".join(sections).strip()
+
+
+def _load_platform_root_prompt(ai_name: str) -> str:
+    prompt_path = Path(__file__).parent / "prompts" / "platform_root_prompt.txt"
+    raw_prompt = _read_prompt_text_file(prompt_path)
+    if not raw_prompt:
+        return ""
+    try:
+        return raw_prompt.format(ai_name=ai_name)
+    except KeyError:
+        return raw_prompt
+
+
+def _format_character_skill_bundle(skill_sections: List[Dict[str, str]]) -> str:
+    if not skill_sections:
+        return ""
+
+    blocks = [
+        "## 角色自带技能\n\n"
+        "以下技能属于该角色模板的一部分，会随角色一同注入，不作为可选公共技能。"
+    ]
+    for section in skill_sections:
+        parts = [f"### {section['title']}"]
+        if section.get("description"):
+            parts.append(section["description"])
+        if section.get("content"):
+            parts.append(section["content"])
+        blocks.append("\n\n".join(parts))
+    return "\n\n".join(blocks).strip()
+
+
+def _build_tier1_variables(
+    character_template: Optional[str],
+    *,
+    identity_override: str = "",
+) -> Dict[str, str]:
+    ai_name = config.system.ai_name
+    variables = {
+        "platform_root_prompt": _load_platform_root_prompt(ai_name),
+        "character_identity_prompt": "",
+        "character_conversation_style_prompt": "",
+        "character_builtin_skills_prompt": "",
+        "character_builtin_capabilities_prompt": "",
+    }
+
+    if identity_override.strip():
+        variables["character_identity_prompt"] = identity_override.strip()
+        return variables
+
+    prompt_text = ""
+    skill_sections: List[Dict[str, str]] = []
+
+    if character_template:
+        try:
+            from system.character_bundle import load_character_prompt_text, load_character_skill_sections
+
+            prompt_text = load_character_prompt_text(character_template, max_chars=12000)
+            skill_sections = load_character_skill_sections(
+                character_template,
+                max_chars_per_skill=8000,
+            )
+        except Exception as e:
+            print(f"警告：加载角色模板 [{character_template}] 失败: {e}")
+
+    if not prompt_text:
+        try:
+            prompt_text = get_prompt("conversation_style_prompt", ai_name=ai_name)
+        except Exception:
+            prompt_text = ""
+
+    if character_template:
+        variables["character_identity_prompt"] = (
+            f"# 人格模板：{character_template}\n\n"
+            "以下内容从 characters 模板初始化，用作该干员的人格基底。\n"
+            "后续个性化发展请写入 SOUL.md、记忆和记事本等实例文件，不要改回模板源。"
+        )
+    variables["character_conversation_style_prompt"] = prompt_text
+    variables["character_builtin_skills_prompt"] = _format_character_skill_bundle(skill_sections)
+    return variables
+
+
+def build_system_prompt(
+    character_template: Optional[str] = None,
+    *,
+    identity_override: str = "",
+) -> str:
     """
     构建角色第一层系统提示词（人格模板 + 角色自带技能）
 
@@ -776,15 +954,34 @@ def build_system_prompt() -> str:
     Returns:
         纯人格提示词
     """
-    try:
-        from system.character_bundle import build_character_identity_bundle
+    effective_character = character_template if character_template is not None else config.system.active_character
+    tier1_variables = _build_tier1_variables(
+        effective_character,
+        identity_override=identity_override,
+    )
+    assembled = _assemble_prompt_tier("tier1", tier1_variables)
+    if assembled:
+        return assembled
 
-        bundle = build_character_identity_bundle(config.system.active_character)
-        if bundle:
-            return bundle
-    except Exception as e:
-        print(f"警告：加载角色 bundle 失败，回退到 conversation_style_prompt: {e}")
+    if identity_override.strip():
+        return identity_override.strip()
     return get_prompt("conversation_style_prompt", ai_name=config.system.ai_name)
+
+
+def build_instance_prompt_section(
+    *,
+    agent_soul_prompt: str = "",
+    agent_notebook_prompt: str = "",
+    agent_long_term_memory_prompt: str = "",
+) -> str:
+    return _assemble_prompt_tier(
+        "tier3",
+        {
+            "agent_soul_prompt": agent_soul_prompt.strip(),
+            "agent_notebook_prompt": agent_notebook_prompt.strip(),
+            "agent_long_term_memory_prompt": agent_long_term_memory_prompt.strip(),
+        },
+    )
 
 
 def build_context_supplement(
@@ -794,19 +991,21 @@ def build_context_supplement(
     rag_section: str = "",
     route_result=None,
     search_section: str = "",
+    multi_agent_context_section: str = "",
     skills_prompt_override: Optional[str] = None,
     skill_instructions_override: Optional[str] = None,
+    available_mcp_tools_override: Optional[str] = None,
+    agent_soul_prompt: str = "",
+    agent_notebook_prompt: str = "",
+    agent_long_term_memory_prompt: str = "",
+    environment_snapshot: str = "",
     extra_sections: Optional[List[str]] = None,
 ) -> str:
     """
     构建附加知识内容（追加在 messages 末尾的独立 system 消息）
 
-    使用 tool_dispatch_prompt.txt 模板，填充各占位符：
-    - {time_info}: 当前时间
-    - {skills_section}: 技能元数据列表
-    - {tool_instructions}: 工具调用指令（agentic_tool_prompt.txt 渲染后）
-    - {rag_section}: RAG 记忆召回内容
-    - {skill_active_section}: 用户主动选择的技能指令
+    当前运行时会按 tier2 / tier3 / tier4 真实装配上下文，再由
+    tool_dispatch_prompt.txt 作为最外层包裹模板注入。
 
     Args:
         include_skills: 是否包含技能列表
@@ -815,8 +1014,14 @@ def build_context_supplement(
         rag_section: RAG 记忆召回内容（由 api_server 传入）
         route_result: IntentRouter 路由结果（已废弃，保留参数签名向后兼容）
         search_section: 前置搜索结果内容（由 api_server 传入）
+        multi_agent_context_section: 当前干员身份与通讯录上下文
         skills_prompt_override: 覆盖默认技能列表（用于按干员隔离的技能视图）
         skill_instructions_override: 覆盖默认技能全文（用于按干员隔离的技能加载）
+        available_mcp_tools_override: 覆盖默认 MCP 列表（用于按干员隔离的工具视图）
+        agent_soul_prompt: 当前干员实例 SOUL.md 的内容
+        agent_notebook_prompt: 当前干员实例 notes/CLAUDE.md 的内容
+        agent_long_term_memory_prompt: 当前干员实例 memory/ 摘录
+        environment_snapshot: 附加环境快照
         extra_sections: 附加到 supplement 末尾的额外上下文块
 
     Returns:
@@ -846,13 +1051,23 @@ def build_context_supplement(
             skills_section = "\n\n" + skills_prompt
 
     # 工具调用指令（include_tool_instructions=False 时跳过，原生 function calling 不需要）
-    tool_instructions = ""
+    agentic_tool_contract_prompt = ""
+    available_mcp_tools = available_mcp_tools_override or ""
     if include_tool_instructions:
         _sys_prompts = Path(__file__).parent / "prompts"
         tool_prompt_file = _sys_prompts / "agentic_tool_prompt.txt"
         raw_template = tool_prompt_file.read_text(encoding="utf-8") if tool_prompt_file.exists() else ""
 
-        available_mcp_tools = ""
+        if not available_mcp_tools:
+            try:
+                from mcpserver.mcp_registry import auto_register_mcp
+                auto_register_mcp()
+                from mcpserver.mcp_manager import get_mcp_manager
+                available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
+            except Exception:
+                available_mcp_tools = "（MCP服务未启动）"
+        agentic_tool_contract_prompt = raw_template.strip()
+    elif not available_mcp_tools:
         try:
             from mcpserver.mcp_registry import auto_register_mcp
             auto_register_mcp()
@@ -860,8 +1075,6 @@ def build_context_supplement(
             available_mcp_tools = get_mcp_manager().format_available_services() or "（暂无MCP服务注册）"
         except Exception:
             available_mcp_tools = "（MCP服务未启动）"
-
-        tool_instructions = "\n\n" + raw_template.replace("{available_mcp_tools}", available_mcp_tools)
 
     # 激活技能指令
     skill_active_section = ""
@@ -882,23 +1095,49 @@ def build_context_supplement(
                 f"{skill_instructions}"
             )
 
+    runtime_context_sections = [
+        _assemble_prompt_tier(
+            "tier2",
+            {
+                "agentic_tool_contract_prompt": agentic_tool_contract_prompt,
+            },
+        ),
+        build_instance_prompt_section(
+            agent_soul_prompt=agent_soul_prompt,
+            agent_notebook_prompt=agent_notebook_prompt,
+            agent_long_term_memory_prompt=agent_long_term_memory_prompt,
+        ),
+        _assemble_prompt_tier(
+            "tier4",
+            {
+                "time_info": time_info.strip(),
+                "environment_snapshot": environment_snapshot.strip(),
+                "skills_section": skills_section.strip(),
+                "available_mcp_tools": available_mcp_tools.strip(),
+                "multi_agent_context_section": multi_agent_context_section.strip(),
+                "search_section": search_section.strip(),
+                "rag_section": rag_section.strip(),
+                "skill_active_section": skill_active_section.strip(),
+            },
+        ),
+    ]
+    if extra_sections:
+        runtime_context_sections.extend(
+            section.strip() for section in extra_sections if section and section.strip()
+        )
+    runtime_context_text = "\n\n".join(section for section in runtime_context_sections if section).strip()
+
     # 加载 tool_dispatch_prompt.txt 模板并替换占位符（始终从 system/prompts/ 加载）
     _sys_prompts = Path(__file__).parent / "prompts"
     _dispatch_file = _sys_prompts / "tool_dispatch_prompt.txt"
     raw_template = _dispatch_file.read_text(encoding="utf-8") if _dispatch_file.exists() else ""
-    result = raw_template.replace("{time_info}", time_info)
-    result = result.replace("{skills_section}", skills_section)
-    result = result.replace("{tool_instructions}", tool_instructions)
-    result = result.replace("{search_section}", search_section)
-    result = result.replace("{rag_section}", rag_section)
-    result = result.replace("{skill_active_section}", skill_active_section)
-
-    if extra_sections:
-        normalized_sections = [section.strip() for section in extra_sections if section and section.strip()]
-        if normalized_sections:
-            result = result.rstrip() + "\n\n" + "\n\n".join(normalized_sections)
-
-    return result
+    result = _render_prompt_template(
+        raw_template,
+        {
+            "runtime_context_sections": runtime_context_text,
+        },
+    )
+    return result or runtime_context_text
 
 
 class NagaConfig(BaseModel):
@@ -925,6 +1164,7 @@ class NagaConfig(BaseModel):
     naga_portal: NagaPortalConfig = Field(default_factory=NagaPortalConfig)
     online_search: OnlineSearchConfig = Field(default_factory=OnlineSearchConfig)
     openclaw: OpenClawConfig = Field(default_factory=OpenClawConfig)
+    notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     naga_business: NagaBusinessConfig = Field(default_factory=NagaBusinessConfig)
     system_check: SystemCheckConfig = Field(default_factory=SystemCheckConfig)
     computer_control: ComputerControlConfig = Field(default_factory=ComputerControlConfig)

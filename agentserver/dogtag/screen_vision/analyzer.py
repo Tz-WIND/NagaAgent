@@ -6,6 +6,7 @@
 import asyncio
 import base64
 import hashlib
+import httpx
 import io
 import json
 import logging
@@ -41,12 +42,10 @@ class ProactiveVisionAnalyzer:
         self._screen_unchanged_count = 0  # 屏幕未变化计数
         self._total_checks = 0  # 总检查次数
         self._skipped_checks = 0  # 跳过的检查次数（差异检测节省的AI调用）
-        self._http_client: Optional["httpx.AsyncClient"] = None
+        self._http_client: Optional[httpx.AsyncClient] = None
 
-    def _get_http_client(self) -> "httpx.AsyncClient":
+    def _get_http_client(self) -> httpx.AsyncClient:
         """获取或创建共享 httpx 客户端"""
-        import httpx
-
         if self._http_client is None or self._http_client.is_closed:
             self._http_client = httpx.AsyncClient(timeout=30.0)
         return self._http_client
