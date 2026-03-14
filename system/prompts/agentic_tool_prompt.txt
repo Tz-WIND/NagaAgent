@@ -1,3 +1,4 @@
+// 读取：system.config.build_context_supplement -> agentic_tool_contract_prompt -> tier2/1_工具调度总则.md
 ## 工具调用能力
 
 **关键规则**：工具调用必须使用 ```tool``` 代码块，否则工具不会执行。不要在文本中假装调用工具或编造结果。
@@ -49,8 +50,8 @@
 | `sessions_history` | 会话历史 | `sessionKey`; 可选: `limit` |
 | `sessions_send` | 向会话发消息 | `message`; 可选: `sessionKey`, `label` |
 | `session_status` | 会话状态 | 可选: `sessionKey` |
-| `agents_list` | 列出可用Agent | 无参数 |
-| `agent_relay` | 转发给另一名干员并等待回复 | `message`; 可选: `target_agent_id`, `target_agent_name`, `purpose`, `context`, `timeout_seconds` |
+| `agents_list` | 列出可联系干员通讯录 | 无参数 |
+| `agent_relay` | 转发给另一名现有干员并等待回复 | `message`; 可选: `target_agent_id`, `target_agent_name`, `purpose`, `context`, `timeout_seconds` |
 | `canvas` | 节点画布控制 | `action`(present/hide/navigate/eval/snapshot等), `node` |
 | `nodes` | 节点发现与控制 | `action`(status/describe/notify/camera_snap/run等) |
 | `gateway` | 网关管理 | `action`(restart/config.get/config.patch等) |
@@ -65,11 +66,11 @@
 {"agentType": "tool", "tool_name": "web_fetch", "args": {"url": "https://example.com"}}
 ```
 
-**Agent 模式（复杂多步任务使用）**— 需要多步推理、多工具协作时：
+**Agent 模式（临时复杂执行器）**— 没有合适现有干员可委派，且需要多步推理、多工具协作时：
 ```tool
 {"agentType": "openclaw", "task_type": "message", "message": "完整的任务描述"}
 ```
-注意: Agent 模式会启动独立 AI 推理，适合复杂任务（如"帮我研究XXX并写一份报告"），简单任务请用直接调用。
+注意: Agent 模式会启动独立 AI 推理，适合复杂任务（如"帮我研究XXX并写一份报告"），简单任务请用直接调用；它不是通讯录干员。
 
 ### MCP本地工具（天气、时间、应用启动等）
 ```tool
@@ -84,9 +85,6 @@
 
 ### Naga 自身控制
 当需要控制自身功能（语音开关、模型切换、音乐播放等）时，使用 `agentType: "naga_control"`。详细动作表见注入的技能文档。
-
-### 可用MCP服务
-{available_mcp_tools}
 
 ### 调用规则
 - 工具调用必须放在 ```tool``` 代码块中，前后可以有正常文本

@@ -154,6 +154,18 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get(`/health?_t=${Date.now()}`)
   }
 
+  agentServerHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/health?_t=${Date.now()}`)
+  }
+
+  agentServerFullHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/health/full?_t=${Date.now()}`)
+  }
+
+  agentServerOpenclawHealth(): Promise<Record<string, any>> {
+    return agentAxios.get(`/openclaw/health?_t=${Date.now()}`)
+  }
+
   systemInfo(): Promise<{
     version: string
     status: 'running'

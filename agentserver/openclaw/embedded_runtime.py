@@ -19,6 +19,8 @@ import subprocess
 from pathlib import Path
 from typing import Optional, Dict, List
 
+from .state_paths import get_openclaw_config_path, get_openclaw_state_dir
+
 logger = logging.getLogger("openclaw.runtime")
 
 # 是否为 PyInstaller 打包环境
@@ -120,6 +122,14 @@ class EmbeddedRuntime:
                 p = runtime_root / subdir / f"{prefix}{name}"
                 if p.exists():
                     return str(p)
+        return None
+
+    @staticmethod
+    def _which_first(candidates: List[str]) -> Optional[str]:
+        for candidate in candidates:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
         return None
 
     @property
@@ -239,9 +249,19 @@ class EmbeddedRuntime:
 
     @property
     def python_path(self) -> Optional[str]:
-        """内部 Python 可执行文件路径。打包模式下不允许回落到系统 Python。"""
+        """Python 可执行文件路径。
+
+        开发模式优先项目 venv。
+        打包模式若未内置独立 Python，则回落到系统 Python/py launcher，
+        避免外部 MCP 因为我们硬性返回 None 而被直接判死。
+        """
         if self.is_packaged:
-            return None
+            packaged_python = self._platform_bin("python", "python")
+            if packaged_python:
+                return packaged_python
+            if platform.system() == "Windows":
+                return self._which_first(["python", "python3", "py"])
+            return self._which_first(["python3", "python"])
         project_root = self._project_root()
         candidates = [
             project_root / ".venv" / "Scripts" / "python.exe",
@@ -256,9 +276,14 @@ class EmbeddedRuntime:
 
     @property
     def pip_path(self) -> Optional[str]:
-        """内部 pip 可执行文件路径。"""
+        """pip 可执行文件路径。"""
         if self.is_packaged:
-            return None
+            packaged_pip = self._platform_bin("python", "pip")
+            if packaged_pip:
+                return packaged_pip
+            if platform.system() == "Windows":
+                return self._which_first(["pip", "pip3"])
+            return self._which_first(["pip3", "pip"])
         project_root = self._project_root()
         candidates = [
             project_root / ".venv" / "Scripts" / "pip.exe",
@@ -318,6 +343,12 @@ class EmbeddedRuntime:
     def env(self) -> Dict[str, str]:
         """构建子进程环境变量，确保内嵌 node / uv 优先"""
         env = os.environ.copy()
+        state_dir = get_openclaw_state_dir()
+        config_path = get_openclaw_config_path()
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        env["OPENCLAW_STATE_DIR"] = str(state_dir)
+        env["OPENCLAW_CONFIG_PATH"] = str(config_path)
 
         # 确保 localhost 通信不走代理（外部 LLM API 仍然走梯子）
         no_proxy = env.get("NO_PROXY", env.get("no_proxy", ""))
@@ -558,9 +589,10 @@ class EmbeddedRuntime:
             # 后台转发 Gateway 日志
             self._pipe_gateway_logs(self._gateway_process)
 
-            # 轮询等待 Gateway 就绪
+            # 轮询等待 Gateway 就绪。Windows 打包态首次冷启动更慢，给更长缓冲。
             ready = False
-            for _attempt in range(15):
+            max_attempts = 30 if self.is_packaged and platform.system() == "Windows" else 15
+            for _attempt in range(max_attempts):
                 await asyncio.sleep(1)
                 if self._gateway_process.returncode is not None:
                     break
@@ -587,23 +619,34 @@ class EmbeddedRuntime:
             if ready:
                 logger.info("OpenClaw Gateway 已启动（端口就绪）")
             else:
-                logger.warning("Gateway 进程运行中但端口未就绪，继续运行...")
+                logger.warning(f"Gateway 进程运行中但端口在 {max_attempts}s 内未就绪，继续运行...")
             return self._gateway_process is not None and self._gateway_process.returncode is None
         except Exception as e:
             logger.error(f"启动 Gateway 失败: {e}")
             self._gateway_process = None
             return False
 
-    async def start_gateway_on_port(self, port: int) -> Optional[asyncio.subprocess.Process]:
+    async def start_gateway_on_port(
+        self,
+        port: int,
+        extra_env: Optional[Dict[str, str]] = None,
+    ) -> Optional[asyncio.subprocess.Process]:
         """在指定端口启动一个独立 Gateway 进程（供 InstanceManager 调用，不影响主实例）。"""
         cmd = self._build_gateway_cmd()
         if not cmd:
             logger.error(f"[port={port}] 无法构建 Gateway 启动命令（node 不可用或 gateway_start.mjs 缺失）")
             return None
+        if self.is_gateway_port_in_use(port=port):
+            logger.error(f"[port={port}] Gateway 子实例启动前端口已被占用，拒绝复用")
+            return None
 
         gw_env = self.env.copy()
         gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
         gw_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source" if self._prefer_source_runtime else "compiled"
+        if extra_env:
+            for key, value in extra_env.items():
+                if value:
+                    gw_env[key] = value
         try:
             from system.config import get_server_port
             api_port = get_server_port("api_server")
@@ -767,11 +810,11 @@ class EmbeddedRuntime:
     # ============ Onboard 初始化 ============
 
     def _generate_fallback_config(self) -> bool:
-        """onboard 失败时的兜底：直接生成 ~/.openclaw/openclaw.json"""
+        """onboard 失败时的兜底：直接生成 ~/.naga/openclaw/openclaw.json"""
         import json
 
-        config_dir = Path.home() / ".openclaw"
-        config_file = config_dir / "openclaw.json"
+        config_dir = get_openclaw_state_dir()
+        config_file = get_openclaw_config_path()
         workspace_dir = config_dir / "workspace"
 
         try:
@@ -791,7 +834,7 @@ class EmbeddedRuntime:
 
     async def ensure_onboarded(self) -> bool:
         """确保 OpenClaw 已完成初始化配置（统一逻辑，不区分打包/开发）"""
-        config_file = Path.home() / ".openclaw" / "openclaw.json"
+        config_file = get_openclaw_config_path()
 
         if config_file.exists():
             # 已有配置，执行兼容补丁

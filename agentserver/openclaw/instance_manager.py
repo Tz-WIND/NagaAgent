@@ -3,7 +3,7 @@
 """
 OpenClaw 多实例管理器 — 通讯录模式
 
-每个干员（Agent）有独立目录 ~/.naga/agents/{name}/，包含 workspace 文件。
+每个干员（Agent）有独立目录 ~/.naga/agents/{id}/，包含 workspace 文件。
 进程生命周期与通讯录绑定：
   - 创建角色 → 写 manifest + 创建目录（不启动进程）
   - 发消息时 → ensure_running() 按需启动进程
@@ -12,8 +12,8 @@ OpenClaw 多实例管理器 — 通讯录模式
   - 关闭 Naga → 杀所有进程
 
 端口映射：
-  第一个启动的干员 → 20789（主 Gateway，由 EmbeddedRuntime 管理）
-  后续干员 → 20790+（新进程）
+  通讯录干员统一使用 20790+ 独立 Gateway 进程
+  20789 主 Gateway 保留给全局 OpenClaw（探索/旅行等链路）
 """
 
 import asyncio
@@ -121,9 +121,9 @@ def _load_character_identity_content(character_template: Optional[str]) -> str:
         return ""
 
     try:
-        from system.character_bundle import build_character_identity_bundle
+        from system.config import build_system_prompt
 
-        return build_character_identity_bundle(character_template)
+        return build_system_prompt(character_template)
     except Exception as e:
         logger.warning(f"加载角色模板 [{character_template}] 失败: {e}")
         return ""
@@ -131,6 +131,32 @@ def _load_character_identity_content(character_template: Optional[str]) -> str:
 
 def get_agent_dir(agent_id: str) -> Path:
     return _get_agents_dir() / agent_id
+
+
+def _get_agent_openclaw_dir(agent_id: str) -> Path:
+    return get_agent_dir(agent_id) / ".openclaw"
+
+
+def _get_agent_runtime_dir(agent_id: str) -> Path:
+    return _get_agent_openclaw_dir(agent_id) / "agent"
+
+
+def _ensure_agent_runtime_dir(agent_id: str) -> Path:
+    runtime_dir = _get_agent_runtime_dir(agent_id)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_dir
+
+
+def _get_agent_session_file(agent_id: str) -> Path:
+    return _get_agent_openclaw_dir(agent_id) / "openclaw_session.json"
+
+
+def _build_agent_env(agent_id: str) -> Dict[str, str]:
+    agent_runtime_dir = _get_agent_runtime_dir(agent_id)
+    return {
+        "OPENCLAW_AGENT_DIR": str(agent_runtime_dir),
+        "PI_CODING_AGENT_DIR": str(agent_runtime_dir),
+    }
 
 
 def _init_agent_dir(
@@ -148,6 +174,7 @@ def _init_agent_dir(
         (agent_dir / relative_dir).mkdir(parents=True, exist_ok=True)
 
     if engine == "openclaw":
+        _ensure_agent_runtime_dir(agent_id)
         # AGENTS.md 单独处理：包含干员名称
         agents_md = agent_dir / "AGENTS.md"
         if not agents_md.exists():
@@ -219,9 +246,9 @@ def _render_identity_from_template(character_template: Optional[str]) -> str:
     if not character_template:
         return ""
     try:
-        from system.character_bundle import build_character_identity_bundle
+        from system.config import build_system_prompt
 
-        return build_character_identity_bundle(character_template) or ""
+        return build_system_prompt(character_template) or ""
     except Exception as exc:
         logger.warning(f"渲染角色模板 [{character_template}] 失败: {exc}")
         return ""
@@ -284,7 +311,7 @@ class InstanceManager:
     管理干员通讯录 + 进程生命周期。
 
     通讯录条目持久化在 manifest 中，进程按需启动。
-    第一个启动的干员复用主 Gateway（20789），后续启动独立 Gateway。
+    每个 openclaw 干员都使用独立 Gateway + 独立 agentDir。
     """
 
     def __init__(self, runtime: EmbeddedRuntime, primary_client: Optional[OpenClawClient] = None) -> None:
@@ -297,22 +324,62 @@ class InstanceManager:
         self._agent_counter: int = 0
 
     def _allocate_port(self) -> int:
-        if self._port_pool:
-            return self._port_pool.pop(0)
-        port = self._next_port
-        self._next_port += 1
-        return port
+        candidates = sorted(self._port_pool)
+        self._port_pool = []
+
+        while True:
+            if candidates:
+                port = candidates.pop(0)
+            else:
+                if self._next_port >= PORT_RANGE_END:
+                    raise RuntimeError("OpenClaw 端口池已耗尽")
+                port = self._next_port
+                self._next_port += 1
+
+            if any(inst.running and inst.port == port for inst in self._instances.values()):
+                continue
+
+            if self._check_port(port):
+                killed = _kill_stale_on_port(port)
+                if killed:
+                    time.sleep(0.2)
+                if self._check_port(port):
+                    logger.warning(f"端口 {port} 已被其他进程占用，跳过分配")
+                    continue
+
+            self._port_pool.extend(candidates)
+            self._port_pool.sort()
+            return port
 
     def _release_port(self, port: int) -> None:
         if port > 0 and port not in self._port_pool:
             self._port_pool.append(port)
+            self._port_pool.sort()
 
-    def _get_tokens(self):
+    def _get_auth_snapshot(self):
         try:
-            from .detector import get_openclaw_token, get_openclaw_hooks_token
-            return get_openclaw_token(), get_openclaw_hooks_token()
+            from .detector import detect_openclaw
+
+            status = detect_openclaw(check_connection=False)
+            hooks_path = getattr(status, "hooks_path", "/hooks")
+            if not isinstance(hooks_path, str):
+                hooks_path = "/hooks"
+            hooks_path = hooks_path.strip() or "/hooks"
+            if not hooks_path.startswith("/"):
+                hooks_path = f"/{hooks_path}"
+            hooks_path = hooks_path.rstrip("/") or "/hooks"
+            return status.gateway_token, status.hooks_token, hooks_path
         except Exception:
-            return None, None
+            return None, None, "/hooks"
+
+    def _refresh_client_auth(self, inst: AgentInstance) -> None:
+        if not inst.client:
+            return
+        gateway_token, hooks_token, hooks_path = self._get_auth_snapshot()
+        inst.client.config.gateway_token = gateway_token
+        inst.client.config.hooks_token = hooks_token
+        if hooks_path:
+            inst.client.config.hooks_path = hooks_path
 
     def _get_primary_port(self) -> int:
         try:
@@ -372,13 +439,6 @@ class InstanceManager:
         # 这里只做 manifest 和目录清理
         if delete_data:
             _delete_agent_dir(inst.id)
-            # 清理 session 文件
-            try:
-                sf = Path.home() / "NagaAgent" / f"openclaw_session_{inst.id}.json"
-                if sf.exists():
-                    sf.unlink()
-            except Exception:
-                pass
 
         self._save_to_manifest()
 
@@ -399,9 +459,11 @@ class InstanceManager:
         if delete_data:
             _delete_agent_dir(inst.id)
             try:
-                sf = Path.home() / "NagaAgent" / f"openclaw_session_{inst.id}.json"
-                if sf.exists():
-                    sf.unlink()
+                for sf in (
+                    _get_agent_session_file(inst.id),
+                ):
+                    if sf.exists():
+                        sf.unlink()
             except Exception:
                 pass
 
@@ -498,6 +560,41 @@ class InstanceManager:
     def get_instance(self, agent_id: str) -> Optional[AgentInstance]:
         return self._instances.get(agent_id)
 
+    async def resolve_runtime(self, agent_id: str, wake: bool = False) -> dict:
+        """解析干员当前运行时信息；可选按需唤醒 openclaw 干员。"""
+        inst = self._instances.get(agent_id)
+        if inst is None:
+            raise RuntimeError(f"干员 {agent_id} 不存在")
+
+        was_running = bool(
+            inst.engine == "openclaw"
+            and inst.running
+            and inst.port > 0
+            and self._check_port(inst.port)
+        )
+
+        if inst.engine == "openclaw" and wake:
+            inst = await self.ensure_running(agent_id)
+
+        is_running = bool(
+            inst.engine == "openclaw"
+            and inst.running
+            and inst.port > 0
+            and self._check_port(inst.port)
+        )
+        port = inst.port if is_running else None
+
+        return {
+            "id": inst.id,
+            "name": inst.name,
+            "engine": inst.engine,
+            "running": is_running,
+            "woken": bool(wake and not was_running and is_running),
+            "port": port,
+            "gateway_url": f"http://127.0.0.1:{port}" if port else None,
+            "primary": bool(inst.primary) if inst.engine == "openclaw" else False,
+        }
+
     # ── 进程管理（按需启动） ──
 
     async def ensure_running(self, agent_id: str) -> AgentInstance:
@@ -522,75 +619,43 @@ class InstanceManager:
 
     async def _start_instance(self, inst: AgentInstance) -> None:
         """启动干员 Gateway 进程。"""
-        # 判断是否作为 primary
-        has_primary = any(i.running and i.primary for i in self._instances.values())
-        is_primary = not has_primary
+        port = self._allocate_port()
+        logger.info(f"启动干员 [{inst.name}] 独立 Gateway 端口={port}")
+        _ensure_agent_runtime_dir(inst.id)
+
+        if self._check_port(port):
+            logger.warning(f"[{inst.name}] 端口 {port} 在启动前已被占用，尝试清理残留进程")
+            _kill_stale_on_port(port)
+            await asyncio.sleep(0.5)
+            if self._check_port(port):
+                self._release_port(port)
+                raise RuntimeError(f"端口 {port} 已被其他进程持续占用")
 
         self._ensure_gateway_config()
+        process = await self._runtime.start_gateway_on_port(
+            port,
+            extra_env=_build_agent_env(inst.id),
+        )
+        if process is None:
+            self._release_port(port)
+            raise RuntimeError(f"无法在端口 {port} 启动 Gateway 进程")
 
-        if is_primary:
-            port = self._get_primary_port()
-            logger.info(f"启动干员 [{inst.name}] 主 Gateway 端口={port}")
+        gateway_token, hooks_token, hooks_path = self._get_auth_snapshot()
+        gw_url = f"http://127.0.0.1:{port}"
+        client = OpenClawClient(OpenClawConfig(
+            gateway_url=gw_url,
+            gateway_token=gateway_token,
+            hooks_token=hooks_token,
+            hooks_path=hooks_path,
+            timeout=120,
+        ))
+        client._default_session_key = f"agent:main:{inst.id}"
+        client._SESSION_FILE = _get_agent_session_file(inst.id)
 
-            if not self._check_port(port):
-                try:
-                    _kill_stale_on_port(port)
-                    await asyncio.sleep(0.5)
-                except Exception:
-                    pass
-                await self._runtime.start_gateway()
-
-            gateway_token, hooks_token = self._get_tokens()
-            gw_url = f"http://127.0.0.1:{port}"
-            client = OpenClawClient(OpenClawConfig(
-                gateway_url=gw_url,
-                gateway_token=gateway_token,
-                hooks_token=hooks_token,
-                timeout=120,
-            ))
-            client._default_session_key = f"agent:main:{inst.id}"
-            client._SESSION_FILE = Path.home() / "NagaAgent" / f"openclaw_session_{inst.id}.json"
-
-            # 等待端口就绪
-            for wait in range(15):
-                if self._check_port(port):
-                    logger.info(f"  主 Gateway 端口 {port} 已就绪 (等待 {wait}s)")
-                    break
-                if wait == 0:
-                    logger.info(f"  等待主 Gateway 端口 {port} 就绪...")
-                await asyncio.sleep(1)
-            else:
-                logger.warning(f"  主 Gateway 端口 {port} 15s 内未就绪")
-
-            inst.port = port
-            inst.client = client
-            inst.primary = True
-            inst.process = None
-        else:
-            port = self._allocate_port()
-            logger.info(f"启动干员 [{inst.name}] 端口={port}")
-
-            self._ensure_gateway_config()
-            process = await self._runtime.start_gateway_on_port(port)
-            if process is None:
-                self._release_port(port)
-                raise RuntimeError(f"无法在端口 {port} 启动 Gateway 进程")
-
-            gateway_token, hooks_token = self._get_tokens()
-            gw_url = f"http://127.0.0.1:{port}"
-            client = OpenClawClient(OpenClawConfig(
-                gateway_url=gw_url,
-                gateway_token=gateway_token,
-                hooks_token=hooks_token,
-                timeout=120,
-            ))
-            client._default_session_key = f"agent:main:{inst.id}"
-            client._SESSION_FILE = Path.home() / "NagaAgent" / f"openclaw_session_{inst.id}.json"
-
-            inst.port = port
-            inst.client = client
-            inst.primary = False
-            inst.process = process
+        inst.port = port
+        inst.client = client
+        inst.primary = False
+        inst.process = process
 
         inst.running = True
         logger.info(f"干员 [{inst.name}] 进程已启动 port={inst.port} primary={inst.primary}")
@@ -601,12 +666,6 @@ class InstanceManager:
             return
 
         logger.info(f"停止干员 [{inst.name}] port={inst.port} primary={inst.primary}")
-
-        if inst.primary:
-            # 主实例：仅移除引用，不停止进程
-            inst.running = False
-            inst.client = None
-            return
 
         if inst.client:
             try:
@@ -734,6 +793,7 @@ class InstanceManager:
 
         if not inst.client:
             return {"success": False, "error": f"干员 [{inst.name}] 客户端未就绪"}
+        self._refresh_client_auth(inst)
 
         # 非主实例检查进程存活
         if not inst.primary and inst.process is not None and inst.process.returncode is not None:
@@ -778,21 +838,24 @@ class InstanceManager:
 
     async def _try_start_gateway(self, inst: AgentInstance) -> bool:
         self._ensure_gateway_config()
+        _ensure_agent_runtime_dir(inst.id)
         try:
             _kill_stale_on_port(inst.port)
             await asyncio.sleep(0.5)
         except Exception:
             pass
-
-        if inst.primary:
-            ok = await self._runtime.start_gateway()
-            return ok and self._check_port(inst.port)
-        else:
-            process = await self._runtime.start_gateway_on_port(inst.port)
-            if process is not None and self._check_port(inst.port):
-                inst.process = process
-                return True
+        if self._check_port(inst.port):
+            logger.warning(f"[{inst.name}] 端口 {inst.port} 清理后仍被占用，放弃重启")
             return False
+
+        process = await self._runtime.start_gateway_on_port(
+            inst.port,
+            extra_env=_build_agent_env(inst.id),
+        )
+        if process is not None and self._check_port(inst.port):
+            inst.process = process
+            return True
+        return False
 
     # ── 流式发送 ──
 
@@ -850,7 +913,7 @@ class InstanceManager:
                 tool_name = m.group(1)
                 args = self._json_lib.loads(m.group(2))
                 return {"type": "special", "name": tool_name, "args": args}
-            except:
+            except Exception:
                 pass
 
         # 检测 JSON 工具调用
@@ -859,7 +922,7 @@ class InstanceManager:
             try:
                 args = self._json_lib.loads(m.group(2))
                 return {"type": "json", "name": m.group(1), "args": args}
-            except:
+            except Exception:
                 pass
 
         # 检测伪代码工具调用
@@ -913,7 +976,7 @@ class InstanceManager:
             if resp.status_code != 200:
                 body = await resp.aread()
                 logger.error(f"[stream] [{inst_name}] SSE 失败: {resp.status_code} {body[:200]}")
-                yield {"type": "error", "text": f"Gateway 拒绝: {resp.status_code}"}
+                yield {"type": "error", "text": f"Gateway 拒绝: {resp.status_code}", "statusCode": resp.status_code}
                 return
 
             full_text = ""
@@ -1005,12 +1068,13 @@ class InstanceManager:
         yield {"type": "status", "text": "思考中"}
 
         client = inst.client
+        self._refresh_client_auth(inst)
         session_key = client._default_session_key
         if not session_key:
             session_key = f"agent:main:{instance_id}"
             client._default_session_key = session_key
 
-        stream_url = f"{client.config.gateway_url}/hooks/agent/stream"
+        stream_url = f"{client.config.gateway_url}{client.config.hooks_path}/agent/stream"
         headers = client.config.get_hooks_headers()
         # 传递干员独立 workspace 目录，OpenClaw 将用它加载 AGENTS.md/SOUL.md 等
         agent_workspace = str(_get_agents_dir() / instance_id)
@@ -1027,11 +1091,34 @@ class InstanceManager:
 
         try:
             async with httpx.AsyncClient() as http:
-                # 直接透传 OpenClaw 的原生响应，让 OpenClaw 处理工具调用
-                async for event in self._do_single_stream(
-                    http, stream_url, headers, payload, timeout, inst.name
-                ):
-                    yield event
+                retry_on_unauthorized = True
+                while True:
+                    should_retry = False
+                    async for event in self._do_single_stream(
+                        http, stream_url, headers, payload, timeout, inst.name
+                    ):
+                        if (
+                            retry_on_unauthorized
+                            and event.get("type") == "error"
+                            and int(event.get("statusCode") or 0) == 401
+                        ):
+                            retry_on_unauthorized = False
+                            should_retry = True
+                            logger.warning(f"[stream] [{inst.name}] 收到 401，刷新鉴权并重试一次")
+                            yield {"type": "status", "text": "重新连接干员中"}
+                            self._refresh_client_auth(inst)
+                            restarted = await self._try_start_gateway(inst)
+                            if not restarted:
+                                yield event
+                                return
+                            client = inst.client
+                            headers = client.config.get_hooks_headers()
+                            stream_url = f"{client.config.gateway_url}{client.config.hooks_path}/agent/stream"
+                            break
+                        yield event
+                    if should_retry:
+                        continue
+                    break
 
         except httpx.TimeoutException:
             logger.warning(f"[stream] [{inst.name}] SSE 超时 {timeout}s")

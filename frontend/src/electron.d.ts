@@ -14,7 +14,9 @@ export interface CaptureAPI {
 }
 
 export interface BackendAPI {
+  getLogs: () => Promise<string>
   onProgress: (callback: (payload: { percent: number, phase: string }) => void) => () => void
+  onLog: (callback: (payload: { line: string }) => void) => () => void
   onError: (callback: (payload: { code: number, logs: string }) => void) => () => void
 }
 

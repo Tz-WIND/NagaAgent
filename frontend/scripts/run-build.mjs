@@ -3,8 +3,17 @@ import { resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const cwd = process.cwd()
-const bundledNode = resolve(cwd, 'backend-dist/runtime/node/bin/node')
-const nodeExec = existsSync(bundledNode) ? bundledNode : process.execPath
+const bundledNodeCandidates = process.platform === 'win32'
+  ? [
+      resolve(cwd, 'backend-dist/runtime/node/node.exe'),
+      resolve(cwd, 'backend-dist/runtime/node/node.cmd'),
+    ]
+  : [
+      resolve(cwd, 'backend-dist/runtime/node/bin/node'),
+      resolve(cwd, 'backend-dist/runtime/node/node'),
+    ]
+const bundledNode = bundledNodeCandidates.find(candidate => existsSync(candidate))
+const nodeExec = bundledNode ?? process.execPath
 
 const commands = [
   [resolve(cwd, 'node_modules/vue-tsc/bin/vue-tsc.js'), '-b'],

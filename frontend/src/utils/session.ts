@@ -59,6 +59,187 @@ export function getNagaTab(): ChatTab {
   return tabs.value[0]!
 }
 
+function normalizeToolEvent(input: any): ToolEvent | null {
+  if (!input || typeof input !== 'object')
+    return null
+  const type = input.type === 'tool_result' ? 'tool_result' : input.type === 'tool_call' ? 'tool_call' : null
+  if (!type)
+    return null
+  return {
+    type,
+    name: typeof input.name === 'string' ? input.name : undefined,
+    toolCallId: typeof input.toolCallId === 'string'
+      ? input.toolCallId
+      : typeof input.tool_call_id === 'string'
+        ? input.tool_call_id
+        : undefined,
+    args: input.args,
+    result: input.result,
+    isError: Boolean(input.isError ?? input.is_error),
+  }
+}
+
+function extractStructuredToolBlocks(content: string): { content: string, toolEvents: ToolEvent[] } {
+  if (!content.includes('```tool-'))
+    return { content, toolEvents: [] }
+
+  const toolEvents: ToolEvent[] = []
+  let remaining = content
+  let cleaned = ''
+
+  while (remaining.length > 0) {
+    const startCall = remaining.indexOf('```tool-call')
+    const startResult = remaining.indexOf('```tool-result')
+    const start = startCall === -1
+      ? startResult
+      : startResult === -1
+        ? startCall
+        : Math.min(startCall, startResult)
+    if (start === -1) {
+      cleaned += remaining
+      break
+    }
+
+    cleaned += remaining.slice(0, start)
+    const isToolCall = remaining.startsWith('```tool-call', start)
+    const afterHeader = remaining.indexOf('\n', start)
+    if (afterHeader === -1) {
+      cleaned += remaining.slice(start)
+      break
+    }
+
+    const end = remaining.indexOf('```', afterHeader + 1)
+    if (end === -1) {
+      cleaned += remaining.slice(start)
+      break
+    }
+
+    const block = remaining.slice(afterHeader + 1, end).trim()
+    if (block) {
+      const lines = block.split('\n')
+      const summary = (lines[0] || '').trim()
+      const body = lines.slice(1).join('\n').trim()
+      const isError = summary.startsWith('❌ ')
+      const isSuccess = summary.startsWith('✅ ')
+      const name = (isError || isSuccess) ? summary.slice(2).trim() : summary
+      toolEvents.push({
+        type: isToolCall ? 'tool_call' : 'tool_result',
+        name: name || '工具',
+        isError: isToolCall ? undefined : isError,
+        args: isToolCall ? body : undefined,
+        result: isToolCall ? undefined : body,
+      })
+    }
+
+    remaining = remaining.slice(end + 3)
+  }
+
+  return {
+    content: cleaned.replace(/\n{3,}/g, '\n\n').trim(),
+    toolEvents,
+  }
+}
+
+function buildMessageQueueKey(role: Message['role'], content: string): string {
+  return `${role}\u0000${extractStructuredToolBlocks(content).content}`
+}
+
+function normalizeMessage(input: any, assistantName?: string): Message | null {
+  if (!input || typeof input !== 'object')
+    return null
+
+  const role = input.role
+  if (role !== 'system' && role !== 'user' && role !== 'assistant' && role !== 'info')
+    return null
+
+  const initialContent = typeof input.content === 'string' ? input.content : ''
+  const extracted = extractStructuredToolBlocks(initialContent)
+  const rawEvents = Array.isArray(input.toolEvents)
+    ? input.toolEvents
+    : Array.isArray(input.tool_events)
+      ? input.tool_events
+      : []
+  const toolEvents = [
+    ...((rawEvents.map(normalizeToolEvent).filter(Boolean)) as ToolEvent[]),
+    ...extracted.toolEvents,
+  ]
+
+  return {
+    role,
+    content: extracted.content,
+    reasoning: typeof input.reasoning === 'string' ? input.reasoning : undefined,
+    generating: Boolean(input.generating),
+    status: typeof input.status === 'string' ? input.status : undefined,
+    sender: typeof input.sender === 'string' ? input.sender : role === 'assistant' ? assistantName : undefined,
+    toolEvents: toolEvents.length ? toolEvents : undefined,
+  }
+}
+
+function mergeAssistantMessages(base: Message, extra: Message) {
+  if (extra.content) {
+    base.content = base.content
+      ? `${base.content}\n\n${extra.content}`.trim()
+      : extra.content
+  }
+  if (extra.reasoning) {
+    base.reasoning = base.reasoning
+      ? `${base.reasoning}\n\n${extra.reasoning}`.trim()
+      : extra.reasoning
+  }
+  if (extra.toolEvents?.length) {
+    base.toolEvents = [...(base.toolEvents || []), ...extra.toolEvents]
+  }
+  if (!base.status && extra.status)
+    base.status = extra.status
+  if (!base.sender && extra.sender)
+    base.sender = extra.sender
+  base.generating = base.generating || extra.generating
+}
+
+export function normalizeMessages(messages: unknown, assistantName?: string): Message[] {
+  if (!Array.isArray(messages))
+    return []
+
+  const normalized: Message[] = []
+  for (const item of messages) {
+    const message = normalizeMessage(item, assistantName)
+    if (!message)
+      continue
+
+    const previous = normalized[normalized.length - 1]
+    if (message.role === 'assistant' && previous?.role === 'assistant') {
+      mergeAssistantMessages(previous, message)
+      continue
+    }
+    normalized.push(message)
+  }
+  return normalized
+}
+
+function buildToolEventQueue(messages: Message[]): Map<string, ToolEvent[][]> {
+  const queue = new Map<string, ToolEvent[][]>()
+  for (const message of messages) {
+    if (!message.toolEvents?.length)
+      continue
+    const key = buildMessageQueueKey(message.role, message.content)
+    const items = queue.get(key) || []
+    items.push(message.toolEvents)
+    queue.set(key, items)
+  }
+  return queue
+}
+
+function takeQueuedToolEvents(queue: Map<string, ToolEvent[][]>, role: Message['role'], content: string): ToolEvent[] | undefined {
+  const key = buildMessageQueueKey(role, content)
+  const items = queue.get(key)
+  if (!items?.length)
+    return undefined
+  const next = items.shift()
+  if (!items.length)
+    queue.delete(key)
+  return next
+}
+
 // ── 通讯录状态 ──
 
 export interface AgentContact {
@@ -175,10 +356,7 @@ export async function loadCurrentSession() {
   if (CURRENT_SESSION_ID.value) {
     try {
       const detail = await API.getSessionDetail(CURRENT_SESSION_ID.value)
-      MESSAGES.value = detail.messages.map(m => ({
-        role: m.role as Message['role'],
-        content: m.content,
-      }))
+      MESSAGES.value = normalizeMessages(detail.messages)
       syncNagaMessages()
       return
     }
@@ -248,7 +426,7 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
     const cached = localStorage.getItem(storageKey)
     if (cached) {
       try {
-        const messages = JSON.parse(cached)
+        const messages = normalizeMessages(JSON.parse(cached), tab.name)
         if (Array.isArray(messages) && messages.length > 0) {
           storageMessages = messages
           tab.messages = messages
@@ -261,19 +439,20 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
       tab.sessionId = persistedSessionId
       try {
         const detail = await API.getSessionDetail(persistedSessionId)
+        const cachedToolEvents = buildToolEventQueue(storageMessages)
         if (Array.isArray(detail.messages) && detail.messages.length > 0) {
-          tab.messages = detail.messages.map((m, index) => {
-            const cachedMessage = storageMessages[index]
-            const sameShape = cachedMessage
-              && cachedMessage.role === m.role
-              && cachedMessage.content === m.content
-            return {
-              role: m.role as Message['role'],
-              content: m.content,
-              sender: m.role === 'assistant' ? tab.name : undefined,
-              toolEvents: sameShape ? cachedMessage.toolEvents : undefined,
-            }
-          })
+          tab.messages = normalizeMessages(
+            detail.messages.map((m) => {
+              const role = m.role as Message['role']
+              return {
+                role,
+                content: m.content,
+                sender: role === 'assistant' ? tab.name : undefined,
+                toolEvents: takeQueuedToolEvents(cachedToolEvents, role, m.content),
+              }
+            }),
+            tab.name,
+          )
           localStorage.setItem(storageKey, JSON.stringify(tab.messages))
           return
         }
@@ -309,7 +488,7 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
     const cached = localStorage.getItem(storageKey)
     if (cached) {
       try {
-        const messages = JSON.parse(cached)
+        const messages = normalizeMessages(JSON.parse(cached), tab.name)
         if (Array.isArray(messages) && messages.length > 0) {
           storageMessages = messages
           tab.messages = messages
@@ -324,16 +503,15 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
     // 强制刷新时也走后端，以触发 ensure_running 唤醒 OpenClaw 进程。
     const res = await API.getAgentHistory(tab.instanceId)
     if (res.messages?.length) {
-      tab.messages = res.messages.map(m => ({
-        role: m.role as Message['role'],
-        content: m.content,
-        sender: m.role === 'assistant' ? tab.name : undefined,
-        toolEvents: Array.isArray((m as any).toolEvents)
-          ? (m as any).toolEvents
-          : Array.isArray((m as any).tool_events)
-            ? (m as any).tool_events
-            : [],
-      }))
+      tab.messages = normalizeMessages(
+        res.messages.map(m => ({
+          role: m.role,
+          content: m.content,
+          sender: m.role === 'assistant' ? tab.name : undefined,
+          toolEvents: (m as any).toolEvents ?? (m as any).tool_events,
+        })),
+        tab.name,
+      )
       localStorage.setItem(storageKey, JSON.stringify(tab.messages))
     }
     else if (storageMessages.length > 0) {

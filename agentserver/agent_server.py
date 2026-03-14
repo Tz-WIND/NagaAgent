@@ -26,18 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
-    """有相关进程或端口占用则跳过，否则启动 Gateway。"""
+    """主 Gateway 仅按主端口状态判定是否需要启动。"""
     if runtime.gateway_running:
         logger.info("当前进程中的 OpenClaw Gateway 已在运行，跳过启动")
-        return False
-
-    if runtime.has_gateway_process():
-        logger.info("检测到已有 OpenClaw Gateway 相关进程，跳过启动")
         return False
 
     if runtime.is_gateway_port_in_use():
         logger.info(f"端口 {config.openclaw.gateway_port} 已被占用，跳过 Gateway 启动")
         return False
+
+    if runtime.has_gateway_process():
+        logger.info("检测到其他 OpenClaw Gateway 进程，但主端口空闲；继续尝试启动 20789 主 Gateway")
 
     gw_ok = await runtime.start_gateway()
     if gw_ok:
@@ -697,6 +696,24 @@ async def get_agent_history(agent_id: str, limit: int = 50):
     except Exception as e:
         logger.warning(f"获取干员 [{inst.name}] 历史失败: {e}", exc_info=True)
         return {"messages": []}
+
+
+@app.get("/openclaw/agents/{agent_id}/runtime")
+async def get_agent_runtime(agent_id: str, wake: bool = False):
+    """解析指定干员当前运行时；wake=true 时若未启动则按需唤醒。"""
+    if not Modules.instance_manager:
+        raise HTTPException(503, "实例管理器未就绪")
+
+    try:
+        runtime = await Modules.instance_manager.resolve_runtime(agent_id, wake=wake)
+        return {"success": True, "runtime": runtime}
+    except RuntimeError as exc:
+        detail = str(exc)
+        status = 404 if "不存在" in detail else 409
+        raise HTTPException(status, detail)
+    except Exception as exc:
+        logger.error(f"解析干员运行时失败 [{agent_id}]: {exc}")
+        raise HTTPException(500, f"解析运行时失败: {exc}")
 
 
 @app.post("/openclaw/agents/{agent_id}/send")

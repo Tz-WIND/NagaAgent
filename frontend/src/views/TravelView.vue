@@ -14,6 +14,7 @@ const {
   loading,
   timeProgress,
   creditProgress,
+  lastUpdatedLabel,
   startTravel,
   stopTravel,
   viewSession,
@@ -28,6 +29,7 @@ const {
         :session="travelSession"
         :time-progress="timeProgress"
         :credit-progress="creditProgress"
+        :last-updated-label="lastUpdatedLabel"
         @stop="stopTravel"
       />
 

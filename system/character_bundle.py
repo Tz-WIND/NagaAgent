@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from system.config import CHARACTERS_DIR, load_character
+from system.config import CHARACTERS_DIR, load_character, strip_prompt_comment_lines
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ def _read_text(path: Path, max_chars: int) -> str:
     if not path.exists() or not path.is_file():
         return ""
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = strip_prompt_comment_lines(path.read_text(encoding="utf-8")).strip()
     except Exception:
         return ""
     if len(text) <= max_chars:

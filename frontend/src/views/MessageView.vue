@@ -1,7 +1,7 @@
 <script lang="ts">
 import type { ChatTab, Message } from '@/utils/session'
 import { useEventListener } from '@vueuse/core'
-import { computed, nextTick, onMounted, ref, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue'
 import { ACCESS_TOKEN, authExpired } from '@/api'
 import API from '@/api/core'
 import AgentContacts from '@/components/AgentContacts.vue'
@@ -12,6 +12,7 @@ import { CONFIG } from '@/utils/config'
 import { live2dState } from '@/utils/live2dController'
 import { activeTabId, agentContacts, CURRENT_SESSION_ID, formatRelativeTime, getActiveTab, IS_TEMPORARY_SESSION, isAgentLoading, loadAgentMessages, loadCurrentSession, MESSAGES, newSession, switchSession, tabs } from '@/utils/session'
 import { clearSpeakQueue, isPlaying, queueSpeak, stop as stopTTS } from '@/utils/tts'
+import { setMessageViewExpanded } from '@/utils/uiState'
 
 const isSending = ref(false)
 const messageQueue: Array<{ content: string, options?: any }> = []
@@ -232,6 +233,7 @@ const inputDockRef = ref<HTMLElement | null>(null)
 const isExpanded = ref(false)
 const expandedStyle = ref<Record<string, string>>({})
 const expandedInputStyle = ref<Record<string, string>>({})
+const expandedAnchorLeft = ref(8)
 
 function isImeComposing(event: KeyboardEvent) {
   return event.isComposing || (event as any).keyCode === 229
@@ -247,14 +249,20 @@ function resizeComposer() {
 }
 
 function toggleExpanded() {
+  if (!isExpanded.value) {
+    const chatRect = (normalContainerRef.value as any)?.$el?.getBoundingClientRect?.()
+    if (chatRect) {
+      expandedAnchorLeft.value = Math.max(8, chatRect.left)
+    }
+  }
   isExpanded.value = !isExpanded.value
-  if (isExpanded.value) {
-    nextTick(() => {
-      resizeComposer()
+  nextTick(() => {
+    resizeComposer()
+    if (isExpanded.value) {
       updateExpandedLayout()
       nextTick().then(scrollToBottom)
-    })
-  }
+    }
+  })
 }
 
 function handleComposerEnter(event: KeyboardEvent) {
@@ -266,12 +274,14 @@ function handleComposerEnter(event: KeyboardEvent) {
 }
 
 function updateExpandedLayout() {
-  const chatRect = (normalContainerRef.value as any)?.$el?.getBoundingClientRect?.()
-  if (!chatRect || !inputDockRef.value) {
+  if (!inputDockRef.value) {
     return
   }
+  const chatRect = (normalContainerRef.value as any)?.$el?.getBoundingClientRect?.()
   const inputRect = inputDockRef.value.getBoundingClientRect()
-  const left = Math.max(8, chatRect.left)
+  const left = isExpanded.value
+    ? expandedAnchorLeft.value
+    : Math.max(8, chatRect?.left ?? expandedAnchorLeft.value)
   const composerHeight = Math.max(56, Math.ceil(inputRect.height))
   expandedStyle.value = {
     left: `${left}px`,
@@ -306,6 +316,10 @@ watch(input, () => {
       updateExpandedLayout()
     }
   })
+})
+
+watch(isExpanded, (value) => {
+  setMessageViewExpanded(value)
 })
 
 function scrollToBottom() {
@@ -613,6 +627,11 @@ onMounted(async () => {
   scrollToBottom()
   nextTick(resizeComposer)
 })
+
+onBeforeUnmount(() => {
+  setMessageViewExpanded(false)
+})
+
 useEventListener('token', scrollToBottom)
 useEventListener(window, 'resize', () => {
   if (isExpanded.value) {
@@ -805,7 +824,7 @@ function getSupportedMimeType(): string {
       <AgentContacts />
 
       <!-- 主内容区 -->
-      <BoxContainer ref="normalContainerRef" class="w-full grow" hide-back>
+      <BoxContainer v-show="!isExpanded" ref="normalContainerRef" class="w-full grow" hide-back>
         <!-- Tab Bar：header slot -->
         <template #header>
           <div class="message-header px-1 pt-3 pb-2">
@@ -943,7 +962,7 @@ function getSupportedMimeType(): string {
 
     <!-- Session History Panel（仅在娜迦 tab 可见） -->
     <Transition name="slide-up">
-      <div v-if="showHistory && activeTabId === 'naga'" class="session-panel">
+      <div v-if="showHistory && activeTabId === 'naga' && !isExpanded" class="session-panel">
         <div class="flex items-center justify-between px-3 py-2 border-b border-white/10">
           <span class="text-white/70 text-sm font-bold">对话历史</span>
           <button
@@ -986,7 +1005,7 @@ function getSupportedMimeType(): string {
       </div>
     </Transition>
 
-    <div v-if="toolMessage" class="mx-[var(--nav-back-width)] text-white/50 text-xs px-2 py-1">
+    <div v-if="toolMessage && !isExpanded" class="mx-[var(--nav-back-width)] text-white/50 text-xs px-2 py-1">
       {{ toolMessage }}
     </div>
     <div

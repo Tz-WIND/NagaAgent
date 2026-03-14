@@ -7,9 +7,10 @@ OpenClaw 状态检测器
 
 import json
 import logging
-from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
+
+from .state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger("openclaw.detector")
 
@@ -72,9 +73,13 @@ class OpenClawStatus:
 class OpenClawDetector:
     """OpenClaw 状态检测器"""
 
-    # OpenClaw 配置目录
-    OPENCLAW_DIR = Path.home() / ".openclaw"
-    OPENCLAW_CONFIG = OPENCLAW_DIR / "openclaw.json"
+    @property
+    def OPENCLAW_DIR(self):
+        return get_openclaw_state_dir()
+
+    @property
+    def OPENCLAW_CONFIG(self):
+        return get_openclaw_config_path()
 
     def __init__(self):
         self._cached_status: Optional[OpenClawStatus] = None
@@ -106,7 +111,7 @@ class OpenClawDetector:
                 except Exception as e:
                     logger.warning(f"读取 OpenClaw 配置失败: {e}")
 
-        # 打包环境下，即使 ~/.openclaw/ 不存在，只要内嵌运行时可用也标记为已安装
+        # 打包环境下，即使 ~/.naga/openclaw 不存在，只要内嵌运行时可用也标记为已安装
         from .embedded_runtime import get_embedded_runtime
         runtime = get_embedded_runtime()
         if not status.installed:

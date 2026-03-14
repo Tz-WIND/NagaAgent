@@ -1,3 +1,4 @@
+// 读取：system.character_bundle.load_character_skill_sections -> system.config._build_tier1_variables.character_builtin_skills_prompt
 ---
 name: live2d_controller
 description: 角色自带的 Live2D 表情控制规则。只允许通过 live2d 工具调用切换表情，不要在正文里输出情绪控制标记。

@@ -15,7 +15,6 @@ API 端点:
 import logging
 import json
 import uuid
-import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
@@ -23,6 +22,8 @@ from datetime import datetime
 from enum import Enum
 
 import httpx
+
+from .state_paths import get_openclaw_state_dir
 
 logger = logging.getLogger("openclaw.client")
 
@@ -503,7 +504,7 @@ class OpenClawClient:
                             )
                         else:
                             last_error = (
-                                "OpenClaw 拒绝外部 sessionKey，请在 ~/.openclaw/openclaw.json 设置 "
+                                "OpenClaw 拒绝外部 sessionKey，请在 ~/.naga/openclaw/openclaw.json 设置 "
                                 "hooks.allowRequestSessionKey=true 并重启 OpenClaw Gateway。"
                             )
 
@@ -752,8 +753,7 @@ class OpenClawClient:
 
     @staticmethod
     def _openclaw_home() -> Path:
-        home_override = os.environ.get("OPENCLAW_HOME", "").strip()
-        return Path(home_override).expanduser() if home_override else (Path.home() / ".openclaw")
+        return get_openclaw_state_dir()
 
     @classmethod
     def _resolve_local_session_file(cls, session_key: str) -> Optional[Path]:
@@ -810,13 +810,182 @@ class OpenClawClient:
             return "\n".join(parts).strip()
         return ""
 
+    @staticmethod
+    def _stringify_tool_payload(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        try:
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _history_timestamp_seconds(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+            if numeric > 1_000_000_000_000:
+                return numeric / 1000.0
+            return numeric
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+                if numeric > 1_000_000_000_000:
+                    return numeric / 1000.0
+                return numeric
+            except Exception:
+                pass
+            try:
+                return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+            except Exception:
+                return None
+        return None
+
+    @classmethod
+    def _history_sort_key(cls, item: Dict[str, Any], index: int) -> tuple[int, float, int]:
+        message = item.get("message") if isinstance(item.get("message"), dict) else item
+        candidates = [
+            item.get("timestamp"),
+            message.get("timestamp") if isinstance(message, dict) else None,
+            item.get("createdAt"),
+            message.get("createdAt") if isinstance(message, dict) else None,
+            item.get("updatedAt"),
+            message.get("updatedAt") if isinstance(message, dict) else None,
+        ]
+        for candidate in candidates:
+            seconds = cls._history_timestamp_seconds(candidate)
+            if seconds is not None:
+                return (0, seconds, index)
+        return (1, float(index), index)
+
+    @classmethod
+    def _extract_history_message(cls, item: Dict[str, Any]) -> Dict[str, Any]:
+        message = item.get("message") if isinstance(item.get("message"), dict) else item
+        role = str(message.get("role", "unknown") or "unknown").strip()
+        raw_content = message.get("content", "")
+        text_parts: List[str] = []
+        tool_events: List[Dict[str, Any]] = []
+
+        if isinstance(raw_content, str):
+            if raw_content.strip():
+                text_parts.append(raw_content.strip())
+        elif isinstance(raw_content, list):
+            for block in raw_content:
+                if not isinstance(block, dict):
+                    continue
+                block_type = str(block.get("type", "")).strip().lower().replace("-", "_")
+                if block_type == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and text.strip():
+                        text_parts.append(text.strip())
+                    continue
+
+                if block_type in {"tool_use", "toolcall", "tool_call"}:
+                    tool_events.append(
+                        {
+                            "type": "tool_call",
+                            "name": block.get("name") or block.get("tool_name") or "",
+                            "toolCallId": block.get("id") or block.get("tool_use_id") or "",
+                            "args": block.get("input") or block.get("args") or block.get("arguments"),
+                        }
+                    )
+                    continue
+
+                if block_type in {"tool_result", "tool_resulterror", "tool_result_error", "toolresult"}:
+                    tool_events.append(
+                        {
+                            "type": "tool_result",
+                            "name": block.get("name") or block.get("tool_name") or "",
+                            "toolCallId": block.get("tool_use_id") or block.get("toolCallId") or block.get("id") or "",
+                            "isError": bool(block.get("is_error", False) or "error" in block_type),
+                            "result": cls._stringify_tool_payload(
+                                block.get("content", block.get("result", block.get("output", "")))
+                            ),
+                        }
+                    )
+                    continue
+
+        role_key = role.lower().replace("-", "_")
+        if role_key in {"toolresult", "tool_result"}:
+            tool_events.append(
+                {
+                    "type": "tool_result",
+                    "name": message.get("toolName") or message.get("tool_name") or "",
+                    "toolCallId": message.get("toolCallId") or message.get("tool_call_id") or "",
+                    "isError": bool(message.get("isError", False) or message.get("is_error", False)),
+                    "result": cls._stringify_tool_payload("\n".join(part for part in text_parts if part).strip()),
+                }
+            )
+            text_parts = []
+
+        return {
+            "role": role,
+            "content": "\n\n".join(part for part in text_parts if part).strip(),
+            "toolEvents": tool_events,
+        }
+
+    @classmethod
+    def _normalize_history_messages(cls, raw_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not raw_messages:
+            return []
+
+        ordered = [item for item in raw_messages if isinstance(item, dict)]
+        indexed_messages = list(enumerate(ordered))
+        indexed_messages.sort(key=lambda pair: cls._history_sort_key(pair[1], pair[0]))
+
+        normalized: List[Dict[str, Any]] = []
+        current_assistant: Optional[Dict[str, Any]] = None
+
+        for _, item in indexed_messages:
+            extracted = cls._extract_history_message(item)
+            role_key = str(extracted.get("role") or "").strip().lower().replace("-", "_")
+            content = str(extracted.get("content") or "").strip()
+            tool_events = extracted.get("toolEvents") or []
+
+            if role_key == "user":
+                current_assistant = None
+                if content:
+                    normalized.append({"role": "user", "content": content, "type": "message", "toolEvents": []})
+                continue
+
+            if role_key in {"assistant", "toolresult", "tool_result"}:
+                if current_assistant is None:
+                    current_assistant = {"role": "assistant", "content": "", "type": "message", "toolEvents": []}
+                    normalized.append(current_assistant)
+
+                if content:
+                    current_assistant["content"] = (
+                        f"{current_assistant['content']}\n\n{content}".strip()
+                        if current_assistant["content"]
+                        else content
+                    )
+                if isinstance(tool_events, list) and tool_events:
+                    current_assistant["toolEvents"].extend(tool_events)
+                continue
+
+        cleaned: List[Dict[str, Any]] = []
+        for message in normalized:
+            content = str(message.get("content") or "").strip()
+            tool_events = message.get("toolEvents") or []
+            if message.get("role") == "assistant" and not content and not tool_events:
+                continue
+            message["content"] = content
+            cleaned.append(message)
+        return cleaned
+
     @classmethod
     def _read_local_session_messages(cls, session_key: str) -> List[Dict[str, Any]]:
         session_file = cls._resolve_local_session_file(session_key)
         if not session_file:
             return []
 
-        messages: List[Dict[str, Any]] = []
+        raw_messages: List[Dict[str, Any]] = []
         try:
             for line in session_file.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
@@ -825,21 +994,13 @@ class OpenClawClient:
                 entry = json.loads(line)
                 if entry.get("type") != "message":
                     continue
-                message = entry.get("message")
-                if not isinstance(message, dict):
+                if not isinstance(entry.get("message"), dict):
                     continue
-                messages.append(
-                    {
-                        "role": str(message.get("role") or "unknown"),
-                        "content": cls._extract_local_text_from_message(message),
-                        "type": "message",
-                        "toolEvents": [],
-                    }
-                )
+                raw_messages.append(entry)
         except Exception as e:
             logger.warning(f"[OpenClaw] 读取本地会话历史失败: {e}")
             return []
-        return messages
+        return cls._normalize_history_messages(raw_messages)
 
     @classmethod
     def _extract_local_assistant_replies(cls, session_key: str) -> List[str]:
@@ -1061,69 +1222,7 @@ class OpenClawClient:
           }
         }
         """
-        messages = []
-
-        def _stringify_tool_payload(value: Any) -> str:
-            if value is None:
-                return ""
-            if isinstance(value, str):
-                return value
-            try:
-                return json.dumps(value, ensure_ascii=False, indent=2)
-            except Exception:
-                return str(value)
-
-        def _extract_message(item: Dict[str, Any]) -> Dict[str, Any]:
-            role = item.get("role", "unknown")
-            raw_content = item.get("content", "")
-            text_parts: List[str] = []
-            tool_events: List[Dict[str, Any]] = []
-
-            if isinstance(raw_content, str):
-                if raw_content.strip():
-                    text_parts.append(raw_content)
-            elif isinstance(raw_content, list):
-                for block in raw_content:
-                    if not isinstance(block, dict):
-                        continue
-                    block_type = str(block.get("type", "")).strip().lower()
-                    if block_type == "text":
-                        text = block.get("text", "")
-                        if isinstance(text, str) and text.strip():
-                            text_parts.append(text)
-                        continue
-
-                    if block_type in {"tool_use", "toolcall", "tool_call"}:
-                        tool_events.append(
-                            {
-                                "type": "tool_call",
-                                "name": block.get("name") or block.get("tool_name") or "",
-                                "toolCallId": block.get("id") or block.get("tool_use_id") or "",
-                                "args": block.get("input") or block.get("args") or block.get("arguments"),
-                            }
-                        )
-                        continue
-
-                    if block_type in {"tool_result", "tool_result_error"}:
-                        tool_events.append(
-                            {
-                                "type": "tool_result",
-                                "name": block.get("name") or block.get("tool_name") or "",
-                                "toolCallId": block.get("tool_use_id") or block.get("toolCallId") or "",
-                                "isError": bool(block.get("is_error", False) or block_type == "tool_result_error"),
-                                "result": _stringify_tool_payload(
-                                    block.get("content", block.get("result", block.get("output", "")))
-                                ),
-                            }
-                        )
-                        continue
-
-            return {
-                "role": role,
-                "content": "\n".join(part for part in text_parts if part).strip(),
-                "type": "message",
-                "toolEvents": tool_events,
-            }
+        messages: List[Dict[str, Any]] = []
 
         try:
             # 尝试从 result 中提取
@@ -1134,10 +1233,7 @@ class OpenClawClient:
                 details = inner_result.get("details", {})
                 msg_list = details.get("messages", [])
                 if msg_list and isinstance(msg_list, list):
-                    for msg in msg_list:
-                        if isinstance(msg, dict):
-                            messages.append(_extract_message(msg))
-                    return messages
+                    return self._normalize_history_messages(msg_list)
 
                 # 备选：从 content[].text 解析 JSON
                 content = inner_result.get("content", [])
@@ -1150,9 +1246,8 @@ class OpenClawClient:
                                 parsed = json.loads(text)
                                 if isinstance(parsed, dict):
                                     msg_list = parsed.get("messages", [])
-                                    for msg in msg_list:
-                                        if isinstance(msg, dict):
-                                            messages.append(_extract_message(msg))
+                                    if isinstance(msg_list, list):
+                                        messages.extend(self._normalize_history_messages(msg_list))
                             except json.JSONDecodeError:
                                 # 不是 JSON，作为原始文本返回
                                 if text.strip():
@@ -1244,7 +1339,7 @@ class OpenClawClient:
 
     # ============ 会话持久化 ============
 
-    _SESSION_FILE = Path.home() / "NagaAgent" / "openclaw_session.json"
+    _SESSION_FILE = get_openclaw_state_dir() / "openclaw_session.json"
 
     def save_session(self) -> None:
         """将当前 session_key 持久化到磁盘，重启后可恢复"""

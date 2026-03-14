@@ -687,15 +687,15 @@ async def _execute_openclaw_tool_call(
         if cfg.online_search.search_api_key:
             return await _execute_brave_search(call)
 
+    # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
+    if tool_name in _LOCAL_EXEC_TOOLS:
+        return await _execute_local_tool(call, tool_name, tool_args, source_agent_id=source_agent_id)
+
     if not await _check_openclaw_available():
         return {
             "tool_call": call, "result": "OpenClaw 服务当前不可用，请稍后重试",
             "status": "error", "service_name": "openclaw_tool", "tool_name": tool_name,
         }
-
-    # 本地可执行工具：直接在本机执行，不经过 OpenClaw agent session
-    if tool_name in _LOCAL_EXEC_TOOLS:
-        return await _execute_local_tool(call, tool_name, tool_args, source_agent_id=source_agent_id)
 
     try:
         client = _get_openclaw_client()

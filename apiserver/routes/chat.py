@@ -18,12 +18,14 @@ from system.config import (
     build_system_prompt,
     get_config,
     get_data_dir,
+    strip_prompt_comment_lines,
 )
-from system.character_bundle import build_character_identity_bundle, is_legacy_character_identity
+from system.character_bundle import is_legacy_character_identity
 from apiserver.agent_directory import (
     BUILTIN_NAGA_AGENT_ID,
     NAGA_CORE_ENGINES,
     builtin_naga_descriptor,
+    format_agent_directory_text,
     list_agent_descriptors,
     normalize_agent_engine,
     resolve_agent_descriptor,
@@ -55,7 +57,9 @@ class _AgentPromptContext:
     engine: str
     character_template: str | None
     system_prompt: str
-    extra_sections: list[str]
+    agent_soul_prompt: str
+    agent_notebook_prompt: str
+    agent_long_term_memory_prompt: str
     skills_prompt: str
     available_mcp_tools_text: str
     skill_manager: object | None
@@ -141,6 +145,29 @@ async def _relay_to_naga_core(target_agent_id: str | None, relay_message: str, s
 
 
 async def _relay_to_openclaw(target_agent_id: str, relay_message: str, session_key: str, timeout_seconds: int) -> dict:
+    runtime_resp = await _call_agentserver(
+        "GET",
+        f"/openclaw/agents/{target_agent_id}/runtime",
+        params={"wake": "true"},
+        timeout_seconds=min(timeout_seconds, 45),
+    )
+    runtime = runtime_resp.get("runtime", {}) if isinstance(runtime_resp, dict) else {}
+    if not runtime.get("running") or not runtime.get("port"):
+        return {
+            "success": False,
+            "reply": "",
+            "error": "目标 OpenClaw 干员未能成功唤醒",
+            "session_key": session_key,
+            "runtime": runtime,
+        }
+
+    logger.info(
+        "[AgentRelay] 目标 OpenClaw 已解析: id=%s port=%s wake=%s",
+        target_agent_id,
+        runtime.get("port"),
+        runtime.get("woken"),
+    )
+
     response = await _call_agentserver(
         "POST",
         f"/openclaw/agents/{target_agent_id}/send",
@@ -159,6 +186,7 @@ async def _relay_to_openclaw(target_agent_id: str, relay_message: str, session_k
         "reply": reply,
         "error": response.get("error"),
         "session_key": session_key,
+        "runtime": runtime,
     }
 
 
@@ -215,6 +243,7 @@ async def relay_agent_message(request: AgentRelayRequest):
         "session_id": result.get("session_id"),
         "session_key": result.get("session_key"),
         "error": result.get("error"),
+        "target_runtime": result.get("runtime"),
     }
 
 
@@ -222,7 +251,7 @@ def _read_text_snippet(path: Path, max_chars: int = 4000) -> str:
     if not path.exists() or not path.is_file():
         return ""
     try:
-        text = path.read_text(encoding="utf-8").strip()
+        text = strip_prompt_comment_lines(path.read_text(encoding="utf-8")).strip()
     except Exception:
         return ""
     if len(text) <= max_chars:
@@ -248,7 +277,7 @@ def _load_memory_section(memory_dir: Path) -> str:
         chunks.append(f"### {memory_file.name}\n{content}")
     if not chunks:
         return ""
-    return "## 干员长期记忆\n\n以下是该干员的本地长期记忆摘录，请在回答时保持一致：\n\n" + "\n\n".join(chunks)
+    return "\n\n".join(chunks)
 
 
 def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | None:
@@ -273,32 +302,26 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
     public_skills_dir = get_data_dir() / "skills" / "public"
     project_skills_dir = Path(__file__).resolve().parents[2] / "skills"
 
-    system_prompt = _read_text_snippet(identity_path, max_chars=16000)
-    if system_prompt and record.get("character_template"):
+    identity_override = _read_text_snippet(identity_path, max_chars=16000)
+    if identity_override and record.get("character_template"):
         try:
-            if is_legacy_character_identity(system_prompt, record.get("character_template")):
-                system_prompt = build_character_identity_bundle(record.get("character_template")) or system_prompt
+            if is_legacy_character_identity(identity_override, record.get("character_template")):
+                identity_override = ""
         except Exception as e:
             logger.warning(f"[NagaCore] 判断旧版角色模板 [{record.get('character_template')}] 失败: {e}")
-    if not system_prompt:
-        try:
-            system_prompt = build_character_identity_bundle(record.get("character_template")) or build_system_prompt()
-        except Exception as e:
-            logger.warning(f"[NagaCore] 加载角色 bundle [{record.get('character_template')}] 失败: {e}")
-            system_prompt = build_system_prompt()
 
-    extra_sections: list[str] = []
+    try:
+        system_prompt = build_system_prompt(
+            record.get("character_template"),
+            identity_override=identity_override,
+        )
+    except Exception as e:
+        logger.warning(f"[NagaCore] 装配 tier1 提示词失败 [{record.get('character_template')}] : {e}")
+        system_prompt = identity_override or build_system_prompt()
+
     soul_text = _read_text_snippet(soul_path, max_chars=5000)
-    if soul_text:
-        extra_sections.append("## 干员灵魂\n\n以下是该干员后天形成的长期倾向、偏好和成长记录，请保持一致：\n\n" + soul_text)
-
     notes_text = _read_text_snippet(notes_path, max_chars=4000)
-    if notes_text:
-        extra_sections.append("## 干员记事本\n\n以下是该干员的长期注意事项和工作记事：\n\n" + notes_text)
-
     memory_section = _load_memory_section(agent_dir / "memory")
-    if memory_section:
-        extra_sections.append(memory_section)
 
     skill_manager = SkillManager(skills_dirs=[project_skills_dir, public_skills_dir, private_skills_dir])
     skills_prompt = skill_manager.generate_skills_prompt()
@@ -318,10 +341,42 @@ def _build_agent_prompt_context(agent_id: str | None) -> _AgentPromptContext | N
         engine=engine,
         character_template=record.get("character_template"),
         system_prompt=system_prompt,
-        extra_sections=extra_sections,
+        agent_soul_prompt=soul_text,
+        agent_notebook_prompt=notes_text,
+        agent_long_term_memory_prompt=memory_section,
         skills_prompt=skills_prompt,
         available_mcp_tools_text=available_mcp_tools_text,
         skill_manager=skill_manager,
+    )
+
+
+def _build_multi_agent_context_section(agent_ctx: _AgentPromptContext | None) -> str:
+    current = builtin_naga_descriptor()
+    if agent_ctx is not None:
+        current.name = agent_ctx.name
+        current.id = agent_ctx.agent_id
+        current.engine = agent_ctx.engine
+        current.character_template = agent_ctx.character_template
+
+    directory_text = format_agent_directory_text()
+    return (
+        "## 当前身份与协作边界\n\n"
+        f"你当前身份：{current.name}\n"
+        f"当前干员ID：{current.id}\n"
+        f"当前引擎：{current.engine}\n\n"
+        "规则：\n"
+        "- 你只能代表当前干员自己思考和回答\n"
+        "- 其他现有干员不会自动参与\n"
+        "- 如果任务需要其他现有干员参与，必须调用 `agent_relay`\n"
+        "- 如果用户明确点名其他干员、要求多人分工、要求不同人设分别给意见，先确认通讯录，再转发\n"
+        "- `openclaw` Agent 模式是临时复杂执行器，不等于通讯录干员\n\n"
+        "## 当前可联系干员\n\n"
+        "以下是当前通讯录中的干员：\n"
+        f"{directory_text}\n\n"
+        "使用建议：\n"
+        "- 名字或ID不确定时，先调用 `agents_list`\n"
+        "- 需要多人协作时，可以多次调用 `agent_relay`\n"
+        "- 如果当前干员自己就能完成任务，优先自己直接调用工具\n"
     )
 
 
@@ -538,6 +593,7 @@ async def chat(request: ChatRequest):
             include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
             skill_name=request.skill,
             rag_section=rag_section,
+            multi_agent_context_section=_build_multi_agent_context_section(agent_ctx),
             skills_prompt_override=agent_ctx.skills_prompt if agent_ctx else None,
             skill_instructions_override=(
                 agent_ctx.skill_manager.get_skill_instructions(request.skill)
@@ -545,7 +601,11 @@ async def chat(request: ChatRequest):
                 else None
             ),
             available_mcp_tools_override=agent_ctx.available_mcp_tools_text if agent_ctx else None,
-            extra_sections=agent_ctx.extra_sections if agent_ctx else None,
+            agent_soul_prompt=agent_ctx.agent_soul_prompt if agent_ctx else "",
+            agent_notebook_prompt=agent_ctx.agent_notebook_prompt if agent_ctx else "",
+            agent_long_term_memory_prompt=(
+                agent_ctx.agent_long_term_memory_prompt if agent_ctx else ""
+            ),
         )
         messages.append({"role": "system", "content": supplement})
 
@@ -674,6 +734,7 @@ async def chat_stream(request: ChatRequest):
                 include_tool_instructions=not supports_fc,  # 不支持原生FC时注入文本指令
                 skill_name=request.skill,
                 rag_section=rag_section,
+                multi_agent_context_section=_build_multi_agent_context_section(agent_ctx),
                 skills_prompt_override=agent_ctx.skills_prompt if agent_ctx else None,
                 skill_instructions_override=(
                     agent_ctx.skill_manager.get_skill_instructions(request.skill)
@@ -681,7 +742,11 @@ async def chat_stream(request: ChatRequest):
                     else None
                 ),
                 available_mcp_tools_override=agent_ctx.available_mcp_tools_text if agent_ctx else None,
-                extra_sections=agent_ctx.extra_sections if agent_ctx else None,
+                agent_soul_prompt=agent_ctx.agent_soul_prompt if agent_ctx else "",
+                agent_notebook_prompt=agent_ctx.agent_notebook_prompt if agent_ctx else "",
+                agent_long_term_memory_prompt=(
+                    agent_ctx.agent_long_term_memory_prompt if agent_ctx else ""
+                ),
             )
             messages.append({"role": "system", "content": supplement})
 
@@ -849,6 +914,13 @@ async def chat_stream(request: ChatRequest):
                                 current_round_text = ""
                             elif chunk_type == "tool_calls":
                                 is_tool_event = True
+                                had_tool_events = True
+                                for call in chunk_data.get("calls", []):
+                                    svc = call.get("service_name") or call.get("agentType") or "tool"
+                                    tn = call.get("tool_name") or ""
+                                    label = f"{svc}: {tn}" if tn else svc
+                                    payload = json_module.dumps(call, ensure_ascii=False, indent=2)
+                                    all_rounds_content += f"\n```tool-call\n{label}\n{payload}\n```\n"
                             elif chunk_type == "tool_results":
                                 is_tool_event = True
                                 # 将工具结果格式化为 tool-result 代码块，用于持久化

@@ -328,12 +328,12 @@ _OPENCLAW_TOOLS = [
     },
     {
         "name": "agents_list",
-        "description": "列出可用Agent。",
+        "description": "列出当前通讯录中可联系的现有干员。在跨干员委派、多人分工或用户点名某个干员之前优先调用。",
         "parameters": {"type": "object", "properties": {}},
     },
     {
         "name": "agent_relay",
-        "description": "把消息转发给另一名干员并等待其回复。",
+        "description": "把消息转发给另一名现有干员并等待其回复。用于多干员协作，不要把它和临时 OpenClaw 执行器混用。",
         "parameters": {
             "type": "object",
             "properties": {
@@ -410,7 +410,7 @@ def _build_openclaw_agent_schema() -> List[Dict[str, Any]]:
         "type": "function",
         "function": {
             "name": "openclaw__agent",
-            "description": "Agent模式：启动独立AI推理执行复杂多步任务（如研究、写报告、多工具协作）。简单任务请用具体工具。",
+            "description": "临时 OpenClaw 复杂执行器。仅当没有合适现有干员可委派，且任务需要临时多步推理、研究或复杂执行时使用；不要把它当成通讯录干员。",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 from datetime import datetime
-from system.config import get_data_dir
+from system.config import get_data_dir, strip_prompt_comment_lines
 
 logger = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ class SkillManager:
             SkillMetadata 对象
         """
         try:
-            content = skill_file.read_text(encoding='utf-8')
+            content = strip_prompt_comment_lines(skill_file.read_text(encoding='utf-8'))
 
             # 提取 YAML 前置内容
             match = self.FRONTMATTER_PATTERN.match(content)
@@ -201,7 +201,7 @@ class SkillManager:
             指令内容（不含 YAML 前置）
         """
         try:
-            content = skill_file.read_text(encoding='utf-8')
+            content = strip_prompt_comment_lines(skill_file.read_text(encoding='utf-8'))
 
             # 移除 YAML 前置内容
             match = self.FRONTMATTER_PATTERN.match(content)
@@ -272,7 +272,7 @@ class SkillManager:
             return None
 
         try:
-            return resource_path.read_text(encoding='utf-8')
+            return strip_prompt_comment_lines(resource_path.read_text(encoding='utf-8'))
         except Exception as e:
             logger.error(f"读取资源失败 {resource_path}: {e}")
             return None

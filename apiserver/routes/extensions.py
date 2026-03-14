@@ -22,6 +22,7 @@ import yaml
 from system.config import get_config, get_data_dir
 from apiserver import naga_auth
 from apiserver.api_server import _call_agentserver, FileUploadResponse
+from agentserver.openclaw.state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger(__name__)
 
@@ -30,9 +31,9 @@ router = APIRouter()
 
 # ============ OpenClaw Skill Market ============
 
-OPENCLAW_STATE_DIR = Path.home() / ".openclaw"
+OPENCLAW_STATE_DIR = get_openclaw_state_dir()
 OPENCLAW_SKILLS_DIR = OPENCLAW_STATE_DIR / "skills"
-OPENCLAW_CONFIG_PATH = OPENCLAW_STATE_DIR / "openclaw.json"
+OPENCLAW_CONFIG_PATH = get_openclaw_config_path()
 NAGA_DATA_DIR = get_data_dir()
 NAGA_SKILLS_DIR = NAGA_DATA_DIR / "skills"
 NAGA_PUBLIC_SKILLS_DIR = NAGA_SKILLS_DIR / "public"
