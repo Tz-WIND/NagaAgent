@@ -44,6 +44,7 @@ class EmbeddedRuntime:
             self._runtime_root = self._resolve_runtime_root()
             if self._runtime_root and self._runtime_root.exists():
                 logger.info(f"内嵌运行时目录: {self._runtime_root}")
+                self._ensure_packaged_runtime_ready()
             else:
                 logger.warning(f"内嵌运行时目录不存在: {self._runtime_root}")
                 self._runtime_root = None
@@ -197,6 +198,78 @@ class EmbeddedRuntime:
                     return str(p)
         return None
 
+    def _packaged_runtime_path_dirs(self) -> List[str]:
+        if not (self.is_packaged and self._runtime_root is not None):
+            return []
+
+        extra_dirs: List[str] = []
+        node_dir = self._runtime_root / "node"
+        if node_dir.exists():
+            node_bin_dir = node_dir / "bin"
+            if platform.system() == "Windows":
+                extra_dirs.append(str(node_dir))
+            else:
+                if node_bin_dir.exists():
+                    extra_dirs.append(str(node_bin_dir))
+                extra_dirs.append(str(node_dir))
+
+        uv_dir = self._runtime_root / "uv"
+        if uv_dir.exists():
+            uv_bin_dir = uv_dir / "bin"
+            if uv_bin_dir.exists():
+                extra_dirs.append(str(uv_bin_dir))
+            extra_dirs.append(str(uv_dir))
+
+        return extra_dirs
+
+    @staticmethod
+    def _sanitize_packaged_library_path(env: Dict[str, str], key: str) -> None:
+        orig_key = f"{key}_ORIG"
+        if orig_key in env:
+            orig_val = env.get(orig_key, "")
+            if orig_val:
+                env[key] = orig_val
+            else:
+                env.pop(key, None)
+            return
+
+        meipass = getattr(sys, "_MEIPASS", None)
+        current_val = env.get(key, "")
+        if meipass and current_val and str(meipass) in current_val:
+            env.pop(key, None)
+
+    def _sanitize_subprocess_env(self, env: Dict[str, str]) -> Dict[str, str]:
+        if not self.is_packaged:
+            return env
+
+        cleaned = env.copy()
+        for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+            self._sanitize_packaged_library_path(cleaned, key)
+        return cleaned
+
+    def _ensure_executable(self, path_str: Optional[str]) -> None:
+        if not path_str or platform.system() == "Windows":
+            return
+        try:
+            path = Path(path_str)
+            if path.exists() and not os.access(path, os.X_OK):
+                path.chmod(path.stat().st_mode | 0o755)
+        except Exception as exc:
+            logger.debug(f"设置可执行权限失败（忽略）: {path_str} -> {exc}")
+
+    def _ensure_packaged_runtime_ready(self) -> None:
+        if not self.is_packaged:
+            return
+
+        for candidate in (
+            self.node_path,
+            self.npm_path,
+            self.npx_path,
+            self.uv_path,
+            self.uvx_path,
+        ):
+            self._ensure_executable(candidate)
+
     @property
     def node_path(self) -> Optional[str]:
         """Node.js 可执行文件路径"""
@@ -342,7 +415,7 @@ class EmbeddedRuntime:
     @property
     def env(self) -> Dict[str, str]:
         """构建子进程环境变量，确保内嵌 node / uv 优先"""
-        env = os.environ.copy()
+        env = self._sanitize_subprocess_env(os.environ.copy())
         state_dir = get_openclaw_state_dir()
         config_path = get_openclaw_config_path()
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -360,12 +433,7 @@ class EmbeddedRuntime:
         extra_dirs: list[str] = []
 
         if self.is_packaged and self._runtime_root is not None:
-            node_dir = self._runtime_root / "node"
-            if node_dir.exists():
-                extra_dirs.append(str(node_dir))
-            uv_dir = self._runtime_root / "uv"
-            if uv_dir.exists():
-                extra_dirs.append(str(uv_dir))
+            extra_dirs.extend(self._packaged_runtime_path_dirs())
             env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
 
         # vendor node_modules/.bin 始终加入（开发 + 打包都需要）
@@ -560,6 +628,7 @@ class EmbeddedRuntime:
         if not cmd:
             logger.error("无法构建 Gateway 启动命令")
             return False
+        self._ensure_packaged_runtime_ready()
 
         try:
             logger.info(f"启动 OpenClaw Gateway: {' '.join(cmd)}")
@@ -589,9 +658,9 @@ class EmbeddedRuntime:
             # 后台转发 Gateway 日志
             self._pipe_gateway_logs(self._gateway_process)
 
-            # 轮询等待 Gateway 就绪。Windows 打包态首次冷启动更慢，给更长缓冲。
+            # 轮询等待 Gateway 就绪。打包态冷启动更慢，统一拉长等待时间。
             ready = False
-            max_attempts = 30 if self.is_packaged and platform.system() == "Windows" else 15
+            max_attempts = 45 if self.is_packaged else 15
             for _attempt in range(max_attempts):
                 await asyncio.sleep(1)
                 if self._gateway_process.returncode is not None:
@@ -636,6 +705,7 @@ class EmbeddedRuntime:
         if not cmd:
             logger.error(f"[port={port}] 无法构建 Gateway 启动命令（node 不可用或 gateway_start.mjs 缺失）")
             return None
+        self._ensure_packaged_runtime_ready()
         if self.is_gateway_port_in_use(port=port):
             logger.error(f"[port={port}] Gateway 子实例启动前端口已被占用，拒绝复用")
             return None
@@ -670,7 +740,8 @@ class EmbeddedRuntime:
             logger.info(f"[port={port}] 进程已创建 pid={process.pid}")
             self._pipe_gateway_logs(process)
 
-            for attempt in range(15):
+            max_attempts = 45 if self.is_packaged else 15
+            for attempt in range(max_attempts):
                 await asyncio.sleep(1)
                 if process.returncode is not None:
                     stdout_data = await process.stdout.read() if process.stdout else b""
@@ -691,11 +762,10 @@ class EmbeddedRuntime:
                     sock.close()
                 except Exception:
                     pass
-                if attempt == 4 or attempt == 9:
-                    logger.info(f"[port={port}] 等待端口就绪... ({attempt+1}/15)")
+                if attempt in (4, 9, 19, 29):
+                    logger.info(f"[port={port}] 等待端口就绪... ({attempt+1}/{max_attempts})")
 
-            # 15s 后仍未就绪
-            logger.warning(f"[port={port}] 进程运行中(pid={process.pid})但端口 15s 内未就绪")
+            logger.warning(f"[port={port}] 进程运行中(pid={process.pid})但端口 {max_attempts}s 内未就绪")
             return process
         except Exception as e:
             logger.error(f"[port={port}] 启动 Gateway 子实例失败: {e}", exc_info=True)

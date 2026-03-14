@@ -67,6 +67,43 @@ def _platform_bin(runtime_root: Path, subdir: str, name: str) -> str | None:
     return None
 
 
+def _runtime_path_dirs(runtime_root: Path) -> list[str]:
+    extra_dirs: list[str] = []
+    for subdir in ("node", "uv"):
+        base_dir = runtime_root / subdir
+        if not base_dir.exists():
+            continue
+        bin_dir = base_dir / "bin"
+        if os.name == "nt":
+            extra_dirs.append(str(base_dir))
+        else:
+            if bin_dir.exists():
+                extra_dirs.append(str(bin_dir))
+            extra_dirs.append(str(base_dir))
+    return extra_dirs
+
+
+def _sanitize_packaged_subprocess_env(env: dict[str, str]) -> dict[str, str]:
+    if not _is_packaged():
+        return env
+
+    cleaned = env.copy()
+    meipass = str(Path(sys._MEIPASS))  # type: ignore[attr-defined]
+    for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
+        orig_key = f"{key}_ORIG"
+        if orig_key in cleaned:
+            orig_val = cleaned.get(orig_key, "")
+            if orig_val:
+                cleaned[key] = orig_val
+            else:
+                cleaned.pop(key, None)
+            continue
+        current_val = cleaned.get(key, "")
+        if current_val and meipass in current_val:
+            cleaned.pop(key, None)
+    return cleaned
+
+
 def _resolve_runtime_command(cmd: str, env: dict[str, str]) -> str | None:
     runtime_root = _resolve_runtime_root()
     if runtime_root is not None:
@@ -87,18 +124,12 @@ def _resolve_runtime_command(cmd: str, env: dict[str, str]) -> str | None:
 
 
 def _build_runtime_env() -> dict[str, str]:
-    env = os.environ.copy()
+    env = _sanitize_packaged_subprocess_env(os.environ.copy())
     extra_dirs: list[str] = []
 
     runtime_root = _resolve_runtime_root()
     if runtime_root is not None:
-        for subdir in ("node", "uv"):
-            base_dir = runtime_root / subdir
-            if base_dir.exists():
-                extra_dirs.append(str(base_dir))
-            bin_dir = base_dir / "bin"
-            if bin_dir.exists():
-                extra_dirs.append(str(bin_dir))
+        extra_dirs.extend(_runtime_path_dirs(runtime_root))
 
     vendor_bin = PROJECT_ROOT / "vendor" / "openclaw" / "node_modules" / ".bin"
     if vendor_bin.exists():

@@ -197,6 +197,31 @@ export class CoreApiClient extends ApiClient {
     })
   }
 
+  trackTelemetry(params: {
+    event: string
+    props?: Record<string, any>
+    source?: string
+    traceId?: string
+    sessionId?: string
+    agentId?: string
+  }): Promise<{ status: 'accepted' }> {
+    return this.instance.post('/telemetry/track', params)
+  }
+
+  flushTelemetry(): Promise<{
+    status: 'ok'
+    result: Record<string, any>
+  }> {
+    return this.instance.post('/telemetry/flush')
+  }
+
+  getTelemetryStatus(): Promise<{
+    status: 'success'
+    telemetry: Record<string, any>
+  }> {
+    return this.instance.get('/telemetry/status')
+  }
+
   getSystemPrompt(): Promise<{
     status: 'success'
     prompt: string

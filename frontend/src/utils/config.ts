@@ -1,5 +1,6 @@
 import { ref, watch } from 'vue'
 import API from '@/api/core'
+import { parseQqBindingTarget } from '@/utils/qqNotification'
 
 export interface Model {
   source: string
@@ -182,8 +183,21 @@ export const DEFAULT_CONFIG = {
     },
     qq: {
       enabled: false,
+      binding_target: '',
       user_qq: '',
+      qq_email: '',
+      email_verification_code: '',
     },
+  },
+  telemetry: {
+    enabled: true,
+    upload_enabled: true,
+    upload_url: '',
+    flush_interval_seconds: 60,
+    upload_timeout_seconds: 10,
+    batch_size: 50,
+    max_queue_events: 5000,
+    max_queue_bytes: 8 * 1024 * 1024,
   },
   naga_portal: {
     portal_url: 'https://naga.furina.chat/', // Naga门户URL
@@ -282,6 +296,7 @@ export const backendConnected = ref(false)
 
 function sanitizeLegacyNotificationConfig(config: Config) {
   const qqConfig = config.notifications.qq as typeof config.notifications.qq & {
+    binding_target?: string
     provider?: string
     server_url?: string
     token?: string
@@ -293,6 +308,20 @@ function sanitizeLegacyNotificationConfig(config: Config) {
   delete qqConfig.token
   delete qqConfig.group_id
   delete qqConfig.message_template
+
+  const bindingTarget = String(qqConfig.binding_target || qqConfig.user_qq || '').trim()
+  qqConfig.binding_target = bindingTarget
+
+  const parsed = parseQqBindingTarget(bindingTarget)
+  if (parsed.isValid) {
+    qqConfig.user_qq = parsed.normalizedQq
+    qqConfig.qq_email = parsed.normalizedEmail
+  }
+  else {
+    qqConfig.user_qq = ''
+    qqConfig.qq_email = ''
+    qqConfig.email_verification_code = ''
+  }
 }
 
 function deepMerge<T extends Record<string, any>>(target: T, source: Record<string, any>): T {

@@ -299,6 +299,26 @@ def _extract_tarball(archive_path: Path) -> None:
                         target.chmod(target.stat().st_mode | 0o755)
 
 
+def _materialize_unix_node_launchers() -> None:
+    if IS_WINDOWS:
+        return
+
+    for launcher_name in ("npm", "npx", "corepack"):
+        launcher = NODE_RUNTIME_DIR / "bin" / launcher_name
+        if not launcher.is_symlink():
+            continue
+        try:
+            target = launcher.resolve(strict=True)
+            content = target.read_bytes()
+            mode = target.stat().st_mode | 0o755
+            launcher.unlink()
+            launcher.write_bytes(content)
+            launcher.chmod(mode)
+            log(f"已实化 Node launcher 符号链接: {launcher_name}")
+        except Exception as exc:
+            log(f"警告：实化 Node launcher 失败（忽略）: {launcher_name} -> {exc}")
+
+
 def extract_node_runtime(archive_path: Path) -> None:
     """解压 Node.js 到 runtime/node"""
     if NODE_RUNTIME_DIR.exists():
@@ -312,6 +332,7 @@ def extract_node_runtime(archive_path: Path) -> None:
         _extract_zip(archive_path)
     else:
         _extract_tarball(archive_path)
+        _materialize_unix_node_launchers()
 
     # 验证关键文件
     node_bin = NODE_RUNTIME_DIR / NODE_BIN

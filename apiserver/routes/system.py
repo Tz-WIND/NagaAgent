@@ -11,10 +11,38 @@ from system.config import get_config, VERSION, build_system_prompt
 from system.config_manager import get_config_snapshot, update_config
 from apiserver.message_manager import message_manager
 from apiserver.api_server import SystemInfoResponse
+from apiserver.telemetry import emit_telemetry
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _notification_telemetry_snapshot(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    notifications = config_data.get("notifications", {}) or {}
+    openclaw = config_data.get("openclaw", {}) or {}
+    feishu_channel = openclaw.get("feishu", {}) or {}
+    feishu_notify = notifications.get("feishu", {}) or {}
+    qq_notify = notifications.get("qq", {}) or {}
+
+    qq_target = str(qq_notify.get("binding_target") or "").strip()
+    qq_code = str(qq_notify.get("email_verification_code") or "").strip()
+    feishu_target = (
+        str(feishu_notify.get("recipient_chat_id") or "").strip()
+        if feishu_notify.get("recipient_type") == "chat_id"
+        else str(feishu_notify.get("recipient_open_id") or "").strip()
+    )
+
+    return {
+        "qq_enabled": bool(qq_notify.get("enabled")),
+        "qq_has_binding": bool(qq_target),
+        "qq_has_verification_code": bool(qq_code),
+        "feishu_enabled": bool(feishu_notify.get("enabled")),
+        "feishu_recipient_type": str(feishu_notify.get("recipient_type") or "open_id"),
+        "feishu_has_target": bool(feishu_target),
+        "feishu_has_app": bool(str(feishu_channel.get("app_id") or "").strip()) and bool(str(feishu_channel.get("app_secret") or "").strip()),
+        "feishu_deliver_full_report": bool(feishu_notify.get("deliver_full_report", True)),
+    }
 
 
 # ============ 根路径 & 健康检查 ============
@@ -114,6 +142,8 @@ async def get_system_config():
 async def update_system_config(payload: Dict[str, Any]):
     """更新系统配置（自动过滤角色系统动态注入的 live2d 模型路径，避免写入 config.json）"""
     try:
+        before_snapshot = get_config_snapshot()
+        before_notification = _notification_telemetry_snapshot(before_snapshot)
         # 过滤掉由角色系统动态注入的 model.source，避免将 localhost URL 持久化
         web_live2d = payload.get("web_live2d", {})
         model_block = web_live2d.get("model", {})
@@ -123,6 +153,17 @@ async def update_system_config(payload: Dict[str, Any]):
 
         success = update_config(payload)
         if success:
+            after_snapshot = get_config_snapshot()
+            after_notification = _notification_telemetry_snapshot(after_snapshot)
+            if after_notification != before_notification:
+                emit_telemetry(
+                    "notification_settings_updated",
+                    {
+                        "before": before_notification,
+                        "after": after_notification,
+                    },
+                    source="apiserver",
+                )
             return {"status": "success", "message": "配置更新成功"}
         else:
             raise HTTPException(status_code=500, detail="配置更新失败")

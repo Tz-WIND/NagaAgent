@@ -5,6 +5,7 @@ import ToastService from 'primevue/toastservice'
 import { createApp } from 'vue'
 
 import { createRouter, createWebHashHistory } from 'vue-router'
+import { initTelemetry } from '@/utils/telemetry'
 import App from './App.vue'
 import './style.css'
 import 'virtual:uno.css'
@@ -38,6 +39,8 @@ const router = createRouter({
     { path: '/float', component: () => import('@/views/FloatingView.vue') },
   ],
 })
+
+initTelemetry(router)
 
 createApp(App)
   .use(PrimeVue, {

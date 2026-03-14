@@ -45,8 +45,8 @@ const BACKGROUNDS_DIR = app.isPackaged
   ? resolve(process.resourcesPath, 'premium-assets', 'backgrounds')
   : resolve(dirname(fileURLToPath(import.meta.url)), '..', 'premium-assets', 'backgrounds')
 protocol.registerSchemesAsPrivileged([
-  { scheme: 'naga-char', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
-  { scheme: 'naga-bg', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  { scheme: 'naga-char', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true, stream: true } },
+  { scheme: 'naga-bg', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true, stream: true } },
   { scheme: 'naga-app', privileges: { secure: true, supportFetchAPI: true, corsEnabled: true, standard: true, stream: true } },
 ])
 

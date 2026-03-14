@@ -18,6 +18,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from system.config import config, add_config_listener
+from agentserver.telemetry_client import emit_local_telemetry
 from agentserver.openclaw import get_openclaw_client, set_openclaw_config
 from agentserver.openclaw.embedded_runtime import get_embedded_runtime, EmbeddedRuntime
 
@@ -544,11 +545,24 @@ async def create_agent(payload: Dict[str, Any]):
     name = payload.get("name")
     character_template = (payload.get("character_template") or payload.get("characterTemplate") or "").strip() or None
     engine = (payload.get("engine") or "openclaw").strip() or "openclaw"
+    telemetry_props = {
+        "engine": engine,
+        "name_length": len(str(name or "")),
+        "has_character_template": bool(character_template),
+    }
     try:
         inst = Modules.instance_manager.create_agent(
             name,
             character_template=character_template,
             engine=engine,
+        )
+        await emit_local_telemetry(
+            "agent_create",
+            {
+                **telemetry_props,
+                "created_agent_id": inst.id,
+            },
+            agent_id=inst.id,
         )
         return {
             "id": inst.id,
@@ -558,6 +572,13 @@ async def create_agent(payload: Dict[str, Any]):
             "engine": inst.engine,
         }
     except Exception as e:
+        await emit_local_telemetry(
+            "agent_create_fail",
+            {
+                **telemetry_props,
+                "error": e,
+            },
+        )
         logger.error(f"创建干员失败: {e}")
         raise HTTPException(500, f"创建失败: {e}")
 
@@ -604,6 +625,23 @@ async def update_agent_settings(agent_id: str, payload: Dict[str, Any]):
     if soul_content is not None:
         soul_content = str(soul_content)
 
+    telemetry_props = {
+        "changed_fields": sorted(
+            field
+            for field, changed in (
+                ("name", name is not None),
+                ("engine", engine is not None),
+                ("character_template", update_character_template),
+                ("soul_content", update_soul_content),
+            )
+            if changed
+        ),
+        "name_length": len(name or "") if name is not None else None,
+        "engine": engine,
+        "has_character_template": bool(character_template) if update_character_template else None,
+        "soul_content_chars": len(soul_content or "") if update_soul_content else None,
+    }
+
     try:
         settings = await Modules.instance_manager.update_agent_settings(
             agent_id,
@@ -615,13 +653,40 @@ async def update_agent_settings(agent_id: str, payload: Dict[str, Any]):
             update_soul_content=update_soul_content,
         )
     except ValueError as exc:
+        await emit_local_telemetry(
+            "agent_settings_update_fail",
+            {
+                **telemetry_props,
+                "error": str(exc),
+                "status_code": 400,
+            },
+            agent_id=agent_id,
+        )
         raise HTTPException(400, str(exc))
     except Exception as exc:
+        await emit_local_telemetry(
+            "agent_settings_update_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=agent_id,
+        )
         logger.error(f"更新干员设置失败: {exc}")
         raise HTTPException(500, f"更新失败: {exc}")
 
     if settings is None:
+        await emit_local_telemetry(
+            "agent_settings_update_fail",
+            {
+                **telemetry_props,
+                "status_code": 404,
+                "error": "干员不存在",
+            },
+            agent_id=agent_id,
+        )
         raise HTTPException(404, "干员不存在")
+    await emit_local_telemetry("agent_settings_update", telemetry_props, agent_id=agent_id)
     return settings
 
 
@@ -633,8 +698,23 @@ async def delete_agent(agent_id: str, delete_data: bool = True):
 
     try:
         await Modules.instance_manager.destroy_agent_async(agent_id, delete_data=delete_data)
+        await emit_local_telemetry(
+            "agent_delete",
+            {
+                "delete_data": bool(delete_data),
+            },
+            agent_id=agent_id,
+        )
         return {"success": True}
     except Exception as e:
+        await emit_local_telemetry(
+            "agent_delete_fail",
+            {
+                "delete_data": bool(delete_data),
+                "error": e,
+            },
+            agent_id=agent_id,
+        )
         logger.error(f"删除干员失败: {e}")
         raise HTTPException(500, f"删除失败: {e}")
 
@@ -646,10 +726,35 @@ async def rename_agent(agent_id: str, payload: Dict[str, Any]):
         raise HTTPException(503, "实例管理器未就绪")
     new_name = (payload.get("name") or "").strip()
     if not new_name:
+        await emit_local_telemetry(
+            "agent_rename_fail",
+            {
+                "name_length": 0,
+                "status_code": 400,
+                "error": "name 不能为空",
+            },
+            agent_id=agent_id,
+        )
         raise HTTPException(400, "name 不能为空")
     ok = Modules.instance_manager.rename_agent(agent_id, new_name)
     if not ok:
+        await emit_local_telemetry(
+            "agent_rename_fail",
+            {
+                "name_length": len(new_name),
+                "status_code": 404,
+                "error": "干员不存在",
+            },
+            agent_id=agent_id,
+        )
         raise HTTPException(404, "干员不存在")
+    await emit_local_telemetry(
+        "agent_rename",
+        {
+            "name_length": len(new_name),
+        },
+        agent_id=agent_id,
+    )
     return {"success": True, "name": new_name}
 
 
@@ -1523,6 +1628,28 @@ async def _run_travel_session(session_id: str):
     session.status = TravelStatus.RUNNING
     session.started_at = datetime.now().isoformat()
     save_session(session)
+    await emit_local_telemetry(
+        "explore_dispatch_agent",
+        {
+            "agent_name": session.agent_name,
+            "uses_dedicated_agent": bool(session.agent_id),
+            "time_limit_minutes": session.time_limit_minutes,
+            "credit_limit": session.credit_limit,
+        },
+        trace_id=f"travel:{session_id}",
+        session_id=session_id,
+        agent_id=session.agent_id,
+    )
+    await emit_local_telemetry(
+        "openclaw_task_created",
+        {
+            "openclaw_session_key": session_key,
+            "agent_name": session.agent_name,
+        },
+        trace_id=f"travel:{session_id}",
+        session_id=session_id,
+        agent_id=session.agent_id,
+    )
 
     logger.info(
         f"[旅行] 开始旅行 session: {session_id}, key={session_key}, "
@@ -1609,6 +1736,18 @@ async def _run_travel_session(session_id: str):
                     if key not in seen_social_keys:
                         seen_social_keys.add(key)
                 if len(session.discoveries) > previous_discovery_count:
+                    await emit_local_telemetry(
+                        "openclaw_discovery_added",
+                        {
+                            "new_discoveries": len(session.discoveries) - previous_discovery_count,
+                            "total_discoveries": len(session.discoveries),
+                            "unique_sources": session.unique_sources,
+                            "credits_used": session.credits_used,
+                        },
+                        trace_id=f"travel:{session_id}",
+                        session_id=session_id,
+                        agent_id=session.agent_id,
+                    )
                     session.idle_polls = 0
                 else:
                     session.idle_polls += 1
@@ -1636,6 +1775,18 @@ async def _run_travel_session(session_id: str):
                     session.wrap_up_sent = True
                     logger.info(
                         f"[旅行] 已发送收束指令: {session_id}, credits={session.credits_used}, idle={session.idle_polls}"
+                    )
+                    await emit_local_telemetry(
+                        "explore_wrap_up_requested",
+                        {
+                            "credits_used": session.credits_used,
+                            "credit_limit": session.credit_limit,
+                            "idle_polls": session.idle_polls,
+                            "discoveries": len(session.discoveries),
+                        },
+                        trace_id=f"travel:{session_id}",
+                        session_id=session_id,
+                        agent_id=session.agent_id,
                     )
                 except Exception as e:
                     logger.warning(f"[旅行] 发送收束指令失败: {e}")
@@ -1671,6 +1822,15 @@ async def _run_travel_session(session_id: str):
                 role = msg.get("role", "")
                 if role == "assistant":
                     session.summary = msg.get("content", "")[:2000]
+                    await emit_local_telemetry(
+                        "explore_summary_ready",
+                        {
+                            "summary_chars": len(session.summary or ""),
+                        },
+                        trace_id=f"travel:{session_id}",
+                        session_id=session_id,
+                        agent_id=session.agent_id,
+                    )
                     break
         except Exception as e:
             logger.warning(f"[旅行] 收尾指令失败: {e}")
@@ -1736,8 +1896,36 @@ async def _run_travel_session(session_id: str):
         try:
             session.notification_delivery_statuses = await deliver_travel_completion_notifications(session, travel_client)
             save_session(session)
+            for channel, status in session.notification_delivery_statuses.items():
+                await emit_local_telemetry(
+                    "notify_delivery_success" if not str(status).startswith("failed:") else "notify_delivery_fail",
+                    {
+                        "channel": channel,
+                        "status": status,
+                    },
+                    trace_id=f"travel:{session_id}",
+                    session_id=session_id,
+                    agent_id=session.agent_id,
+                )
         except Exception as e:
             logger.warning(f"[旅行] 完成通知发送失败: {e}")
+
+        await emit_local_telemetry(
+            "explore_finish",
+            {
+                "discoveries": len(session.discoveries),
+                "social_interactions": len(session.social_interactions),
+                "credits_used": session.credits_used,
+                "elapsed_minutes": session.elapsed_minutes,
+                "unique_sources": session.unique_sources,
+                "forum_post_status": session.forum_post_status,
+                "full_report_delivery_status": session.full_report_delivery_status,
+                "notification_delivery_statuses": session.notification_delivery_statuses,
+            },
+            trace_id=f"travel:{session_id}",
+            session_id=session_id,
+            agent_id=session.agent_id,
+        )
 
     except Exception as e:
         logger.error(f"[旅行] 异常: {e}", exc_info=True)
@@ -1747,6 +1935,17 @@ async def _run_travel_session(session_id: str):
             session.error = str(e)
             session.completed_at = datetime.now().isoformat()
             save_session(session)
+            await emit_local_telemetry(
+                "explore_fail",
+                {
+                    "error": e,
+                    "discoveries": len(session.discoveries),
+                    "credits_used": session.credits_used,
+                },
+                trace_id=f"travel:{session_id}",
+                session_id=session_id,
+                agent_id=session.agent_id,
+            )
         except Exception:
             pass
 

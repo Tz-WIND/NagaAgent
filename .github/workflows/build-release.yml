@@ -49,66 +49,9 @@ jobs:
         with:
           version: 'latest'
 
-      # ---------- Backend: PyInstaller ----------
-      - name: Install Python dependencies
+      - name: Build backend and packaged runtime
         shell: bash
-        run: |
-          uv pip compile pyproject.toml --no-header -o _requirements.txt
-          uv pip install --system -r _requirements.txt pyinstaller
-
-      - name: Compile backend with PyInstaller
-        run: pyinstaller naga-backend.spec --noconfirm
-
-      - name: Prepare backend-dist
-        shell: bash
-        run: |
-          mkdir -p frontend/backend-dist
-          cp -r dist/naga-backend frontend/backend-dist/
-
-      # ---------- OpenClaw runtime (Windows only) ----------
-      - name: Setup OpenClaw runtime
-        if: matrix.platform == 'win'
-        shell: bash
-        run: |
-          RUNTIME_DIR="frontend/backend-dist/runtime"
-          NODE_DIR="$RUNTIME_DIR/node"
-          OPENCLAW_DIR="$RUNTIME_DIR/openclaw"
-          UV_DIR="$RUNTIME_DIR/uv"
-
-          # 1. 下载 Node.js 便携版
-          mkdir -p "$NODE_DIR"
-          curl -L -o node.zip "https://nodejs.org/dist/v22.13.1/node-v22.13.1-win-x64.zip"
-          unzip -q node.zip -d _node_tmp
-          mv _node_tmp/node-v22.13.1-win-x64/* "$NODE_DIR/"
-          rm -rf _node_tmp node.zip
-
-          # 2. 编译 vendor/openclaw 源码
-          echo "Compiling vendor/openclaw from source..."
-          cd "$GITHUB_WORKSPACE/vendor/openclaw"
-          npm install --ignore-scripts 2>/dev/null || npm install
-          NODE_OPTIONS="--max-old-space-size=4096" npx tsc -p tsconfig.naga.json 2>&1 | grep -v "error TS" || true
-          # 验证核心文件
-          test -f dist/gateway/server.js || { echo "FATAL: dist/gateway/server.js missing"; exit 1; }
-          cd "$GITHUB_WORKSPACE"
-
-          # 3. 复制编译产物 + 依赖到 runtime
-          mkdir -p "$OPENCLAW_DIR"
-          cp -r vendor/openclaw/dist "$OPENCLAW_DIR/dist"
-          cp -r vendor/openclaw/node_modules "$OPENCLAW_DIR/node_modules"
-          cp vendor/openclaw/package.json "$OPENCLAW_DIR/package.json"
-          cp vendor/openclaw/openclaw.mjs "$OPENCLAW_DIR/openclaw.mjs"
-          cp agentserver/openclaw/gateway_start.mjs "$OPENCLAW_DIR/gateway_start.mjs"
-          echo "OpenClaw runtime prepared (from source)"
-
-          # 4. 下载 uv standalone（用于 MCP uvx 服务）
-          mkdir -p "$UV_DIR"
-          curl -L -o uv.zip "https://github.com/astral-sh/uv/releases/download/0.6.6/uv-x86_64-pc-windows-msvc.zip"
-          unzip -q uv.zip -d _uv_tmp
-          mv _uv_tmp/uv.exe "$UV_DIR/" 2>/dev/null || mv _uv_tmp/*/uv.exe "$UV_DIR/" 2>/dev/null || true
-          mv _uv_tmp/uvx.exe "$UV_DIR/" 2>/dev/null || mv _uv_tmp/*/uvx.exe "$UV_DIR/" 2>/dev/null || true
-          rm -rf _uv_tmp uv.zip
-          echo "Runtime prepared:"
-          ls -la "$RUNTIME_DIR/"
+        run: python build.py --backend-only --force-openclaw
 
       # ---------- Frontend: electron-builder (build only, no publish) ----------
       - name: Install frontend dependencies

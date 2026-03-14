@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response, JSONResponse
 
 from apiserver import naga_auth
+from apiserver.telemetry import emit_telemetry
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,14 @@ async def auth_login(body: dict):
         raise HTTPException(status_code=400, detail="用户名和密码不能为空")
     try:
         result = await naga_auth.login(username, password, captcha_id, captcha_answer)
+        emit_telemetry(
+            "login_success",
+            {
+                "username_length": len(username),
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
         return result
     except Exception as e:
         import httpx
@@ -40,6 +49,16 @@ async def auth_login(body: dict):
             except Exception:
                 detail = e.response.text
         logger.error(f"登录失败 [{status}]: {detail}")
+        emit_telemetry(
+            "login_fail",
+            {
+                "status_code": status,
+                "error": detail,
+                "username_length": len(username),
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
         raise HTTPException(status_code=status, detail=detail)
 
 
@@ -82,6 +101,14 @@ async def auth_register(body: dict):
         raise HTTPException(status_code=400, detail="用户名、邮箱、密码和验证码不能为空")
     try:
         result = await naga_auth.register(username, email, password, verification_code)
+        emit_telemetry(
+            "register_success",
+            {
+                "username_length": len(username),
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+            },
+            source="apiserver",
+        )
         return {"success": True, **result}
     except Exception as e:
         import httpx
@@ -95,6 +122,16 @@ async def auth_register(body: dict):
             except Exception:
                 detail = e.response.text
         logger.error(f"注册失败 [{status}]: {detail}")
+        emit_telemetry(
+            "register_fail",
+            {
+                "status_code": status,
+                "error": detail,
+                "username_length": len(username),
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+            },
+            source="apiserver",
+        )
         raise HTTPException(status_code=status, detail=detail)
 
 
@@ -119,7 +156,16 @@ async def auth_send_verification(body: dict):
     if not email or not username:
         raise HTTPException(status_code=400, detail="邮箱和用户名不能为空")
     try:
-        result = await naga_auth.send_verification(email, username, captcha_id, captcha_answer)
+        await naga_auth.send_verification(email, username, captcha_id, captcha_answer)
+        emit_telemetry(
+            "register_verification_sent",
+            {
+                "username_length": len(username),
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
         return {"success": True, "message": "验证码已发送"}
     except Exception as e:
         import httpx
@@ -133,6 +179,17 @@ async def auth_send_verification(body: dict):
             except Exception:
                 detail = e.response.text
         logger.error(f"发送验证码失败 [{status}]: {detail}")
+        emit_telemetry(
+            "register_verification_fail",
+            {
+                "status_code": status,
+                "error": detail,
+                "username_length": len(username),
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
         raise HTTPException(status_code=status, detail=detail)
 
 
