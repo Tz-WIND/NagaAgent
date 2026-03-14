@@ -606,6 +606,19 @@ class NagaBusinessConfig(BaseModel):
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 
+class TelemetryConfig(BaseModel):
+    """隐私统计埋点配置。"""
+
+    enabled: bool = Field(default=True, description="是否启用本地埋点采集")
+    upload_enabled: bool = Field(default=True, description="是否启用批量上报")
+    upload_url: str = Field(default="", description="埋点批量上报地址；留空时自动拼接 NagaBusiness 地址")
+    flush_interval_seconds: int = Field(default=60, ge=5, le=3600, description="后台批量上报间隔（秒）")
+    upload_timeout_seconds: int = Field(default=10, ge=3, le=120, description="单次上报超时（秒）")
+    batch_size: int = Field(default=50, ge=1, le=500, description="每次最多上传的事件数")
+    max_queue_events: int = Field(default=5000, ge=100, le=50000, description="本地队列最多保留的事件数")
+    max_queue_bytes: int = Field(default=8 * 1024 * 1024, ge=1024 * 1024, le=128 * 1024 * 1024, description="本地队列最大字节数")
+
+
 class FeishuNotificationConfig(BaseModel):
     """飞书通知默认配置。"""
 
@@ -620,7 +633,10 @@ class QQNotificationConfig(BaseModel):
     """QQ群机器人通知默认配置。"""
 
     enabled: bool = Field(default=False, description="是否启用 QQ 通知")
-    user_qq: str = Field(default="", description="默认被 @ 的 QQ 号")
+    binding_target: str = Field(default="", description="用户填写的 QQ 号或 QQ 邮箱")
+    user_qq: str = Field(default="", description="归一化后的纯数字 QQ 号")
+    qq_email: str = Field(default="", description="归一化后的纯数字 QQ 邮箱")
+    email_verification_code: str = Field(default="", description="QQ 邮箱验证码")
 
 
 class NotificationsConfig(BaseModel):
@@ -1166,6 +1182,7 @@ class NagaConfig(BaseModel):
     openclaw: OpenClawConfig = Field(default_factory=OpenClawConfig)
     notifications: NotificationsConfig = Field(default_factory=NotificationsConfig)
     naga_business: NagaBusinessConfig = Field(default_factory=NagaBusinessConfig)
+    telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     system_check: SystemCheckConfig = Field(default_factory=SystemCheckConfig)
     computer_control: ComputerControlConfig = Field(default_factory=ComputerControlConfig)
     guide_engine: GuideEngineConfig = Field(default_factory=GuideEngineConfig)

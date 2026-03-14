@@ -5,6 +5,7 @@ import Dialog from 'primevue/dialog'
 import { computed, ref, watch } from 'vue'
 import ConfigItem from '@/components/ConfigItem.vue'
 import { CONFIG } from '@/utils/config'
+import { hasQqEmailVerificationCode, parseQqBindingTarget } from '@/utils/qqNotification'
 
 const FEISHU_TARGET_OPTIONS = [
   { label: '发给个人', value: 'open_id' },
@@ -51,10 +52,26 @@ const feishuStatusText = computed(() => {
   return '关闭时仅在应用内保留探索结果，不会向飞书回传。'
 })
 
-const qqValue = computed(() => CONFIG.value.notifications.qq.user_qq.trim())
-const qqNumberValid = computed(() => /^\d+$/.test(qqValue.value))
+const qqBindingTarget = computed({
+  get() {
+    return CONFIG.value.notifications.qq.binding_target
+  },
+  set(value: string) {
+    CONFIG.value.notifications.qq.binding_target = value
+  },
+})
+const qqBinding = computed(() => parseQqBindingTarget(qqBindingTarget.value))
+const qqNumberValid = computed(() => qqBinding.value.isValid)
+const qqVerificationVisible = computed(() => !qqBinding.value.isEmpty)
+const qqVerificationReady = computed(() => hasQqEmailVerificationCode(CONFIG.value.notifications.qq.email_verification_code))
 const qqConfigured = computed(() => {
-  return CONFIG.value.notifications.qq.enabled && qqNumberValid.value
+  return CONFIG.value.notifications.qq.enabled && qqNumberValid.value && qqVerificationReady.value
+})
+const qqVerificationHint = computed(() => {
+  if (!qqBinding.value.isValid) {
+    return '只有纯数字 QQ 号或纯数字@qq.com 才会通过客户端校验。'
+  }
+  return `将按 ${qqBinding.value.normalizedEmail} 验证 QQ 邮箱。`
 })
 
 const qqStatusText = computed(() => {
@@ -62,16 +79,19 @@ const qqStatusText = computed(() => {
   if (!qq.enabled) {
     return '关闭时仅在应用内保留探索结果，不会向 QQ 机器人发送回调。'
   }
-  if (!qqValue.value) {
-    return '填好你的 QQ 号后，探索完成会自动走 QQ 机器人回调。'
+  if (qqBinding.value.isEmpty) {
+    return '填好纯数字 QQ 号或纯数字@qq.com 后，再填写邮箱验证码，探索完成才会自动走 QQ 机器人回调。'
   }
   if (!qqNumberValid.value) {
-    return 'QQ 号需要填写纯数字，当前内容不会生效。'
+    return qqBinding.value.errorMessage
+  }
+  if (!qqVerificationReady.value) {
+    return `QQ 绑定目标已识别为 ${qqBinding.value.normalizedQq}，还需要填写 ${qqBinding.value.normalizedEmail} 收到的验证码。`
   }
   if (qqConfigured.value) {
-    return `探索完成后会通过 Undefined QQ机器人在群里 @${qqValue.value}。群号由服务器侧绑定关系决定。`
+    return `探索完成后会通过 Undefined QQ机器人在群里 @${qqBinding.value.normalizedQq}。群号由服务器侧绑定关系决定。`
   }
-  return '填好你的 QQ 号后，探索完成会自动走 QQ 机器人回调。'
+  return '填好 QQ 绑定信息后，探索完成会自动走 QQ 机器人回调。'
 })
 
 const tutorialTitle = computed(() => {
@@ -88,6 +108,26 @@ function openTutorial(kind: 'feishu' | 'qq') {
 
 watch(() => CONFIG.value.notifications.feishu.enabled, (enabled) => {
   CONFIG.value.openclaw.feishu.enabled = enabled
+}, { immediate: true })
+
+watch(qqBinding, (next, prev) => {
+  const qq = CONFIG.value.notifications.qq
+  qq.user_qq = next.isValid ? next.normalizedQq : ''
+  qq.qq_email = next.isValid ? next.normalizedEmail : ''
+
+  if (next.isEmpty) {
+    qq.email_verification_code = ''
+    return
+  }
+
+  if (!next.isValid) {
+    qq.email_verification_code = ''
+    return
+  }
+
+  if (prev && prev.normalizedEmail !== next.normalizedEmail) {
+    qq.email_verification_code = ''
+  }
 }, { immediate: true })
 </script>
 
@@ -130,11 +170,18 @@ watch(() => CONFIG.value.notifications.feishu.enabled, (enabled) => {
             Undefined QQ机器人
           </div>
         </ConfigItem>
-        <ConfigItem name="你的 QQ 号" description="机器人收到探索结果后，会在群里自动 @ 这个账号">
-          <InputText v-model="CONFIG.notifications.qq.user_qq" placeholder="填写 QQ 号数字" />
+        <ConfigItem name="你的 QQ 号 / QQ 邮箱" description="支持纯数字 QQ 号或纯数字@qq.com，别名邮箱不支持">
+          <InputText v-model="qqBindingTarget" placeholder="填写纯数字 QQ 号或纯数字@qq.com" />
         </ConfigItem>
-        <div v-if="qqValue && !qqNumberValid" class="notification-warning">
-          请输入纯数字 QQ 号。
+        <ConfigItem v-if="qqVerificationVisible" name="邮箱验证码" :description="qqVerificationHint">
+          <InputText
+            v-model="CONFIG.notifications.qq.email_verification_code"
+            :disabled="!qqNumberValid"
+            placeholder="填写 QQ 邮箱收到的验证码"
+          />
+        </ConfigItem>
+        <div v-if="qqBindingTarget && !qqNumberValid" class="notification-warning">
+          {{ qqBinding.errorMessage }}
         </div>
         <div class="notification-note">
           {{ qqStatusText }}
@@ -236,21 +283,32 @@ watch(() => CONFIG.value.notifications.feishu.enabled, (enabled) => {
 
       <div v-else-if="activeTutorial === 'qq'" class="tutorial-content">
         <section>
-          <h4>1. 你只需要填 QQ 号</h4>
+          <h4>1. 先填 QQ 号或 QQ 邮箱</h4>
           <p>QQ 通知已经固定走 Undefined QQ机器人，本地不需要再填服务地址、群号、模板或 token。</p>
+          <p>这里只支持两种格式：纯数字 QQ 号，或纯数字@qq.com。</p>
+          <p>如果你的 QQ 邮箱开了别名，别名地址不能用，必须回到纯数字@qq.com。</p>
         </section>
 
         <section>
-          <h4>2. 服务器会处理群路由</h4>
+          <h4>2. 再填邮箱验证码</h4>
           <ul>
-            <li>你在设置里只要填自己的 QQ 号。</li>
+            <li>填入 QQ 号后，会按 `QQ号@qq.com` 做邮箱验证。</li>
+            <li>填入 QQ 邮箱后，只接受纯数字@qq.com。</li>
+            <li>验证码会跟绑定信息一起上传，客户端会先做一轮格式校验。</li>
+          </ul>
+        </section>
+
+        <section>
+          <h4>3. 服务器会处理群路由</h4>
+          <ul>
+            <li>你在设置里只要填自己的 QQ 绑定信息和验证码。</li>
             <li>探索完成后，服务器会根据绑定关系决定发到哪个群。</li>
             <li>群里的机器人会自动 `@` 你，不需要客户端自己处理群号。</li>
           </ul>
         </section>
 
         <section>
-          <h4>3. 真正发送时会发生什么</h4>
+          <h4>4. 真正发送时会发生什么</h4>
           <p>Naga 本地只会上报“这个账号的探索完成了”和“目标 QQ 号”。</p>
           <p>剩下的分发、群内 @ 和机器人发送，全都由服务器和 Undefined QQ机器人完成。</p>
         </section>

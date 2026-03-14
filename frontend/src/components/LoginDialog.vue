@@ -5,6 +5,7 @@ import { useToast } from 'primevue/usetoast'
 import { ref, watch } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import { backendConnected } from '@/utils/config'
+import { trackTelemetry } from '@/utils/telemetry'
 import UserAgreement from './UserAgreement.vue'
 
 const props = defineProps<{ visible: boolean }>()
@@ -201,6 +202,9 @@ async function sendCode() {
 }
 
 function handleSkip() {
+  trackTelemetry('login_skip', {
+    mode: mode.value,
+  })
   window.open('https://github.com/RTGS2017/NagaAgent.git', '_blank')
 }
 
@@ -211,6 +215,10 @@ function openForgotPassword() {
 // 弹窗打开时重置到登录模式并加载验证码
 watch(() => props.visible, (v) => {
   if (v) {
+    trackTelemetry('login_dialog_open', {
+      mode: mode.value,
+      agreementAccepted: agreementAccepted.value,
+    })
     mode.value = 'login'
     resetForm()
     if (backendConnected.value) {

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import threading
+import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +35,7 @@ from apiserver import naga_auth
 from apiserver.message_manager import message_manager
 from apiserver.llm_service import get_llm_service
 from apiserver.response_util import extract_message
+from apiserver.telemetry import emit_telemetry
 from apiserver.api_server import (
     ChatRequest,
     ChatResponse,
@@ -216,6 +218,20 @@ async def relay_agent_message(request: AgentRelayRequest):
 
     relay_message = _compose_relay_message(request, target.name)
     relay_session = request.session_id or _build_relay_session_key(request.source_agent_id, target.id)
+    emit_telemetry(
+        "agent_relay_request",
+        {
+            "target_engine": target.engine,
+            "wait_for_reply": request.wait_for_reply,
+            "timeout_seconds": request.timeout_seconds,
+            "has_context": bool(request.context),
+            "has_source_agent": bool(request.source_agent_id),
+        },
+        source="apiserver",
+        session_id=relay_session,
+        agent_id=target.id,
+        trace_id=f"relay:{relay_session}",
+    )
 
     if target.id == BUILTIN_NAGA_AGENT_ID or target.engine in NAGA_CORE_ENGINES:
         result = await _relay_to_naga_core(
@@ -230,6 +246,19 @@ async def relay_agent_message(request: AgentRelayRequest):
             relay_session,
             max(5, min(request.timeout_seconds, 600)),
         )
+
+    emit_telemetry(
+        "agent_relay_success" if result.get("success") else "agent_relay_fail",
+        {
+            "target_engine": target.engine,
+            "runtime": result.get("runtime"),
+            "error": result.get("error"),
+        },
+        source="apiserver",
+        session_id=relay_session,
+        agent_id=target.id,
+        trace_id=f"relay:{relay_session}",
+    )
 
     return {
         "status": "success" if result.get("success") else "error",
@@ -544,6 +573,8 @@ async def chat(request: ChatRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="消息内容不能为空")
 
+    t_started = time.monotonic()
+    session_id: str | None = None
     try:
         # 更新ProactiveVision的用户活动时间
         asyncio.create_task(_update_proactive_activity_silent())
@@ -556,6 +587,20 @@ async def chat(request: ChatRequest):
             skill_labels = "，".join(f"【{s.strip()}】" for s in request.skill.split(",") if s.strip())
             user_message = f"调度技能{skill_labels}：{user_message}"
         session_id = message_manager.create_session(request.session_id, temporary=request.temporary)
+        emit_telemetry(
+            "chat_send",
+            {
+                "mode": "non_stream",
+                "temporary": request.temporary,
+                "has_images": bool(request.images),
+                "skill_selected": bool(request.skill),
+                "skill_count": len([s for s in (request.skill or "").split(",") if s.strip()]),
+            },
+            source="apiserver",
+            session_id=session_id,
+            agent_id=request.agent_id,
+            trace_id=f"chat:{session_id}",
+        )
 
         # 系统提示词 = 纯人格
         system_prompt = agent_ctx.system_prompt if agent_ctx else build_system_prompt()
@@ -616,6 +661,19 @@ async def chat(request: ChatRequest):
         # 处理完成
         # 统一保存对话历史与日志
         _save_conversation_and_logs(session_id, user_message, llm_response.content)
+        emit_telemetry(
+            "chat_finish",
+            {
+                "mode": "non_stream",
+                "duration_ms": int((time.monotonic() - t_started) * 1000),
+                "response_chars": len(llm_response.content or ""),
+                "reasoning_chars": len(llm_response.reasoning_content or ""),
+            },
+            source="apiserver",
+            session_id=session_id,
+            agent_id=request.agent_id,
+            trace_id=f"chat:{session_id}",
+        )
 
         return ChatResponse(
             response=extract_message(llm_response.content) if llm_response.content else llm_response.content,
@@ -626,6 +684,18 @@ async def chat(request: ChatRequest):
     except Exception as e:
         print(f"对话处理错误: {e}")
         traceback.print_exc()
+        emit_telemetry(
+            "chat_error",
+            {
+                "mode": "non_stream",
+                "duration_ms": int((time.monotonic() - t_started) * 1000),
+                "error": e,
+            },
+            source="apiserver",
+            session_id=session_id,
+            agent_id=request.agent_id,
+            trace_id=f"chat:{session_id}" if session_id else None,
+        )
         raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
 
 
@@ -645,6 +715,8 @@ async def chat_stream(request: ChatRequest):
     async def generate_response() -> AsyncGenerator[str, None]:
         complete_text = ""  # 用于累积最终轮的完整文本（供 return_audio 模式使用）
         _mq_initialized = False  # 标记消息队列是否已设置 active
+        session_id: str | None = None
+        first_response_sent = False
         try:
             import time as _time
             t_api_start = _time.monotonic()
@@ -652,6 +724,20 @@ async def chat_stream(request: ChatRequest):
 
             # 获取或创建会话ID
             session_id = message_manager.create_session(request.session_id, temporary=request.temporary)
+            emit_telemetry(
+                "chat_send",
+                {
+                    "mode": "stream",
+                    "temporary": request.temporary,
+                    "has_images": bool(request.images),
+                    "skill_selected": bool(request.skill),
+                    "skill_count": len([s for s in (request.skill or "").split(",") if s.strip()]),
+                },
+                source="apiserver",
+                session_id=session_id,
+                agent_id=request.agent_id,
+                trace_id=f"chat:{session_id}",
+            )
 
             # ★ 通知对话开始 + 设置消息队列状态
             from apiserver.message_queue import get_message_queue
@@ -875,11 +961,39 @@ async def chat_stream(request: ChatRequest):
                                 current_round_text += chunk_text
                                 if request.return_audio:
                                     complete_text += chunk_text
+                                if chunk_text and not first_response_sent:
+                                    first_response_sent = True
+                                    emit_telemetry(
+                                        "chat_first_token",
+                                        {
+                                            "mode": "stream",
+                                            "first_response_ms": int((_time.monotonic() - t_api_start) * 1000),
+                                            "kind": "content",
+                                        },
+                                        source="apiserver",
+                                        session_id=session_id,
+                                        agent_id=request.agent_id,
+                                        trace_id=f"chat:{session_id}",
+                                    )
                                 # TTS：每轮的正常content都发送（不含工具内容）
                                 if tool_extractor and not is_tool_event:
                                     asyncio.create_task(tool_extractor.process_text_chunk(chunk_text))
                             elif chunk_type == "reasoning":
                                 complete_reasoning += chunk_text
+                                if chunk_text and not first_response_sent:
+                                    first_response_sent = True
+                                    emit_telemetry(
+                                        "chat_first_token",
+                                        {
+                                            "mode": "stream",
+                                            "first_response_ms": int((_time.monotonic() - t_api_start) * 1000),
+                                            "kind": "reasoning",
+                                        },
+                                        source="apiserver",
+                                        session_id=session_id,
+                                        agent_id=request.agent_id,
+                                        trace_id=f"chat:{session_id}",
+                                    )
                             elif chunk_type == "round_end":
                                 # 每轮结束时，完成TTS处理并重置
                                 has_more = chunk_data.get("has_more", False)
@@ -915,6 +1029,20 @@ async def chat_stream(request: ChatRequest):
                             elif chunk_type == "tool_calls":
                                 is_tool_event = True
                                 had_tool_events = True
+                                if chunk_data.get("calls") and not first_response_sent:
+                                    first_response_sent = True
+                                    emit_telemetry(
+                                        "chat_first_token",
+                                        {
+                                            "mode": "stream",
+                                            "first_response_ms": int((_time.monotonic() - t_api_start) * 1000),
+                                            "kind": "tool_calls",
+                                        },
+                                        source="apiserver",
+                                        session_id=session_id,
+                                        agent_id=request.agent_id,
+                                        trace_id=f"chat:{session_id}",
+                                    )
                                 for call in chunk_data.get("calls", []):
                                     svc = call.get("service_name") or call.get("agentType") or "tool"
                                     tn = call.get("tool_name") or ""
@@ -1015,6 +1143,20 @@ async def chat_stream(request: ChatRequest):
 
             # 统一保存对话历史与日志
             _save_conversation_and_logs(session_id, user_message, complete_response)
+            emit_telemetry(
+                "chat_finish",
+                {
+                    "mode": "stream",
+                    "duration_ms": int((_time.monotonic() - t_api_start) * 1000),
+                    "response_chars": len(complete_response or ""),
+                    "reasoning_chars": len(complete_reasoning or ""),
+                    "had_tool_events": had_tool_events,
+                },
+                source="apiserver",
+                session_id=session_id,
+                agent_id=request.agent_id,
+                trace_id=f"chat:{session_id}",
+            )
 
             # ★ 通知对话结束 + 设置消息队列状态
             mq.set_conversation_active(False)
@@ -1030,6 +1172,17 @@ async def chat_stream(request: ChatRequest):
         except Exception as e:
             print(f"流式对话处理错误: {e}")
             traceback.print_exc()
+            emit_telemetry(
+                "chat_error",
+                {
+                    "mode": "stream",
+                    "error": e,
+                },
+                source="apiserver",
+                session_id=session_id,
+                agent_id=request.agent_id,
+                trace_id=f"chat:{session_id}" if session_id else None,
+            )
             yield f"data: error:{str(e)}\n\n"
         finally:
             # ★ 确保对话结束事件一定触发，即使异常/客户端断开

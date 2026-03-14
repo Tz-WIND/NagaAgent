@@ -22,6 +22,7 @@ import yaml
 from system.config import get_config, get_data_dir
 from apiserver import naga_auth
 from apiserver.api_server import _call_agentserver, FileUploadResponse
+from apiserver.telemetry import emit_telemetry
 from agentserver.openclaw.state_paths import get_openclaw_config_path, get_openclaw_state_dir
 
 logger = logging.getLogger(__name__)
@@ -414,6 +415,27 @@ def _get_market_items_status() -> Dict[str, Any]:
 # ============ OpenClaw 技能市场端点 ============
 
 
+def _telemetry_config_keys(config: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(config, dict):
+        return []
+    keys = [str(key)[:80] for key in config.keys() if not str(key).startswith("_")]
+    return sorted(keys)[:32]
+
+
+def _emit_extensions_telemetry(
+    event: str,
+    props: Dict[str, Any],
+    *,
+    agent_id: Optional[str] = None,
+) -> None:
+    emit_telemetry(
+        event,
+        props,
+        source="apiserver",
+        agent_id=agent_id,
+    )
+
+
 @router.get("/openclaw/market/items")
 def list_openclaw_market_items():
     """获取OpenClaw技能市场条目（同步端点，由 FastAPI 在线程池中执行）"""
@@ -441,6 +463,12 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
     if not skill_name_value:
         raise HTTPException(status_code=500, detail="技能名称缺失")
     skill_name = str(skill_name_value)
+    telemetry_props = {
+        "item_id": item_id,
+        "skill_name": skill_name,
+        "install_type": install_type,
+        "has_payload": bool(payload),
+    }
 
     try:
         if install_type == "remote_skill":
@@ -466,15 +494,37 @@ def install_openclaw_market_item(item_id: str, payload: Optional[Dict[str, Any]]
             if payload and isinstance(payload, dict):
                 api_key = payload.get("api_key") or payload.get("FIRECRAWL_API_KEY")
             _update_mcporter_firecrawl_config(api_key)
-    except HTTPException:
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "market_item_install_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+        )
         raise
     except Exception as e:
+        _emit_extensions_telemetry(
+            "market_item_install_fail",
+            {
+                **telemetry_props,
+                "error": e,
+            },
+        )
         logger.error(f"安装技能失败({item_id}): {e}")
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"安装失败: {str(e)}")
 
     status = _get_market_items_status()
     installed_item = next((entry for entry in status.get("items", []) if entry.get("id") == item_id), None)
+    _emit_extensions_telemetry(
+        "market_item_install_success",
+        {
+            **telemetry_props,
+            "installed": bool(installed_item and installed_item.get("installed")),
+        },
+    )
     return {
         "status": "success",
         "message": "安装完成",
@@ -725,73 +775,168 @@ class McpImportRequest(BaseModel):
 @router.post("/mcp/import")
 async def import_mcp_config(request: McpImportRequest):
     """将 MCP JSON 配置写入 ~/.mcporter/config.json"""
+    telemetry_props = {
+        "name": request.name,
+        "scope": request.scope,
+        "agent_id": request.agent_id,
+        "config_keys": _telemetry_config_keys(request.config),
+        "has_display_name": bool((request.display_name or "").strip()),
+        "has_description": bool((request.description or "").strip()),
+    }
     MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
-    mcporter_config = _load_mcporter_config()
-    servers = mcporter_config.setdefault("mcpServers", {})
-    scope = _normalize_mcp_scope(request.scope, strict=True)
-    agent_id = (request.agent_id or "").strip() or None
-    if scope == "private":
-        if not agent_id:
-            raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
-        if not _get_agent_record(agent_id):
-            raise HTTPException(status_code=404, detail="目标干员不存在")
-    servers[request.name] = _attach_mcp_meta(
-        request.config,
-        display_name=request.display_name,
-        description=request.description,
-        scope=scope,
-        agent_id=agent_id,
-    )
-    mcporter_config["mcpServers"] = servers
-    MCPORTER_CONFIG_PATH.write_text(
-        json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    try:
+        mcporter_config = _load_mcporter_config()
+        servers = mcporter_config.setdefault("mcpServers", {})
+        scope = _normalize_mcp_scope(request.scope, strict=True)
+        agent_id = (request.agent_id or "").strip() or None
+        if scope == "private":
+            if not agent_id:
+                raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
+            if not _get_agent_record(agent_id):
+                raise HTTPException(status_code=404, detail="目标干员不存在")
+        telemetry_props["scope"] = scope
+        telemetry_props["agent_id"] = agent_id
+        servers[request.name] = _attach_mcp_meta(
+            request.config,
+            display_name=request.display_name,
+            description=request.description,
+            scope=scope,
+            agent_id=agent_id,
+        )
+        mcporter_config["mcpServers"] = servers
+        MCPORTER_CONFIG_PATH.write_text(
+            json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "mcp_import_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "mcp_import_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    _emit_extensions_telemetry("mcp_import_success", telemetry_props, agent_id=agent_id)
     return {"status": "success", "message": f"已添加 MCP 服务: {request.name}"}
 
 
 @router.put("/mcp/services/{name}")
 async def update_mcp_service(name: str, body: Dict[str, Any]):
     """更新 MCP 服务配置（支持 config / displayName / description / enabled）"""
-    mcporter_config = _load_mcporter_config()
-    servers = mcporter_config.get("mcpServers", {})
-    if name not in servers:
-        raise HTTPException(status_code=404, detail=f"MCP 服务 {name} 不存在")
-    if "config" in body:
-        # 替换整个配置（但保留 meta 字段）
-        meta_keys = {"_displayName", "_description", "_disabled", "_scope", "_ownerAgentId"}
-        old_meta = {k: v for k, v in servers[name].items() if k in meta_keys}
-        servers[name] = {**body["config"], **old_meta}
-    if "displayName" in body:
-        servers[name]["_displayName"] = body["displayName"]
-    if "description" in body:
-        servers[name]["_description"] = body["description"]
-    if "enabled" in body:
-        if body["enabled"]:
-            servers[name].pop("_disabled", None)
-        else:
-            servers[name]["_disabled"] = True
-    mcporter_config["mcpServers"] = servers
-    MCPORTER_CONFIG_PATH.write_text(
-        json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    telemetry_props = {
+        "name": name,
+        "changed_fields": sorted(
+            field for field in ("config", "displayName", "description", "enabled") if field in body
+        ),
+        "config_keys": _telemetry_config_keys(body.get("config")),
+    }
+    try:
+        mcporter_config = _load_mcporter_config()
+        servers = mcporter_config.get("mcpServers", {})
+        if name not in servers:
+            raise HTTPException(status_code=404, detail=f"MCP 服务 {name} 不存在")
+        existing = servers[name]
+        telemetry_props["scope"] = _normalize_mcp_scope(existing.get("_scope"))
+        telemetry_props["agent_id"] = str(existing.get("_ownerAgentId") or "").strip() or None
+        if "config" in body:
+            # 替换整个配置（但保留 meta 字段）
+            meta_keys = {"_displayName", "_description", "_disabled", "_scope", "_ownerAgentId"}
+            old_meta = {k: v for k, v in existing.items() if k in meta_keys}
+            servers[name] = {**body["config"], **old_meta}
+            existing = servers[name]
+        if "displayName" in body:
+            existing["_displayName"] = body["displayName"]
+        if "description" in body:
+            existing["_description"] = body["description"]
+        if "enabled" in body:
+            if body["enabled"]:
+                existing.pop("_disabled", None)
+            else:
+                existing["_disabled"] = True
+        mcporter_config["mcpServers"] = servers
+        MCPORTER_CONFIG_PATH.write_text(
+            json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "mcp_service_update_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=telemetry_props.get("agent_id"),
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "mcp_service_update_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=telemetry_props.get("agent_id"),
+        )
+        raise
+    _emit_extensions_telemetry("mcp_service_update", telemetry_props, agent_id=telemetry_props.get("agent_id"))
     return {"status": "success", "message": f"已更新 MCP 服务: {name}"}
 
 
 @router.delete("/mcp/services/{name}")
 async def delete_mcp_service(name: str):
     """删除外部 MCP 服务配置"""
-    mcporter_config = _load_mcporter_config()
-    servers = mcporter_config.get("mcpServers", {})
-    if name not in servers:
-        raise HTTPException(status_code=404, detail=f"MCP 服务 {name} 不存在")
-    del servers[name]
-    mcporter_config["mcpServers"] = servers
-    MCPORTER_CONFIG_PATH.write_text(
-        json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    telemetry_props = {"name": name}
+    try:
+        mcporter_config = _load_mcporter_config()
+        servers = mcporter_config.get("mcpServers", {})
+        if name not in servers:
+            raise HTTPException(status_code=404, detail=f"MCP 服务 {name} 不存在")
+        existing = servers[name]
+        telemetry_props["scope"] = _normalize_mcp_scope(existing.get("_scope"))
+        telemetry_props["agent_id"] = str(existing.get("_ownerAgentId") or "").strip() or None
+        telemetry_props["enabled"] = not bool(existing.get("_disabled", False))
+        del servers[name]
+        mcporter_config["mcpServers"] = servers
+        MCPORTER_CONFIG_PATH.write_text(
+            json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "mcp_service_delete_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=telemetry_props.get("agent_id"),
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "mcp_service_delete_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=telemetry_props.get("agent_id"),
+        )
+        raise
+    _emit_extensions_telemetry("mcp_service_delete", telemetry_props, agent_id=telemetry_props.get("agent_id"))
     return {"status": "success", "message": f"已删除 MCP 服务: {name}"}
 
 
@@ -1018,7 +1163,37 @@ async def import_custom_skill(request: SkillImportRequest):
     scope = (request.scope or "openclaw-local").strip().lower()
     if scope == "legacy":
         scope = "openclaw-local"
-    skill_path = _write_skill_to_scope(request.name, request.content, scope, request.agent_id)
+    telemetry_props = {
+        "name": request.name,
+        "scope": scope,
+        "agent_id": request.agent_id,
+        "content_chars": len(request.content or ""),
+        "has_frontmatter": bool(SKILL_FRONTMATTER_PATTERN.match((request.content or "").strip())),
+    }
+    try:
+        skill_path = _write_skill_to_scope(request.name, request.content, scope, request.agent_id)
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "skill_import_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "skill_import_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    _emit_extensions_telemetry("skill_import_success", telemetry_props, agent_id=(request.agent_id or "").strip() or None)
 
     return {
         "status": "success",
@@ -1030,7 +1205,35 @@ async def import_custom_skill(request: SkillImportRequest):
 
 @router.delete("/skills/{name}")
 async def delete_skill(name: str, scope: str, agent_id: Optional[str] = None):
-    skill_path = _delete_skill_from_scope(name, scope, agent_id)
+    telemetry_props = {
+        "name": name,
+        "scope": scope,
+        "agent_id": agent_id,
+    }
+    try:
+        skill_path = _delete_skill_from_scope(name, scope, agent_id)
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "skill_delete_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=(agent_id or "").strip() or None,
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "skill_delete_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=(agent_id or "").strip() or None,
+        )
+        raise
+    _emit_extensions_telemetry("skill_delete", telemetry_props, agent_id=(agent_id or "").strip() or None)
     return {
         "status": "success",
         "message": f"技能已删除: {skill_path}",
@@ -1041,9 +1244,39 @@ async def delete_skill(name: str, scope: str, agent_id: Optional[str] = None):
 
 @router.post("/hub/skills/install")
 async def install_skill_from_hub(request: HubInstallRequest):
-    _, payload = _fetch_hub_payload("skill", request.name)
-    skill_name, content = _parse_hub_skill_payload(request.name, payload)
-    skill_path = _write_skill_to_scope(skill_name, content, request.scope, request.agent_id)
+    telemetry_props = {
+        "requested_name": request.name,
+        "scope": request.scope,
+        "agent_id": request.agent_id,
+        "source": "hub",
+    }
+    try:
+        _, payload = _fetch_hub_payload("skill", request.name)
+        skill_name, content = _parse_hub_skill_payload(request.name, payload)
+        telemetry_props["resolved_name"] = skill_name
+        skill_path = _write_skill_to_scope(skill_name, content, request.scope, request.agent_id)
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "hub_skill_install_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "hub_skill_install_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    _emit_extensions_telemetry("hub_skill_install_success", telemetry_props, agent_id=(request.agent_id or "").strip() or None)
     return {
         "status": "success",
         "message": f"已从 NagaHub 安装技能: {skill_name}",
@@ -1056,32 +1289,72 @@ async def install_skill_from_hub(request: HubInstallRequest):
 
 @router.post("/hub/mcp/install")
 async def install_mcp_from_hub(request: HubInstallRequest):
-    _, payload = _fetch_hub_payload("mcp", request.name)
-    mcp_name, display_name, description, config = _parse_hub_mcp_payload(request.name, payload)
+    telemetry_props = {
+        "requested_name": request.name,
+        "scope": request.scope,
+        "agent_id": request.agent_id,
+        "source": "hub",
+    }
+    try:
+        _, payload = _fetch_hub_payload("mcp", request.name)
+        mcp_name, display_name, description, config = _parse_hub_mcp_payload(request.name, payload)
 
-    scope = _normalize_mcp_scope(request.scope, strict=True)
-    agent_id = (request.agent_id or "").strip() or None
-    if scope == "private":
-        if not agent_id:
-            raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
-        if not _get_agent_record(agent_id):
-            raise HTTPException(status_code=404, detail="目标干员不存在")
+        scope = _normalize_mcp_scope(request.scope, strict=True)
+        agent_id = (request.agent_id or "").strip() or None
+        if scope == "private":
+            if not agent_id:
+                raise HTTPException(status_code=400, detail="私有 MCP 必须指定 agent_id")
+            if not _get_agent_record(agent_id):
+                raise HTTPException(status_code=404, detail="目标干员不存在")
 
-    MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
-    mcporter_config = _load_mcporter_config()
-    servers = mcporter_config.setdefault("mcpServers", {})
-    servers[mcp_name] = _attach_mcp_meta(
-        config,
-        display_name=display_name,
-        description=description,
-        scope=scope,
-        agent_id=agent_id,
-    )
-    mcporter_config["mcpServers"] = servers
-    MCPORTER_CONFIG_PATH.write_text(
-        json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+        telemetry_props.update(
+            {
+                "resolved_name": mcp_name,
+                "scope": scope,
+                "agent_id": agent_id,
+                "config_keys": _telemetry_config_keys(config),
+                "has_display_name": bool((display_name or "").strip()) if isinstance(display_name, str) else bool(display_name),
+                "has_description": bool((description or "").strip()) if isinstance(description, str) else bool(description),
+            }
+        )
+
+        MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
+        mcporter_config = _load_mcporter_config()
+        servers = mcporter_config.setdefault("mcpServers", {})
+        servers[mcp_name] = _attach_mcp_meta(
+            config,
+            display_name=display_name,
+            description=description,
+            scope=scope,
+            agent_id=agent_id,
+        )
+        mcporter_config["mcpServers"] = servers
+        MCPORTER_CONFIG_PATH.write_text(
+            json.dumps(mcporter_config, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        _refresh_mcp_runtime_state(preheat_service_names=_list_public_enabled_external_mcp_names())
+    except HTTPException as exc:
+        _emit_extensions_telemetry(
+            "hub_mcp_install_fail",
+            {
+                **telemetry_props,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    except Exception as exc:
+        _emit_extensions_telemetry(
+            "hub_mcp_install_fail",
+            {
+                **telemetry_props,
+                "error": exc,
+            },
+            agent_id=(request.agent_id or "").strip() or None,
+        )
+        raise
+    _emit_extensions_telemetry("hub_mcp_install_success", telemetry_props, agent_id=agent_id)
     return {
         "status": "success",
         "message": f"已从 NagaHub 安装 MCP: {mcp_name}",
@@ -1223,6 +1496,22 @@ async def travel_start(payload: Dict[str, Any]):
         deliver_channel=payload.get("deliver_channel"),
         deliver_to=payload.get("deliver_to"),
     )
+    emit_telemetry(
+        "explore_start",
+        {
+            "time_limit_minutes": session.time_limit_minutes,
+            "credit_limit": session.credit_limit,
+            "want_friends": session.want_friends,
+            "deliver_channel": session.deliver_channel,
+            "deliver_full_report": session.deliver_full_report,
+            "post_to_forum": session.post_to_forum,
+            "goal_prompt_chars": len(session.goal_prompt or ""),
+        },
+        source="apiserver",
+        session_id=session.session_id,
+        agent_id=session.agent_id,
+        trace_id=f"travel:{session.session_id}",
+    )
     # 代理到 agent server
     try:
         await _call_agentserver(
@@ -1237,6 +1526,17 @@ async def travel_start(payload: Dict[str, Any]):
         s.status = TravelStatus.FAILED
         s.error = f"agent server 不可达: {e}"
         _ss(s)
+        emit_telemetry(
+            "explore_fail",
+            {
+                "stage": "dispatch",
+                "error": e,
+            },
+            source="apiserver",
+            session_id=session.session_id,
+            agent_id=session.agent_id,
+            trace_id=f"travel:{session.session_id}",
+        )
         raise HTTPException(503, f"agent server 不可达: {e}")
 
     return {"status": "success", "session_id": session.session_id}
@@ -1270,6 +1570,17 @@ async def travel_stop(payload: Dict[str, Any] = None):
     active.status = TravelStatus.CANCELLED
     active.completed_at = datetime.now().isoformat()
     save_session(active)
+    emit_telemetry(
+        "explore_cancel",
+        {
+            "elapsed_minutes": active.elapsed_minutes,
+            "discoveries": len(active.discoveries),
+        },
+        source="apiserver",
+        session_id=active.session_id,
+        agent_id=active.agent_id,
+        trace_id=f"travel:{active.session_id}",
+    )
     return {"status": "success", "session_id": active.session_id}
 
 

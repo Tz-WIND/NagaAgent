@@ -25,7 +25,7 @@ function notificationStatusLabel(status: string) {
   if (status === 'skipped:incomplete_config')
     return '已启用但配置不完整，未发送'
   if (status === 'skipped:invalid_qq')
-    return 'QQ 号格式不正确，未发送'
+    return 'QQ 绑定信息格式不正确，未发送'
   if (status.startsWith('accepted:'))
     return `已被通知服务接受（${status.slice('accepted:'.length)}）`
   if (status.startsWith('skipped:unsupported_provider:'))

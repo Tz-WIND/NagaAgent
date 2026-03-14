@@ -3,6 +3,7 @@ import { Button, InputNumber, Select, Textarea, ToggleSwitch } from 'primevue'
 import { computed, onMounted, ref, watch } from 'vue'
 import ConfigItem from '@/components/ConfigItem.vue'
 import { CONFIG } from '@/utils/config'
+import { hasQqEmailVerificationCode, parseQqBindingTarget } from '@/utils/qqNotification'
 import { agentContacts, loadAgentContacts } from '@/utils/session'
 
 defineProps<{ loading: boolean }>()
@@ -36,10 +37,13 @@ const feishuDeliverTarget = computed(() => {
     ? settings.recipient_chat_id.trim()
     : settings.recipient_open_id.trim()
 })
+const qqBinding = computed(() => parseQqBindingTarget(CONFIG.value.notifications.qq.binding_target))
+const qqVerificationReady = computed(() => hasQqEmailVerificationCode(CONFIG.value.notifications.qq.email_verification_code))
 const qqNotificationReady = computed(() => {
   const settings = CONFIG.value.notifications.qq
   return settings.enabled
-    && /^\d+$/.test(settings.user_qq.trim())
+    && qqBinding.value.isValid
+    && qqVerificationReady.value
 })
 const travelNotificationSummary = computed(() => {
   const lines: string[] = []
@@ -49,13 +53,19 @@ const travelNotificationSummary = computed(() => {
   }
   if (CONFIG.value.notifications.qq.enabled) {
     if (qqNotificationReady.value) {
-      lines.push(`QQ 通知已启用，探索完成后会通过 Undefined QQ机器人 @${CONFIG.value.notifications.qq.user_qq.trim()}`)
+      lines.push(`QQ 通知已启用，探索完成后会通过 Undefined QQ机器人 @${qqBinding.value.normalizedQq}`)
     }
-    else if (CONFIG.value.notifications.qq.user_qq.trim()) {
-      lines.push('QQ 通知已启用，但 QQ 号格式不正确，需要填写纯数字')
+    else if (qqBinding.value.isEmpty) {
+      lines.push('QQ 通知已启用，但 QQ 号 / QQ 邮箱还没填，当前不会生效')
+    }
+    else if (!qqBinding.value.isValid) {
+      lines.push(`QQ 通知已启用，但 ${qqBinding.value.errorMessage}`)
+    }
+    else if (!qqVerificationReady.value) {
+      lines.push(`QQ 通知已启用，但邮箱验证码还没填；将按 ${qqBinding.value.normalizedEmail} 验证`)
     }
     else {
-      lines.push('QQ 通知已启用，但 QQ 号还没填，当前不会生效')
+      lines.push('QQ 通知已启用，但当前绑定信息还不完整')
     }
   }
   if (lines.length === 0) {

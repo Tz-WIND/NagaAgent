@@ -5,10 +5,16 @@ let autoUpdater: any = null
 export async function setupAutoUpdater(win: BrowserWindow): Promise<void> {
   try {
     const pkg = await import('electron-updater')
-    autoUpdater = pkg.autoUpdater
+    autoUpdater = pkg.autoUpdater ?? pkg.default?.autoUpdater ?? pkg.default ?? null
   }
   catch (err) {
     console.warn('[Updater] electron-updater not available:', (err as Error).message)
+    return
+  }
+
+  if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function') {
+    console.warn('[Updater] autoUpdater unavailable after import')
+    autoUpdater = null
     return
   }
 

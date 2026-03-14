@@ -102,6 +102,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[WARN] 角色加载失败，使用默认提示词目录: {e}")
 
+        try:
+            from apiserver.telemetry import get_telemetry_manager
+            await get_telemetry_manager().start()
+        except Exception as e:
+            print(f"[WARN] Telemetry 初始化失败: {e}")
+
         print("[SUCCESS] API服务器初始化完成")
         yield
     except Exception as e:
@@ -111,6 +117,11 @@ async def lifespan(app: FastAPI):
     finally:
         print("[INFO] 正在清理资源...")
         # MCP服务现在由mcpserver独立管理，无需清理
+        try:
+            from apiserver.telemetry import get_telemetry_manager
+            await get_telemetry_manager().shutdown()
+        except Exception as e:
+            print(f"[WARN] Telemetry 清理失败: {e}")
 
 
 # 创建FastAPI应用
@@ -259,6 +270,7 @@ from .routes.tools import router as tools_router
 from .routes.extensions import router as extensions_router
 from .routes.chat import router as chat_router
 from .routes.openai_proxy import router as openai_proxy_router
+from .routes.telemetry import router as telemetry_router
 
 app.include_router(forum_router)
 app.include_router(auth_router)
@@ -268,3 +280,4 @@ app.include_router(tools_router)
 app.include_router(extensions_router)
 app.include_router(chat_router)
 app.include_router(openai_proxy_router)
+app.include_router(telemetry_router)
