@@ -1383,15 +1383,20 @@ class OpenClawClient:
             健康状态信息
         """
         client = await self._get_client()
+        acceptable_statuses = {200, 401, 403, 404, 405, 426}
 
         try:
-            # 尝试访问根路径或健康检查端点
+            # OpenClaw Gateway 主体是 WebSocket 服务，HTTP 根路径常见返回 404/405/426。
+            # 只要端口上返回了受控 HTTP 响应，就说明 Gateway 进程已经起来。
             response = await client.get(
                 f"{self.config.gateway_url}/", timeout=10, headers=self.config.get_gateway_headers()
             )
 
-            if response.status_code == 200:
-                return {"status": "healthy", "gateway_url": self.config.gateway_url}
+            if response.status_code in acceptable_statuses:
+                result = {"status": "healthy", "gateway_url": self.config.gateway_url}
+                if response.status_code != 200:
+                    result["probe_status"] = response.status_code
+                return result
             else:
                 return {
                     "status": "unhealthy",

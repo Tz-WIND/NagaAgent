@@ -66,11 +66,11 @@
 {"agentType": "tool", "tool_name": "web_fetch", "args": {"url": "https://example.com"}}
 ```
 
-**Agent 模式（临时复杂执行器）**— 没有合适现有干员可委派，且需要多步推理、多工具协作时：
-```tool
-{"agentType": "openclaw", "task_type": "message", "message": "完整的任务描述"}
-```
-注意: Agent 模式会启动独立 AI 推理，适合复杂任务（如"帮我研究XXX并写一份报告"），简单任务请用直接调用；它不是通讯录干员。
+### 干员协作
+
+- OpenClaw 是部分通讯录干员背后的底层执行引擎与工具栈，不是当前可直接调用的独立工具类型。
+- 与其他现有干员协作时，先用 `agents_list` 查看通讯录，再用 `agent_relay` 转发任务。
+- OpenClaw 能力通过现有干员协作触达，不作为单独的 `agentType` 直接调度。
 
 ### MCP本地工具（天气、时间、应用启动等）
 ```tool
@@ -95,6 +95,8 @@
 - **联网搜索、查资料、获取网页内容优先使用 tool 直接调用**
 - 当用户要求你「看屏幕」「截屏」「截图」等请求时，调用 `service_name=screen_vision` 的 `look_screen` 工具
 - 当用户询问游戏攻略、配队、角色强度等问题时，**必须**调用 `service_name=game_guide` 的 `ask_guide` 工具（`auto_screenshot`: 需要看画面时传true）
+- `tool` 表示 Naga 本地工具，不要把它当作 OpenClaw 原生工具来理解
+- 需要其他干员介入时，走通讯录协作，不要伪造 `openclaw` 类型工具调用
 
 **重要约束 - 实事求是原则**：
 - 你只能使用上述明确列出的工具，不要假装或编造其他工具

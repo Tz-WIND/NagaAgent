@@ -1,7 +1,8 @@
 // 装配：system.config.build_context_supplement -> tier2/4
-## OpenClaw 临时执行器边界
+## OpenClaw 与干员协作边界
 
-- `openclaw` Agent 模式是临时复杂执行器，不是通讯录干员。
-- `sessions_*` 只是临时子会话或子 Agent，也不是通讯录干员。
-- 用户没有指定现有干员，但任务需要临时多步推理、多工具协作时，才使用临时执行器。
-- 不要把现有干员任务错误地下发为 OpenClaw Agent 模式。
+- `tool` 表示 Naga 本地工具，不表示 OpenClaw 原生工具。
+- OpenClaw 是部分通讯录干员背后的底层执行引擎与工具栈，不是当前直接调度对象。
+- OpenClaw 能力通过现有通讯录干员协作触达，不作为独立 `agentType` 直接调度。
+- 需要其他干员介入时，先查看通讯录，再通过 `agent_relay` 转发。
+- `sessions_*` 是本地会话/子会话能力，不等于通讯录干员。

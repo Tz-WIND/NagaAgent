@@ -202,6 +202,7 @@ class OpenClawDetector:
 
     async def check_gateway_health_async(self, url: str, token: Optional[str] = None) -> Dict[str, Any]:
         """异步检查 Gateway 健康状态"""
+        acceptable_statuses = {200, 401, 403, 404, 405, 426}
         try:
             import httpx
 
@@ -212,12 +213,15 @@ class OpenClawDetector:
             async with httpx.AsyncClient(timeout=5) as client:
                 response = await client.get(f"{url}/", headers=headers)
 
-                if response.status_code == 200:
-                    return {
+                if response.status_code in acceptable_statuses:
+                    result = {
                         "status": "healthy",
                         "reachable": True,
-                        "url": url
+                        "url": url,
                     }
+                    if response.status_code != 200:
+                        result["probe_status"] = response.status_code
+                    return result
                 else:
                     return {
                         "status": "unhealthy",

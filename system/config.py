@@ -108,19 +108,53 @@ class ServerPortsConfig(BaseModel):
 server_ports = ServerPortsConfig()
 
 
+def _get_runtime_server_ports() -> Optional[ServerPortsConfig]:
+    """优先返回当前已加载配置里的端口，回退到静态默认端口。"""
+    loaded_config = globals().get("config")
+    if loaded_config is None:
+        return None
+
+    try:
+        raw_agent_port = server_ports.agent_server
+        raw_mcp_port = server_ports.mcp_server
+        try:
+            config_path = get_config_path()
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding=detect_file_encoding(config_path)) as f:
+                    raw_config = json5.load(f)
+                raw_agent_port = int(raw_config.get("agentserver", {}).get("port", raw_agent_port))
+                raw_mcp_port = int(raw_config.get("mcpserver", {}).get("port", raw_mcp_port))
+        except Exception:
+            pass
+
+        return ServerPortsConfig(
+            api_server=loaded_config.api_server.port,
+            agent_server=raw_agent_port,
+            mcp_server=raw_mcp_port,
+            tts_server=loaded_config.tts.port,
+            asr_server=loaded_config.asr.port,
+        )
+    except Exception:
+        return None
+
+
 def get_server_port(server_name: str) -> int:
     """获取指定服务器的端口号"""
+    runtime_ports = _get_runtime_server_ports()
+    if runtime_ports is not None:
+        return getattr(runtime_ports, server_name, None)
     return getattr(server_ports, server_name, None)
 
 
 def get_all_server_ports() -> Dict[str, int]:
     """获取所有服务器端口配置"""
+    runtime_ports = _get_runtime_server_ports() or server_ports
     return {
-        "api_server": server_ports.api_server,
-        "agent_server": server_ports.agent_server,
-        "mcp_server": server_ports.mcp_server,
-        "tts_server": server_ports.tts_server,
-        "asr_server": server_ports.asr_server,
+        "api_server": runtime_ports.api_server,
+        "agent_server": runtime_ports.agent_server,
+        "mcp_server": runtime_ports.mcp_server,
+        "tts_server": runtime_ports.tts_server,
+        "asr_server": runtime_ports.asr_server,
     }
 
 
