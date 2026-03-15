@@ -124,6 +124,20 @@ BACKEND_EXT = ".exe" if IS_WINDOWS else ""
 INSTALLER_GLOB = "*.exe" if IS_WINDOWS else "*.dmg" if IS_MACOS else "*.AppImage"
 
 
+def safe_print(*values: object, sep: str = " ", end: str = "\n", file=None) -> None:
+    stream = file or sys.stdout
+    text = sep.join(str(value) for value in values)
+    try:
+        print(text, end=end, file=stream, flush=True)
+        return
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        fallback = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="strict")
+        stream.write(fallback)
+        stream.write(end)
+        stream.flush()
+
+
 def read_version() -> str:
     """从 pyproject.toml 读取版本号（唯一版本源）"""
     with open(PROJECT_ROOT / "pyproject.toml", "rb") as f:
@@ -143,14 +157,14 @@ def sync_frontend_version() -> None:
 
 
 def log(msg: str) -> None:
-    print(f"[build] {msg}")
+    safe_print(f"[build] {msg}")
 
 
 def log_step(step: int, total: int, title: str) -> None:
-    print()
-    print(f"{'=' * 50}")
-    print(f"  Step {step}/{total}: {title}")
-    print(f"{'=' * 50}")
+    safe_print()
+    safe_print(f"{'=' * 50}")
+    safe_print(f"  Step {step}/{total}: {title}")
+    safe_print(f"{'=' * 50}")
 
 
 def run(
@@ -983,10 +997,10 @@ def build_frontend(debug: bool = False) -> None:
 
 def print_summary() -> None:
     """打印构建产物信息"""
-    print()
-    print("=" * 50)
-    print("  构建完成!")
-    print("=" * 50)
+    safe_print()
+    safe_print("=" * 50)
+    safe_print("  构建完成!")
+    safe_print("=" * 50)
 
     # 后端产物
     backend_dir = BACKEND_DIST_DIR / "naga-backend"
