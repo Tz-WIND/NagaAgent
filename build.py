@@ -405,6 +405,78 @@ def _apply_runtime_npm_env(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+def _install_openclaw_vendor_dependencies(vendor_root: Path, env: dict[str, str], force: bool) -> None:
+    node_modules_dir = vendor_root / "node_modules"
+    package_lock = vendor_root / "package-lock.json"
+
+    if force and node_modules_dir.exists():
+        log(f"强制重建 vendor/openclaw 依赖: {node_modules_dir}")
+        shutil.rmtree(node_modules_dir)
+
+    if node_modules_dir.exists():
+        return
+
+    install_attempts = [["ci"], ["install"]] if package_lock.exists() else [["install"]]
+    last_error: Optional[subprocess.CalledProcessError] = None
+    for index, install_args in enumerate(install_attempts):
+        install_desc = " ".join(install_args)
+        if index == 0:
+            log(f"安装 vendor/openclaw 依赖（{install_desc}，启用平台脚本）...")
+        else:
+            log(f"vendor/openclaw 依赖安装回退到 `{install_desc}`（锁文件与平台原生包可能不完全同步）...")
+        try:
+            run(
+                _runtime_npm_command(*install_args),
+                cwd=vendor_root,
+                env=env,
+            )
+            return
+        except subprocess.CalledProcessError as exc:
+            last_error = exc
+            if index == len(install_attempts) - 1:
+                raise
+    if last_error is not None:
+        raise last_error
+
+
+def _write_openclaw_import_diagnostics(output: str) -> Optional[Path]:
+    if not output.strip():
+        return None
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    diag_path = CACHE_DIR / "openclaw-gateway-import.log"
+    diag_path.write_text(output, encoding="utf-8")
+    return diag_path
+
+
+def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str]) -> None:
+    verify_script = (
+        "import { resolve } from 'node:path';"
+        "import { pathToFileURL } from 'node:url';"
+        "const target = pathToFileURL(resolve('dist/gateway/server.js')).href;"
+        "await import(target);"
+        "console.log('openclaw-gateway-import-ok');"
+    )
+    result = subprocess.run(
+        [str(node_bin), "--input-type=module", "-e", verify_script],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if result.returncode == 0:
+        log("OpenClaw Gateway 导入校验通过")
+        return
+
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    diag_path = _write_openclaw_import_diagnostics(output) if output else None
+    if diag_path:
+        log(f"OpenClaw Gateway 导入校验失败，日志已写入 {diag_path}")
+        _log_openclaw_tsc_excerpt(output)
+    raise RuntimeError("OpenClaw Gateway 导入校验失败")
+
+
 def download_python_runtime() -> Path:
     """下载最小 Python standalone 运行时，返回本地缓存路径"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -731,14 +803,8 @@ def preinstall_openclaw(force: bool = False) -> None:
         env["PATH"] = f"{node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env = _apply_runtime_npm_env(env)
 
-    # 1. 安装 vendor 依赖（如果 node_modules 不存在）
-    if not (vendor_root / "node_modules").exists():
-        log("安装 vendor/openclaw 依赖...")
-        run(
-            _runtime_npm_command("install", "--ignore-scripts"),
-            cwd=vendor_root,
-            env=env,
-        )
+    # 1. 安装 vendor 依赖（需要保留平台 postinstall / native 包处理）
+    _install_openclaw_vendor_dependencies(vendor_root, env, force=force)
 
     # 2. 编译 TypeScript
     log("编译 vendor/openclaw 源码...")
@@ -781,6 +847,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
     shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
     _sync_openclaw_runtime_sidefiles(vendor_root)
+    _verify_openclaw_runtime_import(node_bin, env)
 
     log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
 
