@@ -32,7 +32,6 @@ import re
 import zipfile
 import tarfile
 import json
-from urllib.parse import unquote, urlparse
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -449,138 +448,7 @@ def _write_openclaw_import_diagnostics(output: str) -> Optional[Path]:
     return diag_path
 
 
-_MISSING_MODULE_RE = re.compile(r"Cannot find module ['\"](?P<path>[^'\"]+)['\"]")
-
-
-def _resolve_missing_module_target(raw_path: str) -> Optional[Path]:
-    raw = raw_path.strip()
-    if not raw:
-        return None
-    if raw.startswith("file://"):
-        parsed = urlparse(raw)
-        raw = unquote(parsed.path)
-        if IS_WINDOWS and re.match(r"^/[A-Za-z]:", raw):
-            raw = raw[1:]
-    try:
-        return Path(raw).resolve()
-    except Exception:
-        return None
-
-
-def _find_openclaw_source_candidate(vendor_root: Path, runtime_relative_path: Path) -> Optional[Path]:
-    source_root = vendor_root / "src"
-    stem = runtime_relative_path.with_suffix("")
-    for suffix in (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json"):
-        candidate = source_root / stem.with_suffix(suffix)
-        if candidate.exists():
-            return candidate
-    return None
-
-
-def _transpile_openclaw_source_module(
-    node_bin: Path,
-    vendor_root: Path,
-    source_path: Path,
-    output_path: Path,
-    env: dict[str, str],
-) -> None:
-    typescript_lib = vendor_root / "node_modules" / "typescript" / "lib" / "typescript.js"
-    tsconfig_path = vendor_root / "tsconfig.naga.json"
-    if not typescript_lib.exists():
-        raise FileNotFoundError(f"缺少 TypeScript 运行库: {typescript_lib}")
-    if not tsconfig_path.exists():
-        raise FileNotFoundError(f"缺少 tsconfig.naga.json: {tsconfig_path}")
-
-    script = (
-        "const fs = require('node:fs');"
-        "const path = require('node:path');"
-        "const [tsLibPath, tsconfigPath, srcPath, outPath] = process.argv.slice(1);"
-        "const ts = require(tsLibPath);"
-        "const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);"
-        "if (configFile.error) {"
-        "  throw new Error(ts.flattenDiagnosticMessageText(configFile.error.messageText, '\\n'));"
-        "}"
-        "const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(tsconfigPath));"
-        "const source = fs.readFileSync(srcPath, 'utf8');"
-        "const output = ts.transpileModule(source, {"
-        "  compilerOptions: {"
-        "    ...parsed.options,"
-        "    module: ts.ModuleKind.ESNext,"
-        "    noEmit: false,"
-        "    declaration: false,"
-        "    sourceMap: false,"
-        "    inlineSourceMap: false,"
-        "    inlineSources: false,"
-        "    verbatimModuleSyntax: true"
-        "  },"
-        "  fileName: srcPath,"
-        "  reportDiagnostics: true"
-        "});"
-        "fs.mkdirSync(path.dirname(outPath), { recursive: true });"
-        "fs.writeFileSync(outPath, output.outputText, 'utf8');"
-        "const errors = (output.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);"
-        "if (errors.length > 0) {"
-        "  const summary = errors.slice(0, 5)"
-        "    .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\\n'))"
-        "    .join('\\n');"
-        "  console.error(summary);"
-        "}"
-    )
-    result = subprocess.run(
-        [str(node_bin), "-e", script, str(typescript_lib), str(tsconfig_path), str(source_path), str(output_path)],
-        cwd=vendor_root,
-        env=env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-    if result.returncode != 0:
-        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-        raise RuntimeError(
-            f"补齐 OpenClaw 模块失败: {source_path} -> {output_path}"
-            + (f"\n{output}" if output else "")
-        )
-
-
-def _hydrate_missing_openclaw_runtime_module(
-    node_bin: Path,
-    vendor_root: Path,
-    missing_target: Path,
-    env: dict[str, str],
-) -> bool:
-    runtime_dist_root = (OPENCLAW_RUNTIME_DIR / "dist").resolve()
-    try:
-        relative_path = missing_target.relative_to(runtime_dist_root)
-    except ValueError:
-        return False
-
-    vendor_dist_candidate = vendor_root / "dist" / relative_path
-    if vendor_dist_candidate.exists():
-        missing_target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(vendor_dist_candidate, missing_target)
-        log(f"已从 vendor/dist 补齐缺失模块: {relative_path.as_posix()}")
-        return True
-
-    source_candidate = _find_openclaw_source_candidate(vendor_root, relative_path)
-    if source_candidate is None:
-        return False
-
-    missing_target.parent.mkdir(parents=True, exist_ok=True)
-    if source_candidate.suffix == ".json":
-        shutil.copy2(source_candidate, missing_target)
-    elif source_candidate.suffix in {".js", ".mjs", ".cjs"}:
-        shutil.copy2(source_candidate, missing_target)
-    else:
-        _transpile_openclaw_source_module(node_bin, vendor_root, source_candidate, missing_target, env)
-    log(
-        "已从源码补齐缺失模块: "
-        f"{relative_path.as_posix()} <- {source_candidate.relative_to(vendor_root).as_posix()}"
-    )
-    return True
-
-
-def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_root: Path) -> None:
+def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str]) -> None:
     verify_script = (
         "import { resolve } from 'node:path';"
         "import { pathToFileURL } from 'node:url';"
@@ -588,45 +456,25 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_
         "await import(target);"
         "console.log('openclaw-gateway-import-ok');"
     )
-    repaired_targets: set[Path] = set()
-    for _ in range(12):
-        result = subprocess.run(
-            [str(node_bin), "--input-type=module", "-e", verify_script],
-            cwd=OPENCLAW_RUNTIME_DIR,
-            env=env,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=False,
-        )
-        if result.returncode == 0:
-            log("OpenClaw Gateway 导入校验通过")
-            return
+    result = subprocess.run(
+        [str(node_bin), "--input-type=module", "-e", verify_script],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if result.returncode == 0:
+        log("OpenClaw Gateway 导入校验通过")
+        return
 
-        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-        missing_match = _MISSING_MODULE_RE.search(output or "")
-        missing_target = (
-            _resolve_missing_module_target(missing_match.group("path"))
-            if missing_match is not None
-            else None
-        )
-        if (
-            missing_target is not None
-            and missing_target not in repaired_targets
-            and _hydrate_missing_openclaw_runtime_module(node_bin, vendor_root, missing_target, env)
-        ):
-            repaired_targets.add(missing_target)
-            _rewrite_openclaw_dist_import_suffixes(OPENCLAW_RUNTIME_DIR / "dist")
-            log(f"OpenClaw Gateway 导入校验发现缺失模块，已补齐后重试: {missing_target}")
-            continue
-
-        diag_path = _write_openclaw_import_diagnostics(output) if output else None
-        if diag_path:
-            log(f"OpenClaw Gateway 导入校验失败，日志已写入 {diag_path}")
-            _log_openclaw_tsc_excerpt(output)
-        raise RuntimeError("OpenClaw Gateway 导入校验失败")
-
-    raise RuntimeError("OpenClaw Gateway 导入校验失败：缺失模块补齐重试次数已达上限")
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    diag_path = _write_openclaw_import_diagnostics(output) if output else None
+    if diag_path:
+        log(f"OpenClaw Gateway 导入校验失败，日志已写入 {diag_path}")
+        _log_openclaw_tsc_excerpt(output)
+    raise RuntimeError("OpenClaw Gateway 导入校验失败")
 
 
 def download_python_runtime() -> Path:
@@ -962,6 +810,10 @@ def preinstall_openclaw(force: bool = False) -> None:
     log("编译 vendor/openclaw 源码...")
     compile_env = env.copy()
     compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
+    vendor_dist_root = vendor_root / "dist"
+    if vendor_dist_root.exists():
+        log(f"清理旧 vendor/openclaw dist: {vendor_dist_root}")
+        shutil.rmtree(vendor_dist_root)
     tsc_cli = _find_vendor_typescript_cli(vendor_root)
     log(f"$ {node_bin} {tsc_cli} -p tsconfig.naga.json")
     compile_result = subprocess.run(
@@ -975,7 +827,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     )
     compile_output = "\n".join(part for part in (compile_result.stdout, compile_result.stderr) if part).strip()
 
-    vendor_dist = vendor_root / "dist" / "gateway" / "server.js"
+    vendor_dist = vendor_dist_root / "gateway" / "server.js"
     if compile_result.returncode != 0 and vendor_dist.exists():
         diag_path = _write_openclaw_tsc_diagnostics(compile_output)
         message = (
@@ -999,7 +851,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
     shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
     _sync_openclaw_runtime_sidefiles(vendor_root)
-    _verify_openclaw_runtime_import(node_bin, env, vendor_root)
+    _verify_openclaw_runtime_import(node_bin, env)
 
     log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
 
