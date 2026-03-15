@@ -233,6 +233,32 @@ class EmbeddedRuntime:
         if meipass and current_val and str(meipass) in current_val:
             env.pop(key, None)
 
+    @staticmethod
+    def _sanitize_packaged_path(env: Dict[str, str]) -> None:
+        meipass = getattr(sys, "_MEIPASS", None)
+        path_value = env.get("PATH", "")
+        if not meipass or not path_value:
+            return
+
+        blocked_prefixes = {
+            str(Path(meipass).resolve()).lower(),
+            str(Path(meipass).resolve().parent).lower(),
+        }
+        kept_parts: List[str] = []
+        for raw_part in path_value.split(os.pathsep):
+            part = raw_part.strip()
+            if not part:
+                continue
+            try:
+                resolved = str(Path(part).resolve()).lower()
+            except Exception:
+                resolved = part.lower()
+            if any(resolved.startswith(prefix) for prefix in blocked_prefixes):
+                continue
+            kept_parts.append(part)
+
+        env["PATH"] = os.pathsep.join(kept_parts)
+
     def _sanitize_subprocess_env(self, env: Dict[str, str]) -> Dict[str, str]:
         if not self.is_packaged:
             return env
@@ -240,6 +266,7 @@ class EmbeddedRuntime:
         cleaned = env.copy()
         for key in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"):
             self._sanitize_packaged_library_path(cleaned, key)
+        self._sanitize_packaged_path(cleaned)
         return cleaned
 
     def _ensure_executable(self, path_str: Optional[str]) -> None:
@@ -513,43 +540,39 @@ class EmbeddedRuntime:
                     return False
                 npm_cmd = [npm]
 
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *npm_cmd,
-                    "install",
-                    "--ignore-scripts",
-                    cwd=str(vendor_root),
-                    env=self.env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
+            install_attempts = [["ci"], ["install"]] if (vendor_root / "package-lock.json").exists() else [["install"]]
+            for index, install_args in enumerate(install_attempts):
+                logger.info(f"vendor/openclaw 依赖安装命令: npm {' '.join(install_args)}")
+                if index > 0:
+                    logger.warning("vendor/openclaw 依赖安装回退到 npm install（锁文件与平台原生包可能不完全同步）")
 
-                if proc.returncode != 0:
-                    err = stderr.decode(errors="ignore")[:500] if stderr else ""
-                    logger.warning(f"npm install --ignore-scripts 失败（尝试不带 --ignore-scripts）: {err}")
-                    # 兜底：不带 --ignore-scripts 重试
+                try:
                     proc = await asyncio.create_subprocess_exec(
                         *npm_cmd,
-                        "install",
+                        *install_args,
                         cwd=str(vendor_root),
                         env=self.env,
                         stdout=asyncio.subprocess.PIPE,
                         stderr=asyncio.subprocess.PIPE,
                     )
                     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=300)
-                    if proc.returncode != 0:
-                        err = stderr.decode(errors="ignore")[:500] if stderr else ""
-                        logger.error(f"npm install 失败: {err}")
-                        return False
+                    if proc.returncode == 0:
+                        logger.info("vendor/openclaw 依赖安装完成")
+                        break
 
-                logger.info("vendor/openclaw 依赖安装完成")
-            except asyncio.TimeoutError:
-                logger.error("npm install 超时（300秒）")
-                return False
-            except Exception as e:
-                logger.error(f"npm install 执行异常: {e}")
-                return False
+                    err = stderr.decode(errors="ignore")[:500] if stderr else ""
+                    if index == len(install_attempts) - 1:
+                        logger.error(f"npm {' '.join(install_args)} 失败: {err}")
+                        return False
+                    logger.warning(f"npm {' '.join(install_args)} 失败: {err}")
+                except asyncio.TimeoutError:
+                    logger.error(f"npm {' '.join(install_args)} 超时（300秒）")
+                    return False
+                except Exception as e:
+                    if index == len(install_attempts) - 1:
+                        logger.error(f"npm {' '.join(install_args)} 执行异常: {e}")
+                        return False
+                    logger.warning(f"npm {' '.join(install_args)} 执行异常，准备回退: {e}")
 
         return self.is_vendor_ready
 
@@ -623,6 +646,10 @@ class EmbeddedRuntime:
         self._ensure_packaged_runtime_ready()
 
         try:
+            logger.info(
+                f"Gateway 启动上下文: mode={self.runtime_mode}, node={self.node_path}, "
+                f"vendor={self._get_vendor_root()}"
+            )
             logger.info(f"启动 OpenClaw Gateway: {' '.join(cmd)}")
             port = self._get_gateway_port()
 
@@ -720,6 +747,10 @@ class EmbeddedRuntime:
 
         cwd = self._get_gateway_cwd()
         try:
+            logger.info(
+                f"[port={port}] Gateway 子实例上下文: mode={self.runtime_mode}, node={self.node_path}, "
+                f"vendor={self._get_vendor_root()}"
+            )
             logger.info(f"[port={port}] 启动 Gateway 子实例: {' '.join(cmd)}")
             logger.info(f"[port={port}] cwd={cwd}, OPENCLAW_GATEWAY_PORT={port}")
             process = await asyncio.create_subprocess_exec(
