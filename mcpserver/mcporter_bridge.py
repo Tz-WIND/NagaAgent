@@ -69,7 +69,7 @@ def _platform_bin(runtime_root: Path, subdir: str, name: str) -> str | None:
 
 def _runtime_path_dirs(runtime_root: Path) -> list[str]:
     extra_dirs: list[str] = []
-    for subdir in ("node", "uv"):
+    for subdir in ("node", "python", "uv"):
         base_dir = runtime_root / subdir
         if not base_dir.exists():
             continue
@@ -106,11 +106,16 @@ def _sanitize_packaged_subprocess_env(env: dict[str, str]) -> dict[str, str]:
 
 def _resolve_runtime_command(cmd: str, env: dict[str, str]) -> str | None:
     runtime_root = _resolve_runtime_root()
+    internal_commands = {"node", "npm", "npx", "python", "python3", "pip", "pip3", "uv", "uvx"}
     if runtime_root is not None:
         mapping = {
             "node": ("node", "node"),
             "npm": ("node", "npm"),
             "npx": ("node", "npx"),
+            "python": ("python", "python"),
+            "python3": ("python", "python"),
+            "pip": ("python", "pip"),
+            "pip3": ("python", "pip"),
             "uv": ("uv", "uv"),
             "uvx": ("uv", "uvx"),
         }
@@ -119,7 +124,10 @@ def _resolve_runtime_command(cmd: str, env: dict[str, str]) -> str | None:
             resolved = _platform_bin(runtime_root, subdir, name)
             if resolved:
                 return resolved
+            return None
 
+    if _is_packaged() and cmd in internal_commands:
+        return None
     return shutil.which(cmd, path=env.get("PATH"))
 
 

@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import argparse
 import time
+import re
 import zipfile
 import tarfile
 import json
@@ -57,6 +58,7 @@ BACKEND_DIST_DIR = FRONTEND_DIR / "backend-dist"
 RUNTIME_DIR = BACKEND_DIST_DIR / "runtime"
 NODE_RUNTIME_DIR = RUNTIME_DIR / "node"
 OPENCLAW_RUNTIME_DIR = RUNTIME_DIR / "openclaw"
+PYTHON_RUNTIME_DIR = RUNTIME_DIR / "python"
 SPEC_FILE = PROJECT_ROOT / "naga-backend.spec"
 AGENT_BROWSER_NPM_SPEC = "agent-browser"
 
@@ -66,6 +68,8 @@ MIN_PYTHON = (3, 11)
 
 # OpenClaw 运行时版本
 NODE_VERSION = "22.13.1"
+PYTHON_RUNTIME_VERSION = "3.11.15"
+PYTHON_RUNTIME_RELEASE = "20260303"
 CACHE_DIR = PROJECT_ROOT / ".cache"
 
 # Node.js 下载地址（按平台）
@@ -77,6 +81,29 @@ else:
     NODE_ARCHIVE = f"node-v{NODE_VERSION}-linux-x64.tar.xz"
 
 NODE_DIST_URL = f"https://nodejs.org/dist/v{NODE_VERSION}/{NODE_ARCHIVE}"
+
+# Python standalone 运行时（用于外部 Python MCP）
+if IS_WINDOWS:
+    PYTHON_ARCHIVE = (
+        f"cpython-{PYTHON_RUNTIME_VERSION}+{PYTHON_RUNTIME_RELEASE}"
+        "-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+    )
+elif IS_MACOS:
+    _py_arch = "aarch64" if MAC_ARCH == "arm64" else "x86_64"
+    PYTHON_ARCHIVE = (
+        f"cpython-{PYTHON_RUNTIME_VERSION}+{PYTHON_RUNTIME_RELEASE}"
+        f"-{_py_arch}-apple-darwin-install_only_stripped.tar.gz"
+    )
+else:
+    PYTHON_ARCHIVE = (
+        f"cpython-{PYTHON_RUNTIME_VERSION}+{PYTHON_RUNTIME_RELEASE}"
+        "-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    )
+
+PYTHON_DIST_URL = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/"
+    f"{PYTHON_RUNTIME_RELEASE}/{PYTHON_ARCHIVE}"
+)
 
 # uv standalone 二进制版本与下载地址
 UV_VERSION = "0.6.6"
@@ -261,16 +288,7 @@ def _extract_zip(archive_path: Path) -> None:
                     shutil.copyfileobj(src, dst)
 
 
-def _extract_tarball(archive_path: Path) -> None:
-    """解压 .tar.gz / .tar.xz 格式的 Node.js（macOS / Linux）"""
-    # 推断 archive 内的顶层目录名
-    stem = NODE_ARCHIVE
-    for suffix in (".tar.gz", ".tar.xz"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
-    prefix = f"{stem}/"
-
+def _extract_prefixed_tarball(archive_path: Path, prefix: str, target_root: Path) -> None:
     mode = "r:gz" if archive_path.name.endswith(".tar.gz") else "r:xz"
     with tarfile.open(archive_path, mode) as tf:
         for member in tf.getmembers():
@@ -279,11 +297,10 @@ def _extract_tarball(archive_path: Path) -> None:
             rel = member.name[len(prefix):]
             if not rel:
                 continue
-            target = NODE_RUNTIME_DIR / rel
+            target = target_root / rel
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
             elif member.issym():
-                # 保留符号链接（macOS/Linux Node.js 中 bin/node -> ../lib/... 等）
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists() or target.is_symlink():
                     target.unlink()
@@ -294,29 +311,21 @@ def _extract_tarball(archive_path: Path) -> None:
                 if extracted:
                     with open(target, "wb") as dst:
                         shutil.copyfileobj(extracted, dst)
-                    # 保留可执行权限
                     if member.mode & 0o111:
                         target.chmod(target.stat().st_mode | 0o755)
 
 
-def _materialize_unix_node_launchers() -> None:
-    if IS_WINDOWS:
-        return
+def _extract_tarball(archive_path: Path) -> None:
+    """解压 .tar.gz / .tar.xz 格式的 Node.js（macOS / Linux）"""
+    # 推断 archive 内的顶层目录名
+    stem = NODE_ARCHIVE
+    for suffix in (".tar.gz", ".tar.xz"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
+    prefix = f"{stem}/"
 
-    for launcher_name in ("npm", "npx", "corepack"):
-        launcher = NODE_RUNTIME_DIR / "bin" / launcher_name
-        if not launcher.is_symlink():
-            continue
-        try:
-            target = launcher.resolve(strict=True)
-            content = target.read_bytes()
-            mode = target.stat().st_mode | 0o755
-            launcher.unlink()
-            launcher.write_bytes(content)
-            launcher.chmod(mode)
-            log(f"已实化 Node launcher 符号链接: {launcher_name}")
-        except Exception as exc:
-            log(f"警告：实化 Node launcher 失败（忽略）: {launcher_name} -> {exc}")
+    _extract_prefixed_tarball(archive_path, prefix, NODE_RUNTIME_DIR)
 
 
 def extract_node_runtime(archive_path: Path) -> None:
@@ -332,7 +341,6 @@ def extract_node_runtime(archive_path: Path) -> None:
         _extract_zip(archive_path)
     else:
         _extract_tarball(archive_path)
-        _materialize_unix_node_launchers()
 
     # 验证关键文件
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
@@ -344,13 +352,326 @@ def extract_node_runtime(archive_path: Path) -> None:
     log("Node.js 便携版解压完成")
 
 
+def _find_runtime_npm_cli() -> Path:
+    candidates = [
+        NODE_RUNTIME_DIR / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        NODE_RUNTIME_DIR / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
+        NODE_RUNTIME_DIR / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        NODE_RUNTIME_DIR / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Node runtime 中未找到 npm-cli.js: {NODE_RUNTIME_DIR}")
+
+
+def _find_vendor_typescript_cli(vendor_root: Path) -> Path:
+    candidates = [
+        vendor_root / "node_modules" / "typescript" / "bin" / "tsc",
+        vendor_root / "node_modules" / "typescript" / "bin" / "tsc.js",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"vendor/openclaw 中未找到 TypeScript CLI: {vendor_root / 'node_modules' / 'typescript'}")
+
+
+def _runtime_npm_command(*args: str) -> list[str]:
+    node_bin = NODE_RUNTIME_DIR / NODE_BIN
+    if not node_bin.exists():
+        raise FileNotFoundError(f"node 不存在: {node_bin}")
+    npm_cli = _find_runtime_npm_cli()
+    return [str(node_bin), str(npm_cli), *args]
+
+
+def _apply_runtime_npm_env(env: dict[str, str]) -> dict[str, str]:
+    npm_cache_dir = CACHE_DIR / "npm"
+    npm_cache_dir.mkdir(parents=True, exist_ok=True)
+    env["NPM_CONFIG_CACHE"] = str(npm_cache_dir)
+    return env
+
+
+def download_python_runtime() -> Path:
+    """下载最小 Python standalone 运行时，返回本地缓存路径"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    archive_path = CACHE_DIR / PYTHON_ARCHIVE
+    if archive_path.exists():
+        log(f"使用缓存 Python standalone 包: {archive_path}")
+        return archive_path
+    log(f"下载 Python standalone {PYTHON_RUNTIME_VERSION}: {PYTHON_DIST_URL}")
+    urllib.request.urlretrieve(PYTHON_DIST_URL, str(archive_path))
+    log(f"Python standalone 下载完成: {archive_path} ({archive_path.stat().st_size / 1024 / 1024:.1f} MB)")
+    return archive_path
+
+
+def _write_unix_python_shim(path: Path, target_name: str) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"\n'
+        f'exec "$SCRIPT_DIR/{target_name}" "$@"\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_unix_pip_shim(path: Path) -> None:
+    path.write_text(
+        "#!/bin/sh\n"
+        'SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$0")" && pwd)"\n'
+        'exec "$SCRIPT_DIR/python" -m pip "$@"\n',
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_windows_pip_shim(path: Path) -> None:
+    path.write_text("@echo off\r\n\"%~dp0python.exe\" -m pip %*\r\n", encoding="utf-8")
+
+
+def _find_extracted_python_binary() -> Path:
+    candidates = []
+    if IS_WINDOWS:
+        candidates.extend(
+            [
+                PYTHON_RUNTIME_DIR / "python.exe",
+                PYTHON_RUNTIME_DIR / "bin" / "python.exe",
+            ]
+        )
+    else:
+        candidates.extend(
+            [
+                PYTHON_RUNTIME_DIR / "bin" / "python",
+                PYTHON_RUNTIME_DIR / "bin" / f"python{PYTHON_RUNTIME_VERSION[:4]}",
+                PYTHON_RUNTIME_DIR / "bin" / "python3",
+            ]
+        )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Python standalone 解压后未找到解释器: {PYTHON_RUNTIME_DIR}")
+
+
+def _path_size_bytes(path: Path) -> int:
+    if not path.exists() and not path.is_symlink():
+        return 0
+    if path.is_file() or path.is_symlink():
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+    total = 0
+    for candidate in path.rglob("*"):
+        try:
+            if candidate.is_file() and not candidate.is_symlink():
+                total += candidate.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def _remove_path(path: Path) -> bool:
+    if not path.exists() and not path.is_symlink():
+        return False
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+        return True
+    path.unlink()
+    return True
+
+
+def _python_stdlib_roots() -> list[Path]:
+    roots: list[Path] = []
+    for candidate in sorted(PYTHON_RUNTIME_DIR.glob("lib/python3.*")):
+        if candidate.is_dir():
+            roots.append(candidate)
+    lib_dir = PYTHON_RUNTIME_DIR / "Lib"
+    if lib_dir.is_dir():
+        roots.append(lib_dir)
+    return roots
+
+
+def _materialize_python_shims() -> None:
+    python_bin = _find_extracted_python_binary()
+    if IS_WINDOWS:
+        root = python_bin.parent
+        pip_cmd = root / "pip.cmd"
+        pip3_cmd = root / "pip3.cmd"
+        if not pip_cmd.exists():
+            _write_windows_pip_shim(pip_cmd)
+        if not pip3_cmd.exists():
+            _write_windows_pip_shim(pip3_cmd)
+        python3_exe = root / "python3.exe"
+        if not python3_exe.exists():
+            shutil.copy2(python_bin, python3_exe)
+        return
+
+    bin_dir = python_bin.parent
+    python_name = python_bin.name
+    for shim_name in ("python", "python3"):
+        shim_path = bin_dir / shim_name
+        if shim_path.exists():
+            continue
+        _write_unix_python_shim(shim_path, python_name)
+    for shim_name in ("pip", "pip3"):
+        shim_path = bin_dir / shim_name
+        if shim_path.exists():
+            continue
+        _write_unix_pip_shim(shim_path)
+
+
+def _prune_python_runtime() -> None:
+    """裁剪 Python standalone 中与 MCP 运行无关的开发/GUI组件。"""
+    before_bytes = _path_size_bytes(PYTHON_RUNTIME_DIR)
+    removed_paths: list[str] = []
+
+    def drop(path: Path) -> None:
+        if _remove_path(path):
+            removed_paths.append(path.relative_to(PYTHON_RUNTIME_DIR).as_posix())
+
+    for rel in ("include", "share", "lib/pkgconfig"):
+        drop(PYTHON_RUNTIME_DIR / rel)
+
+    bin_dir = _find_extracted_python_binary().parent
+    for pattern in ("2to3*", "idle3*", "pydoc3*", "python*-config"):
+        for candidate in sorted(bin_dir.glob(pattern)):
+            drop(candidate)
+
+    for pattern in (
+        "lib/libtcl*",
+        "lib/libtk*",
+        "lib/tcl*",
+        "lib/tk*",
+        "lib/itcl*",
+        "lib/thread*",
+        "DLLs/tcl*.dll",
+        "DLLs/tk*.dll",
+    ):
+        for candidate in sorted(PYTHON_RUNTIME_DIR.glob(pattern)):
+            drop(candidate)
+
+    for stdlib_root in _python_stdlib_roots():
+        for rel in (
+            "idlelib",
+            "tkinter",
+            "turtledemo",
+            "__phello__",
+            "ensurepip",
+            "lib2to3",
+            "pydoc_data",
+            "test",
+            "tests",
+            "turtle.py",
+            "pydoc.py",
+        ):
+            candidate = stdlib_root / rel
+            if _remove_path(candidate):
+                removed_paths.append(candidate.relative_to(PYTHON_RUNTIME_DIR).as_posix())
+        for candidate in sorted(stdlib_root.glob("config-*")):
+            if _remove_path(candidate):
+                removed_paths.append(candidate.relative_to(PYTHON_RUNTIME_DIR).as_posix())
+        lib_dynload = stdlib_root / "lib-dynload"
+        if lib_dynload.is_dir():
+            for pattern in ("_tkinter*", "_test*", "_ctypes_test*", "xxlimited*"):
+                for candidate in sorted(lib_dynload.glob(pattern)):
+                    if _remove_path(candidate):
+                        removed_paths.append(candidate.relative_to(PYTHON_RUNTIME_DIR).as_posix())
+        site_packages = stdlib_root / "site-packages"
+        if site_packages.is_dir():
+            for rel in ("pkg_resources/tests", "pkg_resources/api_tests.txt", "setuptools/tests"):
+                candidate = site_packages / rel
+                if _remove_path(candidate):
+                    removed_paths.append(candidate.relative_to(PYTHON_RUNTIME_DIR).as_posix())
+
+    after_bytes = _path_size_bytes(PYTHON_RUNTIME_DIR)
+    removed_mb = max(before_bytes - after_bytes, 0) / 1024 / 1024
+    log(
+        "Python MCP 运行时裁剪完成: "
+        f"-{removed_mb:.1f} MB"
+        + (f" ({len(removed_paths)} 项)" if removed_paths else " (无可裁剪项)")
+    )
+
+
+def extract_python_runtime(archive_path: Path) -> None:
+    """解压 Python standalone 到 runtime/python/"""
+    if PYTHON_RUNTIME_DIR.exists():
+        log(f"清理旧 Python 运行时: {PYTHON_RUNTIME_DIR}")
+        shutil.rmtree(PYTHON_RUNTIME_DIR)
+
+    PYTHON_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    log(f"解压 Python standalone 到: {PYTHON_RUNTIME_DIR}")
+    _extract_prefixed_tarball(archive_path, "python/", PYTHON_RUNTIME_DIR)
+    _materialize_python_shims()
+    _prune_python_runtime()
+
+    python_bin = _find_extracted_python_binary()
+    if not python_bin.exists():
+        raise FileNotFoundError(f"解压后缺少 python: {python_bin}")
+    log(f"Python standalone 运行时准备完成: {PYTHON_RUNTIME_DIR}")
+
+
+_RELATIVE_TS_IMPORT_RE = re.compile(r'(?P<quote>["\'])(?P<path>\.{1,2}/[^"\']+?)\.tsx?(?P=quote)')
+
+
+def _rewrite_openclaw_dist_import_suffixes(dist_root: Path) -> None:
+    """将编译产物里残留的相对 .ts/.tsx import 后缀改写为 .js。"""
+    changed_files = 0
+    changed_refs = 0
+
+    for pattern in ("*.js", "*.mjs", "*.cjs"):
+        for candidate in dist_root.rglob(pattern):
+            try:
+                content = candidate.read_text(encoding="utf-8")
+            except Exception:
+                continue
+
+            original = content
+            rewritten_lines: list[str] = []
+            for line in content.splitlines(keepends=True):
+                if "import" not in line and "export" not in line:
+                    rewritten_lines.append(line)
+                    continue
+                line, count = _RELATIVE_TS_IMPORT_RE.subn(
+                    lambda match: f"{match.group('quote')}{match.group('path')}.js{match.group('quote')}",
+                    line,
+                )
+                changed_refs += count
+                rewritten_lines.append(line)
+
+            updated = "".join(rewritten_lines)
+            if updated == original:
+                continue
+
+            candidate.write_text(updated, encoding="utf-8")
+            changed_files += 1
+
+    log(f"OpenClaw dist import 后处理完成: {changed_files} 个文件, {changed_refs} 处引用")
+
+
+def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
+    """补齐 OpenClaw 运行时中 dist 外的必需文件。"""
+    dist_root = OPENCLAW_RUNTIME_DIR / "dist"
+    if dist_root.exists():
+        _rewrite_openclaw_dist_import_suffixes(dist_root)
+
+    shared_kit_src = vendor_root / "apps" / "shared" / "OpenClawKit"
+    if shared_kit_src.exists():
+        shared_kit_dst = OPENCLAW_RUNTIME_DIR / "apps" / "shared" / "OpenClawKit"
+        shared_kit_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(shared_kit_src, shared_kit_dst, dirs_exist_ok=True)
+        log(f"已复制 OpenClawKit 共享资源 -> {shared_kit_dst}")
+
+    gateway_script_src = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
+    if gateway_script_src.exists():
+        shutil.copy2(gateway_script_src, OPENCLAW_RUNTIME_DIR / "gateway_start.mjs")
+        log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
+
+
 def preinstall_openclaw(force: bool = False) -> None:
     """编译 vendor/openclaw 源码并复制到运行时目录"""
     vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
     if not vendor_root.exists():
         raise FileNotFoundError(f"vendor/openclaw 不存在: {vendor_root}")
 
-    npm_bin = NODE_RUNTIME_DIR / NPM_BIN
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
@@ -358,6 +679,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     # 检测是否已有编译产物
     dist_marker = OPENCLAW_RUNTIME_DIR / "dist" / "gateway" / "server.js"
     if not force and dist_marker.exists():
+        _sync_openclaw_runtime_sidefiles(vendor_root)
         log("OpenClaw runtime 已存在，跳过编译")
         return
 
@@ -373,12 +695,13 @@ def preinstall_openclaw(force: bool = False) -> None:
     else:
         node_bin_dir = NODE_RUNTIME_DIR / "bin"
         env["PATH"] = f"{node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    env = _apply_runtime_npm_env(env)
 
     # 1. 安装 vendor 依赖（如果 node_modules 不存在）
     if not (vendor_root / "node_modules").exists():
         log("安装 vendor/openclaw 依赖...")
         run(
-            [str(npm_bin), "install", "--ignore-scripts"],
+            _runtime_npm_command("install", "--ignore-scripts"),
             cwd=vendor_root,
             env=env,
         )
@@ -387,16 +710,17 @@ def preinstall_openclaw(force: bool = False) -> None:
     log("编译 vendor/openclaw 源码...")
     compile_env = env.copy()
     compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
-    npx_bin = NODE_RUNTIME_DIR / ("npx.cmd" if IS_WINDOWS else "bin/npx")
-    if not npx_bin.exists():
-        npx_bin = NODE_RUNTIME_DIR / "npx"
-    run(
-        [str(npx_bin), "tsc", "-p", "tsconfig.naga.json"],
+    tsc_cli = _find_vendor_typescript_cli(vendor_root)
+    compile_result = run(
+        [str(node_bin), str(tsc_cli), "-p", "tsconfig.naga.json"],
         cwd=vendor_root,
         env=compile_env,
+        check=False,
     )
 
     vendor_dist = vendor_root / "dist" / "gateway" / "server.js"
+    if compile_result.returncode != 0 and vendor_dist.exists():
+        log(f"警告：vendor/openclaw 编译返回非零退出码 {compile_result.returncode}，但 dist 已生成，继续打包")
     if not vendor_dist.exists():
         raise FileNotFoundError(f"编译失败：dist/gateway/server.js 不存在: {vendor_dist}")
 
@@ -406,12 +730,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     shutil.copytree(vendor_root / "node_modules", OPENCLAW_RUNTIME_DIR / "node_modules")
     shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
     shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
-
-    # 4. 复制 gateway_start.mjs
-    gateway_script_src = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
-    if gateway_script_src.exists():
-        shutil.copy2(gateway_script_src, OPENCLAW_RUNTIME_DIR / "gateway_start.mjs")
-        log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
+    _sync_openclaw_runtime_sidefiles(vendor_root)
 
     log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
 
@@ -444,10 +763,7 @@ def _has_agent_browser_browser_cache() -> bool:
 
 def preinstall_agent_browser(force: bool = False) -> None:
     """在内嵌运行时目录中预装 agent-browser，并预下载浏览器内核"""
-    npm_bin = NODE_RUNTIME_DIR / NPM_BIN
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
-    if not npm_bin.exists():
-        raise FileNotFoundError(f"npm 不存在: {npm_bin}")
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
 
@@ -473,21 +789,21 @@ def preinstall_agent_browser(force: bool = False) -> None:
     env["NPM_CONFIG_AUDIT"] = "false"
     env["NPM_CONFIG_FUND"] = "false"
     env["NPM_CONFIG_GLOBAL"] = "false"
+    env = _apply_runtime_npm_env(env)
     # 将浏览器二进制放进 node_modules，避免首次运行再下载到用户目录。
     env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
     env["CI"] = "1"
 
     log(f"预装 Agent Browser（npm install {AGENT_BROWSER_NPM_SPEC}）...")
     run(
-        [
-            str(npm_bin),
+        _runtime_npm_command(
             "install",
             AGENT_BROWSER_NPM_SPEC,
             "--global=false",
             "--location=project",
             "--prefix",
             str(OPENCLAW_RUNTIME_DIR),
-        ],
+        ),
         cwd=OPENCLAW_RUNTIME_DIR,
         env=env,
     )
@@ -574,16 +890,18 @@ def extract_uv_runtime(archive_path: Path) -> None:
 
 
 def prepare_openclaw_runtime(force: bool = False) -> None:
-    """准备 OpenClaw 运行时：Node.js 便携版 + OpenClaw/Agent Browser 预装 + uv standalone"""
+    """准备嵌入式运行时：Node.js + Python standalone + OpenClaw/Agent Browser + uv"""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     archive_path = download_node_runtime()
     extract_node_runtime(archive_path)
+    python_archive = download_python_runtime()
+    extract_python_runtime(python_archive)
     preinstall_openclaw(force=force)
     preinstall_agent_browser(force=force)
     # 下载并解压 uv standalone（用于 MCP uvx 服务）
     uv_archive = download_uv_runtime()
     extract_uv_runtime(uv_archive)
-    log("OpenClaw 运行时准备完成（已预装 Node.js + OpenClaw + Agent Browser + uv）")
+    log("嵌入式运行时准备完成（已预装 Node.js + Python + OpenClaw + Agent Browser + uv）")
 
 
 # ============ Step 4: PyInstaller 编译后端 ============

@@ -204,6 +204,7 @@ hiddenimports = [
     # numpy（音频处理核心）
     'numpy',
 ]
+hiddenimports += collect_submodules('mcpserver')
 hiddenimports += collect_submodules('psutil')
 hiddenimports += collect_submodules('charset_normalizer')
 

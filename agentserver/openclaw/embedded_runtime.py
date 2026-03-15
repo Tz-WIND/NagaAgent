@@ -203,22 +203,17 @@ class EmbeddedRuntime:
             return []
 
         extra_dirs: List[str] = []
-        node_dir = self._runtime_root / "node"
-        if node_dir.exists():
-            node_bin_dir = node_dir / "bin"
+        for subdir in ("node", "python", "uv"):
+            base_dir = self._runtime_root / subdir
+            if not base_dir.exists():
+                continue
+            bin_dir = base_dir / "bin"
             if platform.system() == "Windows":
-                extra_dirs.append(str(node_dir))
+                extra_dirs.append(str(base_dir))
             else:
-                if node_bin_dir.exists():
-                    extra_dirs.append(str(node_bin_dir))
-                extra_dirs.append(str(node_dir))
-
-        uv_dir = self._runtime_root / "uv"
-        if uv_dir.exists():
-            uv_bin_dir = uv_dir / "bin"
-            if uv_bin_dir.exists():
-                extra_dirs.append(str(uv_bin_dir))
-            extra_dirs.append(str(uv_dir))
+                if bin_dir.exists():
+                    extra_dirs.append(str(bin_dir))
+                extra_dirs.append(str(base_dir))
 
         return extra_dirs
 
@@ -265,6 +260,8 @@ class EmbeddedRuntime:
             self.node_path,
             self.npm_path,
             self.npx_path,
+            self.python_path,
+            self.pip_path,
             self.uv_path,
             self.uvx_path,
         ):
@@ -325,16 +322,13 @@ class EmbeddedRuntime:
         """Python 可执行文件路径。
 
         开发模式优先项目 venv。
-        打包模式若未内置独立 Python，则回落到系统 Python/py launcher，
-        避免外部 MCP 因为我们硬性返回 None 而被直接判死。
+        打包模式只允许使用内置 Python，避免隐式回退到用户系统环境。
         """
         if self.is_packaged:
             packaged_python = self._platform_bin("python", "python")
             if packaged_python:
                 return packaged_python
-            if platform.system() == "Windows":
-                return self._which_first(["python", "python3", "py"])
-            return self._which_first(["python3", "python"])
+            return None
         project_root = self._project_root()
         candidates = [
             project_root / ".venv" / "Scripts" / "python.exe",
@@ -354,9 +348,7 @@ class EmbeddedRuntime:
             packaged_pip = self._platform_bin("python", "pip")
             if packaged_pip:
                 return packaged_pip
-            if platform.system() == "Windows":
-                return self._which_first(["pip", "pip3"])
-            return self._which_first(["pip3", "pip"])
+            return None
         project_root = self._project_root()
         candidates = [
             project_root / ".venv" / "Scripts" / "pip.exe",
