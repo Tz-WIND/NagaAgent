@@ -448,6 +448,146 @@ def _write_openclaw_import_diagnostics(output: str) -> Optional[Path]:
     return diag_path
 
 
+_OPENCLAW_TS_SOURCE_SUFFIXES = {".ts", ".tsx", ".mts", ".cts"}
+_OPENCLAW_COPY_SOURCE_SUFFIXES = {".js", ".mjs", ".cjs", ".json", ".html", ".css", ".hash"}
+
+
+def _is_openclaw_emit_source(relative_posix_path: str) -> bool:
+    return not (
+        relative_posix_path.endswith(".d.ts")
+        or relative_posix_path.endswith(".d.mts")
+        or relative_posix_path.endswith(".d.cts")
+        or relative_posix_path.endswith(".test.ts")
+        or relative_posix_path.endswith(".live.test.ts")
+        or relative_posix_path.endswith(".e2e.test.ts")
+    )
+
+
+def _openclaw_dist_output_path(source_root: Path, dist_root: Path, source_path: Path) -> Optional[Path]:
+    relative_path = source_path.relative_to(source_root)
+    relative_posix = relative_path.as_posix()
+    suffix = source_path.suffix
+
+    if suffix in _OPENCLAW_TS_SOURCE_SUFFIXES:
+        if not _is_openclaw_emit_source(relative_posix):
+            return None
+        output_suffix = {
+            ".ts": ".js",
+            ".tsx": ".js",
+            ".mts": ".mjs",
+            ".cts": ".cjs",
+        }[suffix]
+        return dist_root / relative_path.with_suffix(output_suffix)
+
+    if suffix in _OPENCLAW_COPY_SOURCE_SUFFIXES:
+        return dist_root / relative_path
+
+    return None
+
+
+def _transpile_openclaw_source_module(
+    node_bin: Path,
+    vendor_root: Path,
+    source_path: Path,
+    output_path: Path,
+    env: dict[str, str],
+) -> None:
+    typescript_lib = vendor_root / "node_modules" / "typescript" / "lib" / "typescript.js"
+    tsconfig_path = vendor_root / "tsconfig.naga.json"
+    if not typescript_lib.exists():
+        raise FileNotFoundError(f"缺少 TypeScript 运行库: {typescript_lib}")
+    if not tsconfig_path.exists():
+        raise FileNotFoundError(f"缺少 tsconfig.naga.json: {tsconfig_path}")
+
+    module_kind = "CommonJS" if source_path.suffix == ".cts" else "ESNext"
+    script = (
+        "const fs = require('node:fs');"
+        "const path = require('node:path');"
+        "const [tsLibPath, tsconfigPath, srcPath, outPath, moduleKindName] = process.argv.slice(1);"
+        "const ts = require(tsLibPath);"
+        "const configFile = ts.readConfigFile(tsconfigPath, ts.sys.readFile);"
+        "if (configFile.error) {"
+        "  throw new Error(ts.flattenDiagnosticMessageText(configFile.error.messageText, '\\n'));"
+        "}"
+        "const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(tsconfigPath));"
+        "const source = fs.readFileSync(srcPath, 'utf8');"
+        "const output = ts.transpileModule(source, {"
+        "  compilerOptions: {"
+        "    ...parsed.options,"
+        "    module: ts.ModuleKind[moduleKindName],"
+        "    noEmit: false,"
+        "    declaration: false,"
+        "    sourceMap: false,"
+        "    inlineSourceMap: false,"
+        "    inlineSources: false,"
+        "    verbatimModuleSyntax: true"
+        "  },"
+        "  fileName: srcPath,"
+        "  reportDiagnostics: true"
+        "});"
+        "fs.mkdirSync(path.dirname(outPath), { recursive: true });"
+        "fs.writeFileSync(outPath, output.outputText, 'utf8');"
+        "const errors = (output.diagnostics || []).filter((d) => d.category === ts.DiagnosticCategory.Error);"
+        "if (errors.length > 0) {"
+        "  const summary = errors.slice(0, 5)"
+        "    .map((d) => ts.flattenDiagnosticMessageText(d.messageText, '\\n'))"
+        "    .join('\\n');"
+        "  console.error(summary);"
+        "}"
+    )
+    result = subprocess.run(
+        [
+            str(node_bin),
+            "-e",
+            script,
+            str(typescript_lib),
+            str(tsconfig_path),
+            str(source_path),
+            str(output_path),
+            module_kind,
+        ],
+        cwd=vendor_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        raise RuntimeError(
+            f"补齐 OpenClaw dist 产物失败: {source_path} -> {output_path}"
+            + (f"\n{output}" if output else "")
+        )
+
+
+def _reconcile_openclaw_dist_from_source(
+    node_bin: Path,
+    vendor_root: Path,
+    dist_root: Path,
+    env: dict[str, str],
+) -> tuple[int, int]:
+    source_root = vendor_root / "src"
+    transpiled_count = 0
+    copied_count = 0
+
+    for source_path in sorted(source_root.rglob("*")):
+        if not source_path.is_file():
+            continue
+        output_path = _openclaw_dist_output_path(source_root, dist_root, source_path)
+        if output_path is None or output_path.exists():
+            continue
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if source_path.suffix in _OPENCLAW_TS_SOURCE_SUFFIXES:
+            _transpile_openclaw_source_module(node_bin, vendor_root, source_path, output_path, env)
+            transpiled_count += 1
+        else:
+            shutil.copy2(source_path, output_path)
+            copied_count += 1
+
+    return transpiled_count, copied_count
+
+
 def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str]) -> None:
     verify_script = (
         "import { resolve } from 'node:path';"
@@ -810,14 +950,14 @@ def preinstall_openclaw(force: bool = False) -> None:
     log("编译 vendor/openclaw 源码...")
     compile_env = env.copy()
     compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
-    vendor_dist_root = vendor_root / "dist"
-    if vendor_dist_root.exists():
-        log(f"清理旧 vendor/openclaw dist: {vendor_dist_root}")
-        shutil.rmtree(vendor_dist_root)
+    runtime_dist_root = OPENCLAW_RUNTIME_DIR / "dist"
+    if runtime_dist_root.exists():
+        log(f"清理旧 OpenClaw runtime dist: {runtime_dist_root}")
+        shutil.rmtree(runtime_dist_root)
     tsc_cli = _find_vendor_typescript_cli(vendor_root)
-    log(f"$ {node_bin} {tsc_cli} -p tsconfig.naga.json")
+    log(f"$ {node_bin} {tsc_cli} -p tsconfig.naga.json --outDir {runtime_dist_root}")
     compile_result = subprocess.run(
-        [str(node_bin), str(tsc_cli), "-p", "tsconfig.naga.json"],
+        [str(node_bin), str(tsc_cli), "-p", "tsconfig.naga.json", "--outDir", str(runtime_dist_root)],
         cwd=vendor_root,
         env=compile_env,
         capture_output=True,
@@ -826,27 +966,37 @@ def preinstall_openclaw(force: bool = False) -> None:
         check=False,
     )
     compile_output = "\n".join(part for part in (compile_result.stdout, compile_result.stderr) if part).strip()
+    reconciled_ts, reconciled_assets = _reconcile_openclaw_dist_from_source(
+        node_bin,
+        vendor_root,
+        runtime_dist_root,
+        compile_env,
+    )
+    if reconciled_ts or reconciled_assets:
+        log(
+            "OpenClaw runtime dist 源码对齐完成: "
+            f"{reconciled_ts} 个源码转译, {reconciled_assets} 个资源复制"
+        )
 
-    vendor_dist = vendor_dist_root / "gateway" / "server.js"
-    if compile_result.returncode != 0 and vendor_dist.exists():
+    runtime_dist = runtime_dist_root / "gateway" / "server.js"
+    if compile_result.returncode != 0 and runtime_dist.exists():
         diag_path = _write_openclaw_tsc_diagnostics(compile_output)
         message = (
             f"警告：vendor/openclaw 编译返回非零退出码 {compile_result.returncode}，"
-            "但 dist 已生成，继续打包"
+            "但 runtime dist 已生成，继续打包"
         )
         if diag_path:
             message += f"；诊断日志已写入 {diag_path}"
         log(message)
-    if not vendor_dist.exists():
+    if not runtime_dist.exists():
         diag_path = _write_openclaw_tsc_diagnostics(compile_output)
         if diag_path:
             log(f"OpenClaw TypeScript 诊断日志: {diag_path}")
         _log_openclaw_tsc_excerpt(compile_output)
-        raise FileNotFoundError(f"编译失败：dist/gateway/server.js 不存在: {vendor_dist}")
+        raise FileNotFoundError(f"编译失败：runtime dist/gateway/server.js 不存在: {runtime_dist}")
 
-    # 3. 复制编译产物 + 依赖到 runtime
-    log("复制编译产物到运行时目录...")
-    shutil.copytree(vendor_root / "dist", OPENCLAW_RUNTIME_DIR / "dist")
+    # 3. 复制依赖到 runtime
+    log("复制 OpenClaw 依赖到运行时目录...")
     shutil.copytree(vendor_root / "node_modules", OPENCLAW_RUNTIME_DIR / "node_modules")
     shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
     shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
