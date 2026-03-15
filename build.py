@@ -680,6 +680,26 @@ def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
         log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
 
 
+def _write_openclaw_tsc_diagnostics(output: str) -> Optional[Path]:
+    if not output.strip():
+        return None
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    diag_path = CACHE_DIR / "openclaw-tsc.log"
+    diag_path.write_text(output, encoding="utf-8")
+    return diag_path
+
+
+def _log_openclaw_tsc_excerpt(output: str, limit: int = 20) -> None:
+    lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return
+    for line in lines[:limit]:
+        log(f"[openclaw-tsc] {line}")
+    remaining = len(lines) - limit
+    if remaining > 0:
+        log(f"[openclaw-tsc] ... 其余 {remaining} 行已省略")
+
+
 def preinstall_openclaw(force: bool = False) -> None:
     """编译 vendor/openclaw 源码并复制到运行时目录"""
     vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
@@ -725,17 +745,33 @@ def preinstall_openclaw(force: bool = False) -> None:
     compile_env = env.copy()
     compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
     tsc_cli = _find_vendor_typescript_cli(vendor_root)
-    compile_result = run(
+    log(f"$ {node_bin} {tsc_cli} -p tsconfig.naga.json")
+    compile_result = subprocess.run(
         [str(node_bin), str(tsc_cli), "-p", "tsconfig.naga.json"],
         cwd=vendor_root,
         env=compile_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
         check=False,
     )
+    compile_output = "\n".join(part for part in (compile_result.stdout, compile_result.stderr) if part).strip()
 
     vendor_dist = vendor_root / "dist" / "gateway" / "server.js"
     if compile_result.returncode != 0 and vendor_dist.exists():
-        log(f"警告：vendor/openclaw 编译返回非零退出码 {compile_result.returncode}，但 dist 已生成，继续打包")
+        diag_path = _write_openclaw_tsc_diagnostics(compile_output)
+        message = (
+            f"警告：vendor/openclaw 编译返回非零退出码 {compile_result.returncode}，"
+            "但 dist 已生成，继续打包"
+        )
+        if diag_path:
+            message += f"；诊断日志已写入 {diag_path}"
+        log(message)
     if not vendor_dist.exists():
+        diag_path = _write_openclaw_tsc_diagnostics(compile_output)
+        if diag_path:
+            log(f"OpenClaw TypeScript 诊断日志: {diag_path}")
+        _log_openclaw_tsc_excerpt(compile_output)
         raise FileNotFoundError(f"编译失败：dist/gateway/server.js 不存在: {vendor_dist}")
 
     # 3. 复制编译产物 + 依赖到 runtime
