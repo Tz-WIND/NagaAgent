@@ -96,12 +96,15 @@ class EmbeddedRuntime:
     def _get_vendor_root(self) -> Path:
         """获取 vendor/openclaw 目录。
 
-        打包模式：runtime/openclaw/（内含预编译 dist + node_modules）
+        打包模式：优先使用 _internal/vendor/openclaw/（随 PyInstaller 冻结）
         开发模式：项目根 vendor/openclaw/（源码 + 共享 node_modules）
         """
+        bundled_vendor = self._project_root() / "vendor" / "openclaw"
+        if bundled_vendor.exists():
+            return bundled_vendor
         if self.is_packaged and self._runtime_root:
             return self._runtime_root / "openclaw"
-        return Path(__file__).resolve().parent.parent.parent / "vendor" / "openclaw"
+        return bundled_vendor
 
     def _get_project_runtime_root(self) -> Path:
         """开发态本地 runtime 目录。"""
@@ -456,6 +459,9 @@ class EmbeddedRuntime:
         if self.is_packaged and self._runtime_root is not None:
             extra_dirs.extend(self._packaged_runtime_path_dirs())
             env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+            packaged_openclaw_bin = self._runtime_root / "openclaw" / "node_modules" / ".bin"
+            if packaged_openclaw_bin.exists():
+                extra_dirs.append(str(packaged_openclaw_bin))
 
         # vendor node_modules/.bin 始终加入（开发 + 打包都需要）
         vendor_bin = self._get_vendor_root() / "node_modules" / ".bin"
@@ -593,11 +599,8 @@ class EmbeddedRuntime:
         if not node:
             return None
 
-        # gateway_start.mjs 位置
-        if self.is_packaged and self._runtime_root:
-            entry = self._runtime_root / "openclaw" / "gateway_start.mjs"
-        else:
-            entry = Path(__file__).parent / "gateway_start.mjs"
+        # gateway_start.mjs 与本模块同目录，由 PyInstaller 一并冻结。
+        entry = Path(__file__).parent / "gateway_start.mjs"
         if not entry.exists():
             logger.error(f"gateway_start.mjs 不存在: {entry}")
             return None

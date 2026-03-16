@@ -650,15 +650,13 @@ def _hydrate_missing_openclaw_runtime_module(
 
 
 def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_root: Path) -> None:
-    del vendor_root
-
-    source_entry = OPENCLAW_RUNTIME_DIR / "src" / "gateway" / "server.ts"
+    source_entry = vendor_root / "src" / "gateway" / "server.ts"
     if not source_entry.exists():
         raise FileNotFoundError(f"OpenClaw Gateway 源码入口不存在: {source_entry}")
 
     verify_env = env.copy()
     verify_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source"
-    verify_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(OPENCLAW_RUNTIME_DIR)
+    verify_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(vendor_root)
     verify_script = (
         "import { resolve } from 'node:path';"
         "import { pathToFileURL } from 'node:url';"
@@ -671,7 +669,7 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_
     )
     result = subprocess.run(
         [str(node_bin), "--import", "tsx", "--input-type=module", "-e", verify_script],
-        cwd=OPENCLAW_RUNTIME_DIR,
+        cwd=vendor_root,
         env=verify_env,
         capture_output=True,
         text=True,
@@ -990,7 +988,7 @@ def _log_openclaw_tsc_excerpt(output: str, limit: int = 20) -> None:
 
 
 def preinstall_openclaw(force: bool = False) -> None:
-    """准备可源码直跑的 OpenClaw 运行时目录。"""
+    """准备随 PyInstaller 一起冻结的 vendor/openclaw 源码运行时。"""
     vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
     if not vendor_root.exists():
         raise FileNotFoundError(f"vendor/openclaw 不存在: {vendor_root}")
@@ -999,19 +997,18 @@ def preinstall_openclaw(force: bool = False) -> None:
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
 
-    source_marker = OPENCLAW_RUNTIME_DIR / "src" / "gateway" / "server.ts"
-    tsx_marker = OPENCLAW_RUNTIME_DIR / "node_modules" / "tsx"
-    gateway_marker = OPENCLAW_RUNTIME_DIR / "gateway_start.mjs"
+    source_marker = vendor_root / "src" / "gateway" / "server.ts"
+    tsx_marker = vendor_root / "node_modules" / "tsx"
+    gateway_marker = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
     if not force and source_marker.exists() and tsx_marker.exists() and gateway_marker.exists():
-        _sync_openclaw_runtime_sidefiles(vendor_root)
-        log("OpenClaw runtime 已存在，跳过重建")
+        _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), vendor_root)
+        log("vendor/openclaw 已就绪，跳过重建")
         return
 
-    # 清理旧运行时
+    # 清理旧 runtime/openclaw，避免历史残留继续被 Electron 资源目录带上。
     if OPENCLAW_RUNTIME_DIR.exists():
         log(f"清理旧 OpenClaw 运行时: {OPENCLAW_RUNTIME_DIR}")
         shutil.rmtree(OPENCLAW_RUNTIME_DIR)
-    OPENCLAW_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     if IS_WINDOWS:
@@ -1024,13 +1021,11 @@ def preinstall_openclaw(force: bool = False) -> None:
     # 1. 安装 vendor 依赖（需要保留平台 postinstall / native 包处理）
     _install_openclaw_vendor_dependencies(vendor_root, env, force=force)
 
-    # 2. 同步源码与依赖到 runtime
-    log("同步 OpenClaw 源码与依赖到运行时目录...")
-    shutil.copytree(vendor_root / "node_modules", OPENCLAW_RUNTIME_DIR / "node_modules")
-    _sync_openclaw_runtime_sidefiles(vendor_root)
+    # 2. 直接校验 vendor/openclaw 源码入口，打包时由 PyInstaller 冻结整个 vendor/。
+    log("校验 vendor/openclaw 源码入口...")
     _verify_openclaw_runtime_import(node_bin, env, vendor_root)
 
-    log(f"OpenClaw 运行时准备完成（源码直跑）: {OPENCLAW_RUNTIME_DIR}")
+    log(f"OpenClaw 运行时准备完成（源码直跑）: {vendor_root}")
 
 
 def _agent_browser_bin_name() -> str:
@@ -1041,15 +1036,36 @@ def _runtime_node_path_prefix() -> str:
     return str(NODE_RUNTIME_DIR if IS_WINDOWS else NODE_RUNTIME_DIR / "bin")
 
 
-def _agent_browser_browser_cache_dirs() -> list[Path]:
+def _find_playwright_core_cli(install_root: Path) -> Optional[Path]:
+    candidates = [
+        install_root / "node_modules" / "playwright-core" / "cli.js",
+        install_root / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / "cli.js",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _agent_browser_browser_cache_dirs(install_root: Path) -> list[Path]:
     return [
-        OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / ".local-browsers",
-        OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / ".local-browsers",
+        install_root / "node_modules" / "playwright-core" / ".local-browsers",
+        install_root / "node_modules" / "agent-browser" / "node_modules" / "playwright-core" / ".local-browsers",
     ]
 
 
-def _has_agent_browser_browser_cache() -> bool:
-    for candidate in _agent_browser_browser_cache_dirs():
+def _has_agent_browser_native_bundle(install_root: Path) -> bool:
+    bin_dir = install_root / "node_modules" / "agent-browser" / "bin"
+    if not bin_dir.exists():
+        return False
+    for candidate in bin_dir.iterdir():
+        if candidate.is_file() and candidate.name.startswith("agent-browser-") and candidate.name != "agent-browser.js":
+            return True
+    return False
+
+
+def _has_agent_browser_browser_cache(install_root: Path) -> bool:
+    for candidate in _agent_browser_browser_cache_dirs(install_root):
         if candidate.exists():
             try:
                 if any(candidate.iterdir()):
@@ -1060,14 +1076,14 @@ def _has_agent_browser_browser_cache() -> bool:
 
 
 def preinstall_agent_browser(force: bool = False) -> None:
-    """在内嵌运行时目录中预装 agent-browser，并预下载浏览器内核"""
+    """在外部 runtime/openclaw 中预装 agent-browser，避免 PyInstaller 冻结浏览器二进制。"""
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
 
+    OPENCLAW_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     agent_browser_cmd = OPENCLAW_RUNTIME_DIR / "node_modules" / ".bin" / _agent_browser_bin_name()
     agent_browser_pkg = OPENCLAW_RUNTIME_DIR / "node_modules" / "agent-browser" / "package.json"
-    playwright_core_cli = OPENCLAW_RUNTIME_DIR / "node_modules" / "playwright-core" / "cli.js"
 
     installed_version: Optional[str] = None
     if agent_browser_pkg.exists():
@@ -1076,10 +1092,14 @@ def preinstall_agent_browser(force: bool = False) -> None:
         except Exception:
             installed_version = None
 
-    if not force and agent_browser_cmd.exists() and _has_agent_browser_browser_cache():
+    if not force and agent_browser_cmd.exists() and (
+        _has_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR) or _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR)
+    ):
         log(f"agent-browser 已预装: {installed_version or 'unknown'}，跳过安装")
         return
-    if agent_browser_cmd.exists() and not _has_agent_browser_browser_cache():
+    if agent_browser_cmd.exists() and not (
+        _has_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR) or _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR)
+    ):
         log("检测到 agent-browser 命令已存在，但浏览器缓存缺失，继续补装 chromium")
 
     env = os.environ.copy()
@@ -1108,8 +1128,13 @@ def preinstall_agent_browser(force: bool = False) -> None:
 
     if not agent_browser_cmd.exists():
         raise FileNotFoundError(f"agent-browser 预装失败，未找到命令: {agent_browser_cmd}")
-    if not playwright_core_cli.exists():
-        raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {playwright_core_cli}")
+    playwright_core_cli = _find_playwright_core_cli(OPENCLAW_RUNTIME_DIR)
+    if playwright_core_cli is None:
+        if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
+            log("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright-core 预下载")
+            log(f"Agent Browser 预装完成: {agent_browser_cmd}")
+            return
+        raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {OPENCLAW_RUNTIME_DIR / 'node_modules'}")
 
     log("预下载 Agent Browser 浏览器依赖（playwright-core install chromium）...")
     run(
@@ -1123,10 +1148,12 @@ def preinstall_agent_browser(force: bool = False) -> None:
         env=env,
     )
 
-    browsers_dirs = [str(path) for path in _agent_browser_browser_cache_dirs() if path.exists()]
+    browsers_dirs = [str(path) for path in _agent_browser_browser_cache_dirs(OPENCLAW_RUNTIME_DIR) if path.exists()]
     if browsers_dirs:
         log(f"Agent Browser 浏览器缓存已写入: {', '.join(browsers_dirs)}")
-    elif not _has_agent_browser_browser_cache():
+    elif not (
+        _has_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR) or _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR)
+    ):
         raise FileNotFoundError("playwright-core install chromium 执行完成，但未找到浏览器缓存目录")
     log(f"Agent Browser 预装完成: {agent_browser_cmd}")
 
