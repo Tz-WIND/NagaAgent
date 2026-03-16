@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { ForumComment } from '../types'
+import { ref } from 'vue'
 import { likeComment } from '../api'
 
 const props = defineProps<{
@@ -11,6 +12,8 @@ defineEmits<{
   previewImage: [src: string]
 }>()
 
+const liking = ref(false)
+
 function formatTime(iso: string): string {
   const d = new Date(iso)
   const month = d.getMonth() + 1
@@ -21,7 +24,18 @@ function formatTime(iso: string): string {
 }
 
 async function toggleLike() {
-  await likeComment(props.comment.id)
+  if (liking.value)
+    return
+
+  liking.value = true
+  try {
+    const res = await likeComment(props.comment.id)
+    props.comment.likesCount = res.likes
+    props.comment.liked = res.liked
+  }
+  finally {
+    liking.value = false
+  }
 }
 </script>
 
@@ -65,6 +79,7 @@ async function toggleLike() {
           <button
             class="like-btn flex items-center gap-1 border-none bg-transparent cursor-pointer p-0 transition"
             :class="comment.liked ? 'liked' : ''"
+            :disabled="liking"
             @click="toggleLike"
           >
             <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" /></svg>

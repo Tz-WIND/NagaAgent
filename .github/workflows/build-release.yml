@@ -64,6 +64,26 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify mac DMG payload
+        if: matrix.platform == 'mac'
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_path=$(ls frontend/release/*.dmg)
+          mount_dir=$(mktemp -d /tmp/naga-dmg-check.XXXXXX)
+          app_path="$mount_dir/Naga Agent.app"
+          framework_bin="$app_path/Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework"
+          cleanup() {
+            hdiutil detach "$mount_dir" -quiet || true
+            rm -rf "$mount_dir"
+          }
+          trap cleanup EXIT
+
+          hdiutil attach "$dmg_path" -mountpoint "$mount_dir" -nobrowse -quiet
+          test -d "$app_path"
+          test -f "$framework_bin"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
