@@ -62,6 +62,7 @@ OPENCLAW_RUNTIME_DIR = RUNTIME_DIR / "openclaw"
 PYTHON_RUNTIME_DIR = RUNTIME_DIR / "python"
 SPEC_FILE = PROJECT_ROOT / "naga-backend.spec"
 AGENT_BROWSER_NPM_SPEC = "agent-browser"
+OPENCLAW_SOURCE_LOADER = PROJECT_ROOT / "agentserver" / "openclaw" / "source_resolver.mjs"
 
 # 最低版本要求
 MIN_NODE_MAJOR = 22
@@ -653,6 +654,8 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_
     source_entry = vendor_root / "src" / "gateway" / "server.ts"
     if not source_entry.exists():
         raise FileNotFoundError(f"OpenClaw Gateway 源码入口不存在: {source_entry}")
+    if not OPENCLAW_SOURCE_LOADER.exists():
+        raise FileNotFoundError(f"OpenClaw 源码解析 loader 不存在: {OPENCLAW_SOURCE_LOADER}")
 
     verify_env = env.copy()
     verify_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source"
@@ -668,7 +671,16 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_
         "console.log('openclaw-gateway-source-import-ok');"
     )
     result = subprocess.run(
-        [str(node_bin), "--import", "tsx", "--input-type=module", "-e", verify_script],
+        [
+            str(node_bin),
+            "--import",
+            "tsx",
+            "--loader",
+            str(OPENCLAW_SOURCE_LOADER),
+            "--input-type=module",
+            "-e",
+            verify_script,
+        ],
         cwd=vendor_root,
         env=verify_env,
         capture_output=True,
@@ -1000,7 +1012,8 @@ def preinstall_openclaw(force: bool = False) -> None:
     source_marker = vendor_root / "src" / "gateway" / "server.ts"
     tsx_marker = vendor_root / "node_modules" / "tsx"
     gateway_marker = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
-    if not force and source_marker.exists() and tsx_marker.exists() and gateway_marker.exists():
+    loader_marker = OPENCLAW_SOURCE_LOADER
+    if not force and source_marker.exists() and tsx_marker.exists() and gateway_marker.exists() and loader_marker.exists():
         _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), vendor_root)
         log("vendor/openclaw 已就绪，跳过重建")
         return
