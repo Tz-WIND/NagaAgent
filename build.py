@@ -6,7 +6,7 @@ NagaAgent 跨平台构建脚本（Windows / macOS / Linux）
 流程：
   1. 环境检查（Python, uv, Node.js, npm）
   2. 同步 Python 依赖 + build 组（pyinstaller）
-  3. 准备 OpenClaw 运行时（下载 Node.js 便携版 + 预装 OpenClaw/Agent Browser）
+  3. 准备 OpenClaw 运行时（复用构建机 Node.js + 预装 OpenClaw/Agent Browser）
   4. PyInstaller 编译 Python 后端
   5. Electron 前端构建 + 打包
   6. 输出汇总
@@ -62,7 +62,6 @@ OPENCLAW_RUNTIME_DIR = RUNTIME_DIR / "openclaw"
 PYTHON_RUNTIME_DIR = RUNTIME_DIR / "python"
 SPEC_FILE = PROJECT_ROOT / "naga-backend.spec"
 AGENT_BROWSER_NPM_SPEC = "agent-browser"
-OPENCLAW_SOURCE_LOADER = PROJECT_ROOT / "agentserver" / "openclaw" / "source_resolver.mjs"
 OPENCLAW_SOURCE_REGISTER = PROJECT_ROOT / "agentserver" / "openclaw" / "source_register.mjs"
 
 # 最低版本要求
@@ -286,6 +285,44 @@ def download_node_runtime() -> Path:
     return archive_path
 
 
+def _find_node_runtime_npm_cli(runtime_root: Path) -> Optional[Path]:
+    candidates = [
+        runtime_root / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        runtime_root / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
+        runtime_root / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
+        runtime_root / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _resolve_build_node_runtime_root() -> Optional[Path]:
+    node_cmd = shutil.which("node")
+    if not node_cmd:
+        return None
+
+    node_path = Path(node_cmd).resolve()
+    root_candidates: list[Path] = []
+    if node_path.parent.name == "bin":
+        root_candidates.append(node_path.parent.parent)
+    root_candidates.append(node_path.parent)
+
+    seen: set[Path] = set()
+    for runtime_root in root_candidates:
+        if runtime_root in seen:
+            continue
+        seen.add(runtime_root)
+        if not (runtime_root / NODE_BIN).exists():
+            continue
+        npm_cmd = runtime_root / NPM_BIN
+        npm_cli = _find_node_runtime_npm_cli(runtime_root)
+        if npm_cmd.exists() or npm_cli is not None:
+            return runtime_root
+    return None
+
+
 def _extract_zip(archive_path: Path) -> None:
     """解压 .zip 格式的 Node.js（Windows）"""
     prefix = f"node-v{NODE_VERSION}-win-x64/"
@@ -369,16 +406,38 @@ def extract_node_runtime(archive_path: Path) -> None:
     log("Node.js 便携版解压完成")
 
 
+def prepare_node_runtime() -> None:
+    """优先复用构建机 Node.js 安装目录到 runtime/node，找不到时再回退下载。"""
+    shared_runtime_root = _resolve_build_node_runtime_root()
+    if shared_runtime_root is None:
+        log("未定位到可复用的构建机 Node.js 安装，回退到下载便携版")
+        archive_path = download_node_runtime()
+        extract_node_runtime(archive_path)
+        return
+
+    if NODE_RUNTIME_DIR.exists():
+        log(f"清理旧 Node.js 运行时: {NODE_RUNTIME_DIR}")
+        shutil.rmtree(NODE_RUNTIME_DIR)
+
+    log(f"复用构建机 Node.js 到: {NODE_RUNTIME_DIR} <- {shared_runtime_root}")
+    shutil.copytree(shared_runtime_root, NODE_RUNTIME_DIR, symlinks=not IS_WINDOWS)
+
+    node_bin = NODE_RUNTIME_DIR / NODE_BIN
+    npm_bin = NODE_RUNTIME_DIR / NPM_BIN
+    npm_cli = _find_node_runtime_npm_cli(NODE_RUNTIME_DIR)
+    if not node_bin.exists():
+        raise FileNotFoundError(f"复制后缺少 node: {node_bin}")
+    if not npm_bin.exists() and npm_cli is None:
+        raise FileNotFoundError(f"复制后缺少 npm: {NODE_RUNTIME_DIR}")
+
+    shared_node_ver = get_cmd_version("node") or "unknown"
+    log(f"Node.js 运行时已与构建机对齐: {shared_node_ver}")
+
+
 def _find_runtime_npm_cli() -> Path:
-    candidates = [
-        NODE_RUNTIME_DIR / "node_modules" / "npm" / "bin" / "npm-cli.js",
-        NODE_RUNTIME_DIR / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
-        NODE_RUNTIME_DIR / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.js",
-        NODE_RUNTIME_DIR / "lib" / "node_modules" / "npm" / "bin" / "npm-cli.mjs",
-    ]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
+    candidate = _find_node_runtime_npm_cli(NODE_RUNTIME_DIR)
+    if candidate is not None:
+        return candidate
     raise FileNotFoundError(f"Node runtime 中未找到 npm-cli.js: {NODE_RUNTIME_DIR}")
 
 
@@ -1229,10 +1288,9 @@ def extract_uv_runtime(archive_path: Path) -> None:
 
 
 def prepare_openclaw_runtime(force: bool = False) -> None:
-    """准备嵌入式运行时：Node.js + Python standalone + OpenClaw/Agent Browser + uv"""
+    """准备嵌入式运行时：共享 Node.js + Python standalone + OpenClaw/Agent Browser + uv"""
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    archive_path = download_node_runtime()
-    extract_node_runtime(archive_path)
+    prepare_node_runtime()
     python_archive = download_python_runtime()
     extract_python_runtime(python_archive)
     preinstall_openclaw(force=force)
