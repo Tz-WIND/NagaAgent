@@ -76,6 +76,7 @@ mac:
   identity: null
 
 dmg:
+  size: 4g
   contents:
     - x: 130
       y: 220
