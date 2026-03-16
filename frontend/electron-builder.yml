@@ -6,6 +6,8 @@ directories:
   buildResources: build
   output: release
 
+afterPack: scripts/after-pack.mjs
+
 files:
   - dist/**/*
   - dist-electron/**/*
@@ -53,6 +55,8 @@ win:
   # electron-builder v26: cscLink + cscKeyPassword
   cscLink: build/codesign.pfx
   cscKeyPassword: NagaSign2024
+  signtoolOptions:
+    sign: scripts/win-sign.cjs
 
 nsis:
   oneClick: false

@@ -322,6 +322,17 @@ def _has_agent_browser_browser_cache(runtime_dir: Optional[Path]) -> bool:
     return False
 
 
+def _remove_agent_browser_browser_cache(runtime_dir: Optional[Path]) -> int:
+    if runtime_dir is None:
+        return 0
+    removed = 0
+    for candidate in _agent_browser_browser_cache_dirs(runtime_dir):
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
     MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
     mcporter_config: Dict[str, Any] = {}
@@ -357,6 +368,10 @@ def _install_agent_browser() -> None:
     runtime_dir = _resolve_packaged_openclaw_runtime_dir()
     prebundled_cmd = _resolve_prebundled_agent_browser_cmd()
     if prebundled_cmd and _has_agent_browser_browser_cache(runtime_dir):
+        if _has_agent_browser_native_bundle(runtime_dir):
+            removed = _remove_agent_browser_browser_cache(runtime_dir)
+            if removed > 0:
+                logger.info(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
         logger.info(f"检测到预装 agent-browser 与浏览器缓存，跳过在线安装: {prebundled_cmd}")
         return
 
@@ -389,6 +404,14 @@ def _install_agent_browser() -> None:
     )
     if code != 0:
         raise RuntimeError(stderr or stdout or "npm install agent-browser 失败")
+
+    if _has_agent_browser_native_bundle(install_root):
+        removed = _remove_agent_browser_browser_cache(install_root)
+        if removed > 0:
+            logger.info(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
+        logger.info("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright 安装")
+        return
+
     logger.info("正在 playwright install chromium（下载浏览器，可能需要数分钟）...")
     code, stdout, stderr = _run_command(
         [npm_cmd, "exec", "--prefix", str(install_root), "playwright", "install", "chromium"],

@@ -17,6 +17,20 @@ from PyInstaller.utils.hooks import (
 
 block_cipher = None
 
+
+def safe_print(*values, sep=" ", end="\n", file=None):
+    stream = file or sys.stdout
+    text = sep.join(str(value) for value in values)
+    try:
+        print(text, end=end, file=stream, flush=True)
+        return
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        fallback = text.encode(encoding, errors="backslashreplace").decode(encoding, errors="strict")
+        stream.write(fallback)
+        stream.write(end)
+        stream.flush()
+
 # 项目根目录
 # PyInstaller 的 SPECPATH 可能是“spec 所在目录”或“spec 文件路径”，这里统一兼容。
 _spec_path = Path(SPECPATH).resolve()
@@ -29,6 +43,8 @@ _EXCLUDE_DIRS = {
     'uploaded_documents', 'hooks', '.cache', '.git', '.github',
     '__pycache__', '.venv', '.mypy_cache', '.pytest_cache', '.ruff_cache',
     'node_modules',
+    # OpenClaw 打包态从 resources/runtime/openclaw 运行，不再将 vendor 冻结进 _internal
+    'vendor',
     # PyQt UI（headless 模式不需要）
     'ui',
     # mcpserver 的 Python 模块由 PyInstaller 冻结导入，data 只额外收集 manifest
@@ -44,7 +60,7 @@ for entry in os.listdir(PROJECT_ROOT):
     if entry in _EXCLUDE_DIRS or entry.startswith('.'):
         continue
     datas.append((entry, entry))
-    print(f"[spec] Include directory: {entry}/")
+    safe_print(f"[spec] Include directory: {entry}/")
 
 # mcpserver: 收集所有 agent-manifest.json（前端技能列表 + 工具 schema 扫描需要）
 import glob as _glob
@@ -56,7 +72,7 @@ for _mf in _manifest_files:
     _rel = os.path.relpath(_mf, PROJECT_ROOT)          # e.g. mcpserver/agent_weather_time/agent-manifest.json
     _dest = os.path.dirname(_rel)                       # e.g. mcpserver/agent_weather_time
     datas.append((_rel, _dest))
-print(f"[spec] Collected {len(_manifest_files)} MCP agent manifests")
+safe_print(f"[spec] Collected {len(_manifest_files)} MCP agent manifests")
 
 # 打包机可能不存在 config.json（仅有 config.json.example）
 if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
@@ -64,7 +80,7 @@ if os.path.exists(os.path.join(PROJECT_ROOT, 'config.json')):
 elif os.path.exists(os.path.join(PROJECT_ROOT, 'config.json.example')):
     datas.append(('config.json.example', '.'))
 else:
-    print("[spec] WARN: config.json and config.json.example are both missing; runtime defaults will be used")
+    safe_print("[spec] WARN: config.json and config.json.example are both missing; runtime defaults will be used")
 
 # 第三方包的数据文件
 datas += collect_data_files('tiktoken')
@@ -216,13 +232,13 @@ _mypyc_binaries = []
 for _f in os.listdir(_cn_parent):
     if '__mypyc' in _f and (_f.endswith('.pyd') or _f.endswith('.so')):
         _mypyc_binaries.append((os.path.join(_cn_parent, _f), '.'))
-        print(f"[spec] Found mypyc binary: {_f}")
+        safe_print(f"[spec] Found mypyc binary: {_f}")
 if not _mypyc_binaries:
     # fallback: 也检查包目录内部
     for _f in os.listdir(os.path.dirname(_cn.__file__)):
         if '__mypyc' in _f and (_f.endswith('.pyd') or _f.endswith('.so')):
             _mypyc_binaries.append((os.path.join(os.path.dirname(_cn.__file__), _f), '.'))
-            print(f"[spec] Found mypyc binary (in pkg): {_f}")
+            safe_print(f"[spec] Found mypyc binary (in pkg): {_f}")
 
 binaries = collect_dynamic_libs('psutil')
 binaries += collect_dynamic_libs('charset_normalizer')

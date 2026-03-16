@@ -406,6 +406,41 @@ def extract_node_runtime(archive_path: Path) -> None:
     log("Node.js 便携版解压完成")
 
 
+def _remove_runtime_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _sanitize_copied_node_runtime() -> None:
+    """清理构建机 Node 安装中的全局包污染，只保留运行时必需文件。"""
+    if IS_WINDOWS:
+        bin_dir = NODE_RUNTIME_DIR
+        allowed_bins = {"node.exe", "npm", "npm.cmd", "npx", "npx.cmd", "corepack", "corepack.cmd"}
+    else:
+        bin_dir = NODE_RUNTIME_DIR / "bin"
+        allowed_bins = {"node", "npm", "npx", "corepack"}
+
+    if bin_dir.exists():
+        for child in bin_dir.iterdir():
+            if IS_WINDOWS and child.is_dir() and not child.is_symlink():
+                # Windows 的 Node 安装根目录本身还承载 node_modules 等必需目录，
+                # 这里只清理意外带进来的全局命令壳子，不动目录主体。
+                continue
+            if child.name not in allowed_bins:
+                _remove_runtime_path(child)
+
+    for modules_root in (NODE_RUNTIME_DIR / "lib" / "node_modules", NODE_RUNTIME_DIR / "node_modules"):
+        if not modules_root.exists():
+            continue
+        for child in modules_root.iterdir():
+            if child.name not in {"npm", "corepack"}:
+                _remove_runtime_path(child)
+
+
 def prepare_node_runtime() -> None:
     """优先复用构建机 Node.js 安装目录到 runtime/node，找不到时再回退下载。"""
     shared_runtime_root = _resolve_build_node_runtime_root()
@@ -421,6 +456,7 @@ def prepare_node_runtime() -> None:
 
     log(f"复用构建机 Node.js 到: {NODE_RUNTIME_DIR} <- {shared_runtime_root}")
     shutil.copytree(shared_runtime_root, NODE_RUNTIME_DIR, symlinks=not IS_WINDOWS)
+    _sanitize_copied_node_runtime()
 
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
     npm_bin = NODE_RUNTIME_DIR / NPM_BIN
@@ -663,26 +699,62 @@ def _resolve_missing_module_target(raw_path: str) -> Optional[Path]:
         if IS_WINDOWS and re.match(r"^/[A-Za-z]:", raw):
             raw = raw[1:]
     try:
-        return Path(raw).resolve()
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        return path.resolve()
     except Exception:
         return None
 
 
-def _find_openclaw_source_candidate(source_root: Path, dist_root: Path, missing_target: Path) -> Optional[Path]:
+def _relative_path_under_root(root: Path, candidate: Path) -> Optional[Path]:
     try:
-        relative_path = missing_target.relative_to(dist_root)
+        return candidate.relative_to(root)
     except ValueError:
+        root_norm = str(root).replace("\\", "/").rstrip("/")
+        candidate_norm = str(candidate).replace("\\", "/")
+        prefix = f"{root_norm}/"
+        if candidate_norm.casefold().startswith(prefix.casefold()):
+            return Path(candidate_norm[len(prefix):])
+        return None
+
+
+def _find_openclaw_source_candidate(source_root: Path, dist_root: Path, missing_target: Path) -> Optional[Path]:
+    relative_path = _relative_path_under_root(dist_root, missing_target)
+    if relative_path is None:
         return None
 
     direct_candidate = source_root / relative_path
     if direct_candidate.exists():
         return direct_candidate
 
-    stem = relative_path.with_suffix("")
-    for suffix in (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".html", ".css", ".hash"):
-        candidate = source_root / stem.with_suffix(suffix)
-        if candidate.exists():
-            return candidate
+    source_suffixes = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".html", ".css", ".hash")
+    relative_parent = relative_path.parent
+    base_name = relative_path.name
+    matched_dist_suffix = next((suffix for suffix in source_suffixes if base_name.endswith(suffix)), None)
+
+    candidate_roots: list[str] = []
+    if matched_dist_suffix is not None:
+        root_name = base_name[: -len(matched_dist_suffix)]
+        if root_name:
+            candidate_roots.append(root_name)
+            stripped_name = root_name
+            while "." in stripped_name:
+                stripped_name = stripped_name.rsplit(".", 1)[0]
+                if stripped_name:
+                    candidate_roots.append(stripped_name)
+    else:
+        candidate_roots.append(base_name)
+
+    seen: set[Path] = set()
+    for root_name in candidate_roots:
+        for suffix in source_suffixes:
+            candidate = source_root / relative_parent / f"{root_name}{suffix}"
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists():
+                return candidate
     return None
 
 
@@ -710,7 +782,12 @@ def _hydrate_missing_openclaw_runtime_module(
     return True
 
 
-def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], runtime_root: Path) -> None:
+def _verify_openclaw_runtime_import(
+    node_bin: Path,
+    env: dict[str, str],
+    runtime_root: Path,
+    vendor_root: Path,
+) -> None:
     dist_entry = runtime_root / "dist" / "gateway" / "server.js"
     if not dist_entry.exists():
         raise FileNotFoundError(f"OpenClaw Gateway 编译入口不存在: {dist_entry}")
@@ -728,30 +805,55 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], runtime
         "}"
         "console.log('openclaw-gateway-dist-import-ok');"
     )
-    result = subprocess.run(
-        [
-            str(node_bin),
-            "--input-type=module",
-            "-e",
-            verify_script,
-        ],
-        cwd=runtime_root,
-        env=verify_env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-    if result.returncode == 0:
-        log("OpenClaw Gateway 编译产物导入校验通过")
-        return
+    dist_root = runtime_root / "dist"
+    max_hydrate_attempts = 32
+    hydrated_count = 0
 
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-    diag_path = _write_openclaw_import_diagnostics(output) if output else None
-    if diag_path:
-        log(f"OpenClaw Gateway 编译产物导入校验失败，日志已写入 {diag_path}")
-        _log_openclaw_tsc_excerpt(output)
-    raise RuntimeError("OpenClaw Gateway 编译产物导入校验失败")
+    for _attempt in range(max_hydrate_attempts + 1):
+        result = subprocess.run(
+            [
+                str(node_bin),
+                "--input-type=module",
+                "-e",
+                verify_script,
+            ],
+            cwd=runtime_root,
+            env=verify_env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+        if result.returncode == 0:
+            log("OpenClaw Gateway 编译产物导入校验通过")
+            return
+
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        missing_match = _MISSING_MODULE_RE.search(output)
+        if missing_match:
+            missing_target = _resolve_missing_module_target(missing_match.group("path"))
+            if (
+                missing_target is not None
+                and _hydrate_missing_openclaw_runtime_module(
+                    node_bin,
+                    vendor_root,
+                    dist_root,
+                    missing_target,
+                    env,
+                )
+            ):
+                hydrated_count += 1
+                continue
+            if missing_target is not None:
+                log(f"无法将缺失的 OpenClaw dist 模块映射回源码: {missing_target}")
+
+        diag_path = _write_openclaw_import_diagnostics(output) if output else None
+        if diag_path:
+            log(f"OpenClaw Gateway 编译产物导入校验失败，日志已写入 {diag_path}")
+            _log_openclaw_tsc_excerpt(output)
+        raise RuntimeError("OpenClaw Gateway 编译产物导入校验失败")
+
+    raise RuntimeError(f"OpenClaw Gateway 编译产物导入校验失败（已补齐 {hydrated_count} 个缺失模块后仍未通过）")
 
 
 def download_python_runtime() -> Path:
@@ -973,6 +1075,7 @@ def extract_python_runtime(archive_path: Path) -> None:
 
 
 _RELATIVE_TS_IMPORT_RE = re.compile(r'(?P<quote>["\'])(?P<path>\.{1,2}/[^"\']+?)\.tsx?(?P=quote)')
+_RELATIVE_DIST_IMPORT_RE = re.compile(r'(?P<quote>["\'])(?P<path>\.{1,2}/[^"\']+\.(?:js|mjs|cjs|json|html|css|hash))(?P=quote)')
 
 
 def _rewrite_openclaw_dist_import_suffixes(dist_root: Path) -> None:
@@ -1033,6 +1136,66 @@ def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
         log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
 
 
+def _prune_openclaw_runtime_dependencies(env: dict[str, str]) -> None:
+    package_json = OPENCLAW_RUNTIME_DIR / "package.json"
+    node_modules_dir = OPENCLAW_RUNTIME_DIR / "node_modules"
+    if not package_json.exists() or not node_modules_dir.exists():
+        return
+
+    before_bytes = _path_size_bytes(node_modules_dir)
+    log("裁剪 OpenClaw 运行时 devDependencies（npm prune --omit=dev）...")
+    run(
+        _runtime_npm_command(
+            "prune",
+            "--omit=dev",
+            "--prefix",
+            str(OPENCLAW_RUNTIME_DIR),
+        ),
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+    )
+    after_bytes = _path_size_bytes(node_modules_dir)
+    removed_mb = max(before_bytes - after_bytes, 0) / 1024 / 1024
+    log(f"OpenClaw 运行时依赖裁剪完成: -{removed_mb:.1f} MB")
+
+
+def _hydrate_openclaw_dist_missing_imports(
+    node_bin: Path,
+    vendor_root: Path,
+    dist_root: Path,
+    env: dict[str, str],
+) -> int:
+    hydrated_count = 0
+    max_passes = 8
+
+    for _pass in range(max_passes):
+        changed = 0
+        for pattern in ("*.js", "*.mjs", "*.cjs"):
+            for candidate in dist_root.rglob(pattern):
+                try:
+                    content = candidate.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+
+                for match in _RELATIVE_DIST_IMPORT_RE.finditer(content):
+                    target = (candidate.parent / match.group("path")).resolve(strict=False)
+                    if target.exists():
+                        continue
+                    if _hydrate_missing_openclaw_runtime_module(
+                        node_bin,
+                        vendor_root,
+                        dist_root,
+                        target,
+                        env,
+                    ):
+                        hydrated_count += 1
+                        changed += 1
+        if changed == 0:
+            break
+
+    return hydrated_count
+
+
 def _write_openclaw_tsc_diagnostics(output: str) -> Optional[Path]:
     if not output.strip():
         return None
@@ -1067,7 +1230,12 @@ def preinstall_openclaw(force: bool = False) -> None:
     node_modules_marker = OPENCLAW_RUNTIME_DIR / "node_modules"
     gateway_marker = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
     if not force and dist_marker.exists() and node_modules_marker.exists() and gateway_marker.exists():
-        _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), OPENCLAW_RUNTIME_DIR)
+        _verify_openclaw_runtime_import(
+            node_bin,
+            _apply_runtime_npm_env(os.environ.copy()),
+            OPENCLAW_RUNTIME_DIR,
+            vendor_root,
+        )
         log("vendor/openclaw 已就绪，跳过重建")
         return
 
@@ -1137,9 +1305,13 @@ def preinstall_openclaw(force: bool = False) -> None:
         symlinks=not IS_WINDOWS,
     )
     _sync_openclaw_runtime_sidefiles(vendor_root)
+    _prune_openclaw_runtime_dependencies(env)
+    prehydrated_count = _hydrate_openclaw_dist_missing_imports(node_bin, vendor_root, runtime_dist_dir, env)
+    if prehydrated_count > 0:
+        log(f"OpenClaw dist 缺失依赖预补齐完成: {prehydrated_count} 个模块")
 
     log("校验 OpenClaw 编译产物入口...")
-    _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR)
+    _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR, vendor_root)
 
     log(f"OpenClaw 运行时准备完成（从源码编译 dist）: {OPENCLAW_RUNTIME_DIR}")
 
@@ -1191,6 +1363,15 @@ def _has_agent_browser_browser_cache(install_root: Path) -> bool:
     return False
 
 
+def _remove_agent_browser_browser_cache(install_root: Path) -> int:
+    removed = 0
+    for candidate in _agent_browser_browser_cache_dirs(install_root):
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def preinstall_agent_browser(force: bool = False) -> None:
     """在外部 runtime/openclaw 中预装 agent-browser，避免 PyInstaller 冻结浏览器二进制。"""
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
@@ -1211,6 +1392,10 @@ def preinstall_agent_browser(force: bool = False) -> None:
     if not force and agent_browser_cmd.exists() and (
         _has_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR) or _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR)
     ):
+        if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
+            removed = _remove_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR)
+            if removed > 0:
+                log(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
         log(f"agent-browser 已预装: {installed_version or 'unknown'}，跳过安装")
         return
     if agent_browser_cmd.exists() and not (
@@ -1244,12 +1429,16 @@ def preinstall_agent_browser(force: bool = False) -> None:
 
     if not agent_browser_cmd.exists():
         raise FileNotFoundError(f"agent-browser 预装失败，未找到命令: {agent_browser_cmd}")
+    if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
+        removed = _remove_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR)
+        if removed > 0:
+            log(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
+        log("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright-core 预下载")
+        log(f"Agent Browser 预装完成: {agent_browser_cmd}")
+        return
+
     playwright_core_cli = _find_playwright_core_cli(OPENCLAW_RUNTIME_DIR)
     if playwright_core_cli is None:
-        if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
-            log("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright-core 预下载")
-            log(f"Agent Browser 预装完成: {agent_browser_cmd}")
-            return
         raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {OPENCLAW_RUNTIME_DIR / 'node_modules'}")
 
     log("预下载 Agent Browser 浏览器依赖（playwright-core install chromium）...")
