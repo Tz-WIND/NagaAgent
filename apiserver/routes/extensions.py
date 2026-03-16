@@ -265,12 +265,15 @@ def _resolve_packaged_openclaw_runtime_dir() -> Optional[Path]:
     candidates: List[Path] = []
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
         meipass = Path(sys._MEIPASS)  # type: ignore[attr-defined]
+        candidates.append(meipass / "vendor" / "openclaw")
         candidates.append(meipass.parent.parent / "runtime" / "openclaw")
         candidates.append(meipass.parent.parent / "openclaw-runtime" / "openclaw")
     # 开发环境下也允许直接复用本地构建产物中的预装运行时
     candidates.append(Path(__file__).resolve().parent.parent.parent / "frontend" / "backend-dist" / "runtime" / "openclaw")
     # 开发模式：项目根 runtime/
     candidates.append(Path(__file__).resolve().parent.parent.parent / "runtime" / "openclaw")
+    # 开发/打包通用：直接使用项目 vendor/openclaw
+    candidates.append(Path(__file__).resolve().parent.parent.parent / "vendor" / "openclaw")
     for candidate in candidates:
         if (candidate / "node_modules").exists():
             return candidate
@@ -292,9 +295,23 @@ def _agent_browser_browser_cache_dirs(runtime_dir: Path) -> List[Path]:
     ]
 
 
+def _has_agent_browser_native_bundle(runtime_dir: Optional[Path]) -> bool:
+    if runtime_dir is None:
+        return False
+    bin_dir = runtime_dir / "node_modules" / "agent-browser" / "bin"
+    if not bin_dir.exists():
+        return False
+    for candidate in bin_dir.iterdir():
+        if candidate.is_file() and candidate.name.startswith("agent-browser-") and candidate.name != "agent-browser.js":
+            return True
+    return False
+
+
 def _has_agent_browser_browser_cache(runtime_dir: Optional[Path]) -> bool:
     if runtime_dir is None:
         return False
+    if _has_agent_browser_native_bundle(runtime_dir):
+        return True
     for candidate in _agent_browser_browser_cache_dirs(runtime_dir):
         if candidate.exists():
             try:
