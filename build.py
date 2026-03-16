@@ -426,6 +426,10 @@ def _sanitize_copied_node_runtime() -> None:
 
     if bin_dir.exists():
         for child in bin_dir.iterdir():
+            if IS_WINDOWS and child.is_dir() and not child.is_symlink():
+                # Windows 的 Node 安装根目录本身还承载 node_modules 等必需目录，
+                # 这里只清理意外带进来的全局命令壳子，不动目录主体。
+                continue
             if child.name not in allowed_bins:
                 _remove_runtime_path(child)
 
