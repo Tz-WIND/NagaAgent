@@ -234,3 +234,7 @@ mcpserver/agent_auto_game/openclaw-runtime/
 # vendor/openclaw 编译产物和依赖（源码跟踪，产物不跟踪）
 vendor/openclaw/dist/
 vendor/openclaw/node_modules/
+
+# Vendored OpenClaw source must always be tracked, even if generic rules above
+# would otherwise ignore names like media/secret/token/credential.
+!vendor/openclaw/src/**
