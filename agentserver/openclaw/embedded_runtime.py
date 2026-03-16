@@ -5,7 +5,7 @@ OpenClaw 内嵌运行时管理
 
 统一机制：vendor/openclaw 源码 → node 直接启动。
 - 开发模式：npm install 安装依赖 → tsx 直接跑 TypeScript 源码（零编译）
-- 打包模式：CI 预编译 dist → node 跑编译产物
+- 打包模式：打包内置 src + tsx → node 直接跑 TypeScript 源码
 """
 
 import os
@@ -31,7 +31,7 @@ class EmbeddedRuntime:
     """
     内嵌运行时管理器
 
-    打包环境：从 resources/runtime/ 加载 Node.js + 预编译 dist
+    打包环境：从 resources/runtime/ 加载 Node.js + OpenClaw 源码
     开发环境：vendor/openclaw/ 源码 + tsx 直接执行
     """
 
@@ -165,15 +165,17 @@ class EmbeddedRuntime:
 
     @property
     def _prefer_source_runtime(self) -> bool:
-        return (not self.is_packaged) and self._has_ts_source() and self._has_tsx()
+        return self._has_ts_source() and self._has_tsx()
 
     @property
     def runtime_mode(self) -> str:
         """返回当前运行时模式描述"""
+        if self._prefer_source_runtime:
+            return "packaged-source" if self.is_packaged else "vendor-source"
+        if self.is_packaged and self._has_compiled_dist():
+            return "packaged-compiled"
         if self.is_packaged:
             return "packaged"
-        if self._prefer_source_runtime:
-            return "vendor-source"
         if self._has_compiled_dist():
             return "vendor-compiled"
         if self._has_ts_source():
@@ -505,7 +507,7 @@ class EmbeddedRuntime:
         """确保 vendor 可以启动 Gateway。
 
         开发模式下仅安装依赖（npm install），tsx 直接跑源码，无需编译。
-        打包模式下 dist 应由 CI 预编译，这里只做检查。
+        打包模式下优先使用内置 src + tsx；若缺失则回退检查 dist。
         """
         if self.is_vendor_ready:
             return True
@@ -513,7 +515,10 @@ class EmbeddedRuntime:
         vendor_root = self._get_vendor_root()
 
         if self.is_packaged:
-            logger.error(f"打包模式下 vendor dist 缺失: {vendor_root / 'dist'}")
+            logger.error(
+                "打包模式下 OpenClaw 运行时不完整: "
+                f"src={vendor_root / 'src'}, dist={vendor_root / 'dist'}, tsx={vendor_root / 'node_modules' / 'tsx'}"
+            )
             return False
 
         if not (vendor_root / "package.json").exists():
@@ -581,9 +586,8 @@ class EmbeddedRuntime:
     def _build_gateway_cmd(self) -> Optional[List[str]]:
         """构建启动 Gateway 的命令列表。
 
-        打包模式：node gateway_start.mjs（搜索预编译 dist）
-        开发模式（有 dist）：node gateway_start.mjs
-        开发模式（无 dist）：node --import tsx gateway_start.mjs（tsx 跑 TS 源码）
+        源码模式：node --import tsx gateway_start.mjs
+        编译模式：node gateway_start.mjs
         """
         node = self.node_path
         if not node:
@@ -598,7 +602,7 @@ class EmbeddedRuntime:
             logger.error(f"gateway_start.mjs 不存在: {entry}")
             return None
 
-        # 开发模式优先用 tsx 跑源码，避免过期 dist 污染本地调试。
+        # 有源码 + tsx 时，开发态和打包态都优先跑源码，避免半成品 dist 污染运行时。
         if self._prefer_source_runtime:
             return [node, "--import", "tsx", str(entry)]
         return [node, str(entry)]
@@ -606,7 +610,7 @@ class EmbeddedRuntime:
     def _get_gateway_cwd(self) -> Optional[str]:
         """Gateway 子进程的工作目录。
 
-        tsx 需要能从 cwd 解析 node_modules，所以 dev 源码模式下设为 vendor root。
+        tsx 需要能从 cwd 解析 node_modules，所以源码模式下设为 vendor root。
         """
         if self._prefer_source_runtime:
             return str(self._get_vendor_root())
@@ -656,6 +660,7 @@ class EmbeddedRuntime:
             gw_env = self.env
             gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
             gw_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source" if self._prefer_source_runtime else "compiled"
+            gw_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(self._get_vendor_root())
             try:
                 from system.config import get_server_port
                 api_port = get_server_port("api_server")
@@ -732,6 +737,7 @@ class EmbeddedRuntime:
         gw_env = self.env.copy()
         gw_env["OPENCLAW_GATEWAY_PORT"] = str(port)
         gw_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source" if self._prefer_source_runtime else "compiled"
+        gw_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(self._get_vendor_root())
         if extra_env:
             for key, value in extra_env.items():
                 if value:
