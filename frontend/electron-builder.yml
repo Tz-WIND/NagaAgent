@@ -6,6 +6,8 @@ directories:
   buildResources: build
   output: release
 
+afterPack: scripts/after-pack.mjs
+
 files:
   - dist/**/*
   - dist-electron/**/*

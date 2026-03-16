@@ -406,6 +406,37 @@ def extract_node_runtime(archive_path: Path) -> None:
     log("Node.js 便携版解压完成")
 
 
+def _remove_runtime_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _sanitize_copied_node_runtime() -> None:
+    """清理构建机 Node 安装中的全局包污染，只保留运行时必需文件。"""
+    if IS_WINDOWS:
+        bin_dir = NODE_RUNTIME_DIR
+        allowed_bins = {"node.exe", "npm", "npm.cmd", "npx", "npx.cmd", "corepack", "corepack.cmd"}
+    else:
+        bin_dir = NODE_RUNTIME_DIR / "bin"
+        allowed_bins = {"node", "npm", "npx", "corepack"}
+
+    if bin_dir.exists():
+        for child in bin_dir.iterdir():
+            if child.name not in allowed_bins:
+                _remove_runtime_path(child)
+
+    for modules_root in (NODE_RUNTIME_DIR / "lib" / "node_modules", NODE_RUNTIME_DIR / "node_modules"):
+        if not modules_root.exists():
+            continue
+        for child in modules_root.iterdir():
+            if child.name not in {"npm", "corepack"}:
+                _remove_runtime_path(child)
+
+
 def prepare_node_runtime() -> None:
     """优先复用构建机 Node.js 安装目录到 runtime/node，找不到时再回退下载。"""
     shared_runtime_root = _resolve_build_node_runtime_root()
@@ -421,6 +452,7 @@ def prepare_node_runtime() -> None:
 
     log(f"复用构建机 Node.js 到: {NODE_RUNTIME_DIR} <- {shared_runtime_root}")
     shutil.copytree(shared_runtime_root, NODE_RUNTIME_DIR, symlinks=not IS_WINDOWS)
+    _sanitize_copied_node_runtime()
 
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
     npm_bin = NODE_RUNTIME_DIR / NPM_BIN
@@ -1100,6 +1132,29 @@ def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
         log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
 
 
+def _prune_openclaw_runtime_dependencies(env: dict[str, str]) -> None:
+    package_json = OPENCLAW_RUNTIME_DIR / "package.json"
+    node_modules_dir = OPENCLAW_RUNTIME_DIR / "node_modules"
+    if not package_json.exists() or not node_modules_dir.exists():
+        return
+
+    before_bytes = _path_size_bytes(node_modules_dir)
+    log("裁剪 OpenClaw 运行时 devDependencies（npm prune --omit=dev）...")
+    run(
+        _runtime_npm_command(
+            "prune",
+            "--omit=dev",
+            "--prefix",
+            str(OPENCLAW_RUNTIME_DIR),
+        ),
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=env,
+    )
+    after_bytes = _path_size_bytes(node_modules_dir)
+    removed_mb = max(before_bytes - after_bytes, 0) / 1024 / 1024
+    log(f"OpenClaw 运行时依赖裁剪完成: -{removed_mb:.1f} MB")
+
+
 def _hydrate_openclaw_dist_missing_imports(
     node_bin: Path,
     vendor_root: Path,
@@ -1246,6 +1301,7 @@ def preinstall_openclaw(force: bool = False) -> None:
         symlinks=not IS_WINDOWS,
     )
     _sync_openclaw_runtime_sidefiles(vendor_root)
+    _prune_openclaw_runtime_dependencies(env)
     prehydrated_count = _hydrate_openclaw_dist_missing_imports(node_bin, vendor_root, runtime_dist_dir, env)
     if prehydrated_count > 0:
         log(f"OpenClaw dist 缺失依赖预补齐完成: {prehydrated_count} 个模块")
@@ -1303,6 +1359,15 @@ def _has_agent_browser_browser_cache(install_root: Path) -> bool:
     return False
 
 
+def _remove_agent_browser_browser_cache(install_root: Path) -> int:
+    removed = 0
+    for candidate in _agent_browser_browser_cache_dirs(install_root):
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+            removed += 1
+    return removed
+
+
 def preinstall_agent_browser(force: bool = False) -> None:
     """在外部 runtime/openclaw 中预装 agent-browser，避免 PyInstaller 冻结浏览器二进制。"""
     node_bin = NODE_RUNTIME_DIR / NODE_BIN
@@ -1323,6 +1388,10 @@ def preinstall_agent_browser(force: bool = False) -> None:
     if not force and agent_browser_cmd.exists() and (
         _has_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR) or _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR)
     ):
+        if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
+            removed = _remove_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR)
+            if removed > 0:
+                log(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
         log(f"agent-browser 已预装: {installed_version or 'unknown'}，跳过安装")
         return
     if agent_browser_cmd.exists() and not (
@@ -1356,12 +1425,16 @@ def preinstall_agent_browser(force: bool = False) -> None:
 
     if not agent_browser_cmd.exists():
         raise FileNotFoundError(f"agent-browser 预装失败，未找到命令: {agent_browser_cmd}")
+    if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
+        removed = _remove_agent_browser_browser_cache(OPENCLAW_RUNTIME_DIR)
+        if removed > 0:
+            log(f"已清理 agent-browser 浏览器缓存目录: {removed} 个")
+        log("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright-core 预下载")
+        log(f"Agent Browser 预装完成: {agent_browser_cmd}")
+        return
+
     playwright_core_cli = _find_playwright_core_cli(OPENCLAW_RUNTIME_DIR)
     if playwright_core_cli is None:
-        if _has_agent_browser_native_bundle(OPENCLAW_RUNTIME_DIR):
-            log("agent-browser 当前版本自带原生浏览器二进制，跳过 playwright-core 预下载")
-            log(f"Agent Browser 预装完成: {agent_browser_cmd}")
-            return
         raise FileNotFoundError(f"playwright-core cli 缺失，无法预装浏览器内核: {OPENCLAW_RUNTIME_DIR / 'node_modules'}")
 
     log("预下载 Agent Browser 浏览器依赖（playwright-core install chromium）...")

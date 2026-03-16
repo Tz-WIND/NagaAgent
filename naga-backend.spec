@@ -43,6 +43,8 @@ _EXCLUDE_DIRS = {
     'uploaded_documents', 'hooks', '.cache', '.git', '.github',
     '__pycache__', '.venv', '.mypy_cache', '.pytest_cache', '.ruff_cache',
     'node_modules',
+    # OpenClaw 打包态从 resources/runtime/openclaw 运行，不再将 vendor 冻结进 _internal
+    'vendor',
     # PyQt UI（headless 模式不需要）
     'ui',
     # mcpserver 的 Python 模块由 PyInstaller 冻结导入，data 只额外收集 manifest
