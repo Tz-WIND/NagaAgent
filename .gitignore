@@ -98,6 +98,7 @@ desktop.ini
 *.backup
 *.old
 ~$*
+.tmp-home/
 
 # API Keys and Secrets (never commit these!)
 *api_key*
