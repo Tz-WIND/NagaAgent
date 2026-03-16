@@ -710,38 +710,32 @@ def _hydrate_missing_openclaw_runtime_module(
     return True
 
 
-def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_root: Path) -> None:
-    source_entry = vendor_root / "src" / "gateway" / "server.ts"
-    if not source_entry.exists():
-        raise FileNotFoundError(f"OpenClaw Gateway 源码入口不存在: {source_entry}")
-    if not OPENCLAW_SOURCE_REGISTER.exists():
-        raise FileNotFoundError(f"OpenClaw 源码解析注册器不存在: {OPENCLAW_SOURCE_REGISTER}")
+def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], runtime_root: Path) -> None:
+    dist_entry = runtime_root / "dist" / "gateway" / "server.js"
+    if not dist_entry.exists():
+        raise FileNotFoundError(f"OpenClaw Gateway 编译入口不存在: {dist_entry}")
 
     verify_env = env.copy()
-    verify_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source"
-    verify_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(vendor_root)
+    verify_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "compiled"
+    verify_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(runtime_root)
     verify_script = (
         "import { resolve } from 'node:path';"
         "import { pathToFileURL } from 'node:url';"
-        "const target = pathToFileURL(resolve('src/gateway/server.ts')).href;"
+        "const target = pathToFileURL(resolve('dist/gateway/server.js')).href;"
         "const mod = await import(target);"
         "if (typeof mod.startGatewayServer !== 'function') {"
         "  throw new Error('startGatewayServer export missing');"
         "}"
-        "console.log('openclaw-gateway-source-import-ok');"
+        "console.log('openclaw-gateway-dist-import-ok');"
     )
     result = subprocess.run(
         [
             str(node_bin),
-            "--import",
-            str(OPENCLAW_SOURCE_REGISTER),
-            "--import",
-            "tsx",
             "--input-type=module",
             "-e",
             verify_script,
         ],
-        cwd=vendor_root,
+        cwd=runtime_root,
         env=verify_env,
         capture_output=True,
         text=True,
@@ -749,15 +743,15 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_
         check=False,
     )
     if result.returncode == 0:
-        log("OpenClaw Gateway 源码导入校验通过")
+        log("OpenClaw Gateway 编译产物导入校验通过")
         return
 
     output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
     diag_path = _write_openclaw_import_diagnostics(output) if output else None
     if diag_path:
-        log(f"OpenClaw Gateway 源码导入校验失败，日志已写入 {diag_path}")
+        log(f"OpenClaw Gateway 编译产物导入校验失败，日志已写入 {diag_path}")
         _log_openclaw_tsc_excerpt(output)
-    raise RuntimeError("OpenClaw Gateway 源码导入校验失败")
+    raise RuntimeError("OpenClaw Gateway 编译产物导入校验失败")
 
 
 def download_python_runtime() -> Path:
@@ -1017,18 +1011,18 @@ def _rewrite_openclaw_dist_import_suffixes(dist_root: Path) -> None:
 
 
 def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
-    """同步 OpenClaw 源码直跑所需的运行时文件。"""
-    source_src = vendor_root / "src"
-    if source_src.exists():
-        shutil.copytree(source_src, OPENCLAW_RUNTIME_DIR / "src", dirs_exist_ok=True)
-        log(f"已复制 OpenClaw 源码 -> {OPENCLAW_RUNTIME_DIR / 'src'}")
+    """同步 OpenClaw 编译运行所需的 side files。"""
+    dist_root = OPENCLAW_RUNTIME_DIR / "dist"
+    if dist_root.exists():
+        _rewrite_openclaw_dist_import_suffixes(dist_root)
 
-    apps_src = vendor_root / "apps"
-    if apps_src.exists():
-        shutil.copytree(apps_src, OPENCLAW_RUNTIME_DIR / "apps", dirs_exist_ok=True)
-        log(f"已复制 OpenClaw 应用资源 -> {OPENCLAW_RUNTIME_DIR / 'apps'}")
+    shared_assets_src = vendor_root / "apps" / "shared" / "OpenClawKit"
+    if shared_assets_src.exists():
+        target_dir = OPENCLAW_RUNTIME_DIR / "apps" / "shared" / "OpenClawKit"
+        shutil.copytree(shared_assets_src, target_dir, dirs_exist_ok=True)
+        log(f"已复制 OpenClawKit 共享资源 -> {target_dir}")
 
-    for rel_path in ("package.json", "openclaw.mjs", "tsconfig.json", "tsconfig.naga.json", "LICENSE"):
+    for rel_path in ("package.json", "openclaw.mjs", "LICENSE"):
         source_path = vendor_root / rel_path
         if source_path.exists():
             shutil.copy2(source_path, OPENCLAW_RUNTIME_DIR / rel_path)
@@ -1060,7 +1054,7 @@ def _log_openclaw_tsc_excerpt(output: str, limit: int = 20) -> None:
 
 
 def preinstall_openclaw(force: bool = False) -> None:
-    """准备随 PyInstaller 一起冻结的 vendor/openclaw 源码运行时。"""
+    """从 vendor/openclaw 源码编译完整 dist，并准备打包运行时。"""
     vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
     if not vendor_root.exists():
         raise FileNotFoundError(f"vendor/openclaw 不存在: {vendor_root}")
@@ -1069,19 +1063,18 @@ def preinstall_openclaw(force: bool = False) -> None:
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
 
-    source_marker = vendor_root / "src" / "gateway" / "server.ts"
-    tsx_marker = vendor_root / "node_modules" / "tsx"
+    dist_marker = OPENCLAW_RUNTIME_DIR / "dist" / "gateway" / "server.js"
+    node_modules_marker = OPENCLAW_RUNTIME_DIR / "node_modules"
     gateway_marker = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
-    loader_marker = OPENCLAW_SOURCE_REGISTER
-    if not force and source_marker.exists() and tsx_marker.exists() and gateway_marker.exists() and loader_marker.exists():
-        _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), vendor_root)
+    if not force and dist_marker.exists() and node_modules_marker.exists() and gateway_marker.exists():
+        _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), OPENCLAW_RUNTIME_DIR)
         log("vendor/openclaw 已就绪，跳过重建")
         return
 
-    # 清理旧 runtime/openclaw，避免历史残留继续被 Electron 资源目录带上。
     if OPENCLAW_RUNTIME_DIR.exists():
         log(f"清理旧 OpenClaw 运行时: {OPENCLAW_RUNTIME_DIR}")
         shutil.rmtree(OPENCLAW_RUNTIME_DIR)
+    OPENCLAW_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
     if IS_WINDOWS:
@@ -1091,14 +1084,64 @@ def preinstall_openclaw(force: bool = False) -> None:
         env["PATH"] = f"{node_bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env = _apply_runtime_npm_env(env)
 
-    # 1. 安装 vendor 依赖（需要保留平台 postinstall / native 包处理）
     _install_openclaw_vendor_dependencies(vendor_root, env, force=force)
 
-    # 2. 直接校验 vendor/openclaw 源码入口，打包时由 PyInstaller 冻结整个 vendor/。
-    log("校验 vendor/openclaw 源码入口...")
-    _verify_openclaw_runtime_import(node_bin, env, vendor_root)
+    runtime_dist_dir = OPENCLAW_RUNTIME_DIR / "dist"
+    tsc_cli = _find_vendor_typescript_cli(vendor_root)
+    compile_env = env.copy()
+    compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
 
-    log(f"OpenClaw 运行时准备完成（源码直跑）: {vendor_root}")
+    log("编译 vendor/openclaw 源码...")
+    result = subprocess.run(
+        [
+            str(node_bin),
+            str(tsc_cli),
+            "-p",
+            "tsconfig.naga.json",
+            "--outDir",
+            str(runtime_dist_dir),
+        ],
+        cwd=vendor_root,
+        env=compile_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    transpiled_count, copied_count = _reconcile_openclaw_dist_from_source(node_bin, vendor_root, runtime_dist_dir, env)
+    log(
+        "OpenClaw runtime dist 源码对齐完成: "
+        f"{transpiled_count} 个源码转译, {copied_count} 个资源复制"
+    )
+
+    diag_path = _write_openclaw_tsc_diagnostics(output) if output else None
+    if result.returncode != 0:
+        if dist_marker.exists():
+            warning = "警告：vendor/openclaw 编译返回非零退出码 "
+            warning += f"{result.returncode}，但 runtime dist 已生成，继续打包"
+            if diag_path:
+                warning += f"；诊断日志已写入 {diag_path}"
+            log(warning)
+        else:
+            if diag_path:
+                log(f"OpenClaw TypeScript 编译失败，诊断日志已写入 {diag_path}")
+                _log_openclaw_tsc_excerpt(output)
+            raise RuntimeError("OpenClaw runtime dist 编译失败")
+
+    log("复制 OpenClaw 依赖到运行时目录...")
+    shutil.copytree(
+        vendor_root / "node_modules",
+        OPENCLAW_RUNTIME_DIR / "node_modules",
+        dirs_exist_ok=True,
+        symlinks=not IS_WINDOWS,
+    )
+    _sync_openclaw_runtime_sidefiles(vendor_root)
+
+    log("校验 OpenClaw 编译产物入口...")
+    _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR)
+
+    log(f"OpenClaw 运行时准备完成（从源码编译 dist）: {OPENCLAW_RUNTIME_DIR}")
 
 
 def _agent_browser_bin_name() -> str:
