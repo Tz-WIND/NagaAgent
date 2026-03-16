@@ -106,6 +106,7 @@ desktop.ini
 *token*
 *credential*
 !**/prompts/**
+!vendor/openclaw/src/**
 
 # Generated documentation
 docs/_build/
