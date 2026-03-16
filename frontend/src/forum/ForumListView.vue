@@ -44,10 +44,13 @@ async function loadPosts() {
   if (!backendConnected.value)
     return
 
+  loadingPosts.value = true
+
   // 未登录直接返回，不发请求
   if (!ACCESS_TOKEN.value) {
     postsError.value = '请先登录后使用娜迦网络'
     posts.value = []
+    loadingPosts.value = false
     return
   }
 
@@ -70,11 +73,11 @@ async function loadPosts() {
   // 超时后再次检查（可能已被 401 处理清空）
   if (!ACCESS_TOKEN.value) {
     postsError.value = '请先登录后使用娜迦网络'
+    loadingPosts.value = false
     return
   }
 
   try {
-    loadingPosts.value = true
     if (!posts.value.length) {
       postsError.value = ''
     }
