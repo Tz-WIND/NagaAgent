@@ -1017,6 +1017,7 @@ def extract_python_runtime(archive_path: Path) -> None:
 
 
 _RELATIVE_TS_IMPORT_RE = re.compile(r'(?P<quote>["\'])(?P<path>\.{1,2}/[^"\']+?)\.tsx?(?P=quote)')
+_RELATIVE_DIST_IMPORT_RE = re.compile(r'(?P<quote>["\'])(?P<path>\.{1,2}/[^"\']+\.(?:js|mjs|cjs|json|html|css|hash))(?P=quote)')
 
 
 def _rewrite_openclaw_dist_import_suffixes(dist_root: Path) -> None:
@@ -1075,6 +1076,43 @@ def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
     if gateway_script_src.exists():
         shutil.copy2(gateway_script_src, OPENCLAW_RUNTIME_DIR / "gateway_start.mjs")
         log(f"已复制 gateway_start.mjs -> {OPENCLAW_RUNTIME_DIR / 'gateway_start.mjs'}")
+
+
+def _hydrate_openclaw_dist_missing_imports(
+    node_bin: Path,
+    vendor_root: Path,
+    dist_root: Path,
+    env: dict[str, str],
+) -> int:
+    hydrated_count = 0
+    max_passes = 8
+
+    for _pass in range(max_passes):
+        changed = 0
+        for pattern in ("*.js", "*.mjs", "*.cjs"):
+            for candidate in dist_root.rglob(pattern):
+                try:
+                    content = candidate.read_text(encoding="utf-8")
+                except Exception:
+                    continue
+
+                for match in _RELATIVE_DIST_IMPORT_RE.finditer(content):
+                    target = (candidate.parent / match.group("path")).resolve(strict=False)
+                    if target.exists():
+                        continue
+                    if _hydrate_missing_openclaw_runtime_module(
+                        node_bin,
+                        vendor_root,
+                        dist_root,
+                        target,
+                        env,
+                    ):
+                        hydrated_count += 1
+                        changed += 1
+        if changed == 0:
+            break
+
+    return hydrated_count
 
 
 def _write_openclaw_tsc_diagnostics(output: str) -> Optional[Path]:
@@ -1186,6 +1224,9 @@ def preinstall_openclaw(force: bool = False) -> None:
         symlinks=not IS_WINDOWS,
     )
     _sync_openclaw_runtime_sidefiles(vendor_root)
+    prehydrated_count = _hydrate_openclaw_dist_missing_imports(node_bin, vendor_root, runtime_dist_dir, env)
+    if prehydrated_count > 0:
+        log(f"OpenClaw dist 缺失依赖预补齐完成: {prehydrated_count} 个模块")
 
     log("校验 OpenClaw 编译产物入口...")
     _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR, vendor_root)
