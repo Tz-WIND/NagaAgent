@@ -5,44 +5,49 @@
  * 直接调用 startGatewayServer()，跳过 CLI 层，启动更快、日志更干净。
  *
  * 搜索顺序：
- *   默认 compiled-first：
- *     1. 打包模式 — dist/ 与本脚本同目录（CI 预编译）
- *     2. 开发模式 — vendor/openclaw/dist/（手动编译或缓存）
- *     3. 开发模式 — vendor/openclaw/src/（tsx 直接跑源码，需 --import tsx）
- *   source-first（开发调试）：
- *     1. vendor/openclaw/src/
- *     2. dist/
- *     3. vendor/openclaw/dist/
+ *   compiled-first：
+ *     1. OPENCLAW_GATEWAY_VENDOR_ROOT/dist/
+ *     2. fallback vendor/openclaw/dist/
+ *     3. OPENCLAW_GATEWAY_VENDOR_ROOT/src/
+ *   source-first：
+ *     1. OPENCLAW_GATEWAY_VENDOR_ROOT/src/
+ *     2. fallback vendor/openclaw/src/
+ *     3. OPENCLAW_GATEWAY_VENDOR_ROOT/dist/
  *
  * 环境变量：
  *   OPENCLAW_GATEWAY_PORT  — 端口号（默认 20789）
  */
 
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const preferSource =
   process.env.OPENCLAW_GATEWAY_ENTRY_MODE === "source"
   || process.execArgv.includes("tsx");
+const explicitVendorRoot = process.env.OPENCLAW_GATEWAY_VENDOR_ROOT
+  ? resolve(process.env.OPENCLAW_GATEWAY_VENDOR_ROOT)
+  : null;
+const rootCandidates = explicitVendorRoot
+  ? [explicitVendorRoot]
+  : [
+      __dirname,
+      join(__dirname, "..", "..", "vendor", "openclaw"),
+    ];
 
 // 按优先级查找 gateway server 入口
 let serverPath = null;
-const packagedDist = join(__dirname, "dist", "gateway", "server.js");
-const vendorDist = join(__dirname, "..", "..", "vendor", "openclaw", "dist", "gateway", "server.js");
-const vendorSource = join(__dirname, "..", "..", "vendor", "openclaw", "src", "gateway", "server.ts");
-const candidates = preferSource
-  ? [
-      vendorSource,
-      packagedDist,
-      vendorDist,
-    ]
-  : [
-      packagedDist,
-      vendorDist,
-      vendorSource,
-    ];
+const candidates = [];
+for (const root of rootCandidates) {
+  const sourceEntry = join(root, "src", "gateway", "server.ts");
+  const compiledEntry = join(root, "dist", "gateway", "server.js");
+  if (preferSource) {
+    candidates.push(sourceEntry, compiledEntry);
+  } else {
+    candidates.push(compiledEntry, sourceEntry);
+  }
+}
 
 for (const p of candidates) {
   if (existsSync(p)) { serverPath = p; break; }

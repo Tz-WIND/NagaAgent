@@ -650,58 +650,44 @@ def _hydrate_missing_openclaw_runtime_module(
 
 
 def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], vendor_root: Path) -> None:
+    del vendor_root
+
+    source_entry = OPENCLAW_RUNTIME_DIR / "src" / "gateway" / "server.ts"
+    if not source_entry.exists():
+        raise FileNotFoundError(f"OpenClaw Gateway 源码入口不存在: {source_entry}")
+
+    verify_env = env.copy()
+    verify_env["OPENCLAW_GATEWAY_ENTRY_MODE"] = "source"
+    verify_env["OPENCLAW_GATEWAY_VENDOR_ROOT"] = str(OPENCLAW_RUNTIME_DIR)
     verify_script = (
         "import { resolve } from 'node:path';"
         "import { pathToFileURL } from 'node:url';"
-        "const target = pathToFileURL(resolve('dist/gateway/server.js')).href;"
-        "await import(target);"
-        "console.log('openclaw-gateway-import-ok');"
+        "const target = pathToFileURL(resolve('src/gateway/server.ts')).href;"
+        "const mod = await import(target);"
+        "if (typeof mod.startGatewayServer !== 'function') {"
+        "  throw new Error('startGatewayServer export missing');"
+        "}"
+        "console.log('openclaw-gateway-source-import-ok');"
     )
-    runtime_dist_root = (OPENCLAW_RUNTIME_DIR / "dist").resolve()
-    repaired_targets: set[Path] = set()
-    for _ in range(12):
-        result = subprocess.run(
-            [str(node_bin), "--input-type=module", "-e", verify_script],
-            cwd=OPENCLAW_RUNTIME_DIR,
-            env=env,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=False,
-        )
-        if result.returncode == 0:
-            log("OpenClaw Gateway 导入校验通过")
-            return
+    result = subprocess.run(
+        [str(node_bin), "--import", "tsx", "--input-type=module", "-e", verify_script],
+        cwd=OPENCLAW_RUNTIME_DIR,
+        env=verify_env,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    if result.returncode == 0:
+        log("OpenClaw Gateway 源码导入校验通过")
+        return
 
-        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-        missing_match = _MISSING_MODULE_RE.search(output or "")
-        missing_target = (
-            _resolve_missing_module_target(missing_match.group("path"))
-            if missing_match is not None
-            else None
-        )
-        if (
-            missing_target is not None
-            and missing_target not in repaired_targets
-            and _hydrate_missing_openclaw_runtime_module(
-                node_bin,
-                vendor_root,
-                runtime_dist_root,
-                missing_target,
-                env,
-            )
-        ):
-            repaired_targets.add(missing_target)
-            _rewrite_openclaw_dist_import_suffixes(runtime_dist_root)
-            continue
-
-        diag_path = _write_openclaw_import_diagnostics(output) if output else None
-        if diag_path:
-            log(f"OpenClaw Gateway 导入校验失败，日志已写入 {diag_path}")
-            _log_openclaw_tsc_excerpt(output)
-        raise RuntimeError("OpenClaw Gateway 导入校验失败")
-
-    raise RuntimeError("OpenClaw Gateway 导入校验失败：源码补齐重试次数已达上限")
+    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+    diag_path = _write_openclaw_import_diagnostics(output) if output else None
+    if diag_path:
+        log(f"OpenClaw Gateway 源码导入校验失败，日志已写入 {diag_path}")
+        _log_openclaw_tsc_excerpt(output)
+    raise RuntimeError("OpenClaw Gateway 源码导入校验失败")
 
 
 def download_python_runtime() -> Path:
@@ -961,17 +947,21 @@ def _rewrite_openclaw_dist_import_suffixes(dist_root: Path) -> None:
 
 
 def _sync_openclaw_runtime_sidefiles(vendor_root: Path) -> None:
-    """补齐 OpenClaw 运行时中 dist 外的必需文件。"""
-    dist_root = OPENCLAW_RUNTIME_DIR / "dist"
-    if dist_root.exists():
-        _rewrite_openclaw_dist_import_suffixes(dist_root)
+    """同步 OpenClaw 源码直跑所需的运行时文件。"""
+    source_src = vendor_root / "src"
+    if source_src.exists():
+        shutil.copytree(source_src, OPENCLAW_RUNTIME_DIR / "src", dirs_exist_ok=True)
+        log(f"已复制 OpenClaw 源码 -> {OPENCLAW_RUNTIME_DIR / 'src'}")
 
-    shared_kit_src = vendor_root / "apps" / "shared" / "OpenClawKit"
-    if shared_kit_src.exists():
-        shared_kit_dst = OPENCLAW_RUNTIME_DIR / "apps" / "shared" / "OpenClawKit"
-        shared_kit_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(shared_kit_src, shared_kit_dst, dirs_exist_ok=True)
-        log(f"已复制 OpenClawKit 共享资源 -> {shared_kit_dst}")
+    apps_src = vendor_root / "apps"
+    if apps_src.exists():
+        shutil.copytree(apps_src, OPENCLAW_RUNTIME_DIR / "apps", dirs_exist_ok=True)
+        log(f"已复制 OpenClaw 应用资源 -> {OPENCLAW_RUNTIME_DIR / 'apps'}")
+
+    for rel_path in ("package.json", "openclaw.mjs", "tsconfig.json", "tsconfig.naga.json", "LICENSE"):
+        source_path = vendor_root / rel_path
+        if source_path.exists():
+            shutil.copy2(source_path, OPENCLAW_RUNTIME_DIR / rel_path)
 
     gateway_script_src = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
     if gateway_script_src.exists():
@@ -1000,7 +990,7 @@ def _log_openclaw_tsc_excerpt(output: str, limit: int = 20) -> None:
 
 
 def preinstall_openclaw(force: bool = False) -> None:
-    """编译 vendor/openclaw 源码并复制到运行时目录"""
+    """准备可源码直跑的 OpenClaw 运行时目录。"""
     vendor_root = PROJECT_ROOT / "vendor" / "openclaw"
     if not vendor_root.exists():
         raise FileNotFoundError(f"vendor/openclaw 不存在: {vendor_root}")
@@ -1009,11 +999,12 @@ def preinstall_openclaw(force: bool = False) -> None:
     if not node_bin.exists():
         raise FileNotFoundError(f"node 不存在: {node_bin}")
 
-    # 检测是否已有编译产物
-    dist_marker = OPENCLAW_RUNTIME_DIR / "dist" / "gateway" / "server.js"
-    if not force and dist_marker.exists():
+    source_marker = OPENCLAW_RUNTIME_DIR / "src" / "gateway" / "server.ts"
+    tsx_marker = OPENCLAW_RUNTIME_DIR / "node_modules" / "tsx"
+    gateway_marker = OPENCLAW_RUNTIME_DIR / "gateway_start.mjs"
+    if not force and source_marker.exists() and tsx_marker.exists() and gateway_marker.exists():
         _sync_openclaw_runtime_sidefiles(vendor_root)
-        log("OpenClaw runtime 已存在，跳过编译")
+        log("OpenClaw runtime 已存在，跳过重建")
         return
 
     # 清理旧运行时
@@ -1033,64 +1024,13 @@ def preinstall_openclaw(force: bool = False) -> None:
     # 1. 安装 vendor 依赖（需要保留平台 postinstall / native 包处理）
     _install_openclaw_vendor_dependencies(vendor_root, env, force=force)
 
-    # 2. 编译 TypeScript
-    log("编译 vendor/openclaw 源码...")
-    compile_env = env.copy()
-    compile_env["NODE_OPTIONS"] = "--max-old-space-size=4096"
-    runtime_dist_root = OPENCLAW_RUNTIME_DIR / "dist"
-    if runtime_dist_root.exists():
-        log(f"清理旧 OpenClaw runtime dist: {runtime_dist_root}")
-        shutil.rmtree(runtime_dist_root)
-    tsc_cli = _find_vendor_typescript_cli(vendor_root)
-    log(f"$ {node_bin} {tsc_cli} -p tsconfig.naga.json --outDir {runtime_dist_root}")
-    compile_result = subprocess.run(
-        [str(node_bin), str(tsc_cli), "-p", "tsconfig.naga.json", "--outDir", str(runtime_dist_root)],
-        cwd=vendor_root,
-        env=compile_env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-    compile_output = "\n".join(part for part in (compile_result.stdout, compile_result.stderr) if part).strip()
-    reconciled_ts, reconciled_assets = _reconcile_openclaw_dist_from_source(
-        node_bin,
-        vendor_root,
-        runtime_dist_root,
-        compile_env,
-    )
-    if reconciled_ts or reconciled_assets:
-        log(
-            "OpenClaw runtime dist 源码对齐完成: "
-            f"{reconciled_ts} 个源码转译, {reconciled_assets} 个资源复制"
-        )
-
-    runtime_dist = runtime_dist_root / "gateway" / "server.js"
-    if compile_result.returncode != 0 and runtime_dist.exists():
-        diag_path = _write_openclaw_tsc_diagnostics(compile_output)
-        message = (
-            f"警告：vendor/openclaw 编译返回非零退出码 {compile_result.returncode}，"
-            "但 runtime dist 已生成，继续打包"
-        )
-        if diag_path:
-            message += f"；诊断日志已写入 {diag_path}"
-        log(message)
-    if not runtime_dist.exists():
-        diag_path = _write_openclaw_tsc_diagnostics(compile_output)
-        if diag_path:
-            log(f"OpenClaw TypeScript 诊断日志: {diag_path}")
-        _log_openclaw_tsc_excerpt(compile_output)
-        raise FileNotFoundError(f"编译失败：runtime dist/gateway/server.js 不存在: {runtime_dist}")
-
-    # 3. 复制依赖到 runtime
-    log("复制 OpenClaw 依赖到运行时目录...")
+    # 2. 同步源码与依赖到 runtime
+    log("同步 OpenClaw 源码与依赖到运行时目录...")
     shutil.copytree(vendor_root / "node_modules", OPENCLAW_RUNTIME_DIR / "node_modules")
-    shutil.copy2(vendor_root / "package.json", OPENCLAW_RUNTIME_DIR / "package.json")
-    shutil.copy2(vendor_root / "openclaw.mjs", OPENCLAW_RUNTIME_DIR / "openclaw.mjs")
     _sync_openclaw_runtime_sidefiles(vendor_root)
     _verify_openclaw_runtime_import(node_bin, env, vendor_root)
 
-    log(f"OpenClaw 运行时准备完成（从源码编译）: {OPENCLAW_RUNTIME_DIR}")
+    log(f"OpenClaw 运行时准备完成（源码直跑）: {OPENCLAW_RUNTIME_DIR}")
 
 
 def _agent_browser_bin_name() -> str:
