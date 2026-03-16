@@ -710,7 +710,12 @@ def _hydrate_missing_openclaw_runtime_module(
     return True
 
 
-def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], runtime_root: Path) -> None:
+def _verify_openclaw_runtime_import(
+    node_bin: Path,
+    env: dict[str, str],
+    runtime_root: Path,
+    vendor_root: Path,
+) -> None:
     dist_entry = runtime_root / "dist" / "gateway" / "server.js"
     if not dist_entry.exists():
         raise FileNotFoundError(f"OpenClaw Gateway 编译入口不存在: {dist_entry}")
@@ -728,30 +733,53 @@ def _verify_openclaw_runtime_import(node_bin: Path, env: dict[str, str], runtime
         "}"
         "console.log('openclaw-gateway-dist-import-ok');"
     )
-    result = subprocess.run(
-        [
-            str(node_bin),
-            "--input-type=module",
-            "-e",
-            verify_script,
-        ],
-        cwd=runtime_root,
-        env=verify_env,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        check=False,
-    )
-    if result.returncode == 0:
-        log("OpenClaw Gateway 编译产物导入校验通过")
-        return
+    dist_root = runtime_root / "dist"
+    max_hydrate_attempts = 32
+    hydrated_count = 0
 
-    output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
-    diag_path = _write_openclaw_import_diagnostics(output) if output else None
-    if diag_path:
-        log(f"OpenClaw Gateway 编译产物导入校验失败，日志已写入 {diag_path}")
-        _log_openclaw_tsc_excerpt(output)
-    raise RuntimeError("OpenClaw Gateway 编译产物导入校验失败")
+    for _attempt in range(max_hydrate_attempts + 1):
+        result = subprocess.run(
+            [
+                str(node_bin),
+                "--input-type=module",
+                "-e",
+                verify_script,
+            ],
+            cwd=runtime_root,
+            env=verify_env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+        )
+        if result.returncode == 0:
+            log("OpenClaw Gateway 编译产物导入校验通过")
+            return
+
+        output = "\n".join(part for part in (result.stdout, result.stderr) if part).strip()
+        missing_match = _MISSING_MODULE_RE.search(output)
+        if missing_match:
+            missing_target = _resolve_missing_module_target(missing_match.group("path"))
+            if (
+                missing_target is not None
+                and _hydrate_missing_openclaw_runtime_module(
+                    node_bin,
+                    vendor_root,
+                    dist_root,
+                    missing_target,
+                    env,
+                )
+            ):
+                hydrated_count += 1
+                continue
+
+        diag_path = _write_openclaw_import_diagnostics(output) if output else None
+        if diag_path:
+            log(f"OpenClaw Gateway 编译产物导入校验失败，日志已写入 {diag_path}")
+            _log_openclaw_tsc_excerpt(output)
+        raise RuntimeError("OpenClaw Gateway 编译产物导入校验失败")
+
+    raise RuntimeError(f"OpenClaw Gateway 编译产物导入校验失败（已补齐 {hydrated_count} 个缺失模块后仍未通过）")
 
 
 def download_python_runtime() -> Path:
@@ -1067,7 +1095,12 @@ def preinstall_openclaw(force: bool = False) -> None:
     node_modules_marker = OPENCLAW_RUNTIME_DIR / "node_modules"
     gateway_marker = PROJECT_ROOT / "agentserver" / "openclaw" / "gateway_start.mjs"
     if not force and dist_marker.exists() and node_modules_marker.exists() and gateway_marker.exists():
-        _verify_openclaw_runtime_import(node_bin, _apply_runtime_npm_env(os.environ.copy()), OPENCLAW_RUNTIME_DIR)
+        _verify_openclaw_runtime_import(
+            node_bin,
+            _apply_runtime_npm_env(os.environ.copy()),
+            OPENCLAW_RUNTIME_DIR,
+            vendor_root,
+        )
         log("vendor/openclaw 已就绪，跳过重建")
         return
 
@@ -1139,7 +1172,7 @@ def preinstall_openclaw(force: bool = False) -> None:
     _sync_openclaw_runtime_sidefiles(vendor_root)
 
     log("校验 OpenClaw 编译产物入口...")
-    _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR)
+    _verify_openclaw_runtime_import(node_bin, env, OPENCLAW_RUNTIME_DIR, vendor_root)
 
     log(f"OpenClaw 运行时准备完成（从源码编译 dist）: {OPENCLAW_RUNTIME_DIR}")
 
