@@ -21,6 +21,14 @@ function isRelativePath(specifier) {
   return specifier.startsWith("./") || specifier.startsWith("../");
 }
 
+function isFileUrl(specifier) {
+  return specifier.startsWith("file://");
+}
+
+function isAbsolutePath(specifier) {
+  return specifier.startsWith("/");
+}
+
 function remapSuffixes(specifier) {
   for (const [suffix, replacements] of REMAP_SUFFIXES.entries()) {
     if (!specifier.endsWith(suffix)) {
@@ -32,6 +40,27 @@ function remapSuffixes(specifier) {
   return [];
 }
 
+function buildCandidatePaths(specifier, parentURL) {
+  if (isRelativePath(specifier)) {
+    if (!parentURL) {
+      return [];
+    }
+    const parentDir = dirname(fileURLToPath(parentURL));
+    return remapSuffixes(specifier).map((candidateSpecifier) => resolvePath(parentDir, candidateSpecifier));
+  }
+
+  if (isFileUrl(specifier)) {
+    const rawPath = fileURLToPath(specifier);
+    return remapSuffixes(rawPath).map((candidatePath) => resolvePath(candidatePath));
+  }
+
+  if (isAbsolutePath(specifier)) {
+    return remapSuffixes(specifier).map((candidatePath) => resolvePath(candidatePath));
+  }
+
+  return [];
+}
+
 export async function resolve(specifier, context, nextResolve) {
   try {
     return await nextResolve(specifier, context);
@@ -39,13 +68,7 @@ export async function resolve(specifier, context, nextResolve) {
     if (error?.code !== "ERR_MODULE_NOT_FOUND") {
       throw error;
     }
-    if (!context.parentURL || !isRelativePath(specifier)) {
-      throw error;
-    }
-
-    const parentDir = dirname(fileURLToPath(context.parentURL));
-    for (const candidateSpecifier of remapSuffixes(specifier)) {
-      const candidatePath = resolvePath(parentDir, candidateSpecifier);
+    for (const candidatePath of buildCandidatePaths(specifier, context.parentURL)) {
       if (!(await fileExists(candidatePath))) {
         continue;
       }
