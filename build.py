@@ -692,11 +692,33 @@ def _find_openclaw_source_candidate(source_root: Path, dist_root: Path, missing_
     if direct_candidate.exists():
         return direct_candidate
 
-    stem = relative_path.with_suffix("")
-    for suffix in (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".html", ".css", ".hash"):
-        candidate = source_root / stem.with_suffix(suffix)
-        if candidate.exists():
-            return candidate
+    source_suffixes = (".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".html", ".css", ".hash")
+    relative_parent = relative_path.parent
+    base_name = relative_path.name
+    matched_dist_suffix = next((suffix for suffix in source_suffixes if base_name.endswith(suffix)), None)
+
+    candidate_roots: list[str] = []
+    if matched_dist_suffix is not None:
+        root_name = base_name[: -len(matched_dist_suffix)]
+        if root_name:
+            candidate_roots.append(root_name)
+            stripped_name = root_name
+            while "." in stripped_name:
+                stripped_name = stripped_name.rsplit(".", 1)[0]
+                if stripped_name:
+                    candidate_roots.append(stripped_name)
+    else:
+        candidate_roots.append(base_name)
+
+    seen: set[Path] = set()
+    for root_name in candidate_roots:
+        for suffix in source_suffixes:
+            candidate = source_root / relative_parent / f"{root_name}{suffix}"
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists():
+                return candidate
     return None
 
 
