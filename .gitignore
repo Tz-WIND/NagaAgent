@@ -197,7 +197,7 @@ celerybeat.pid
 # Django stuff:
 local_settings.py
 db.sqlite3
-media
+/media/
 
 # Flask stuff:
 instance/
@@ -219,7 +219,7 @@ ipython_config.py
 
 # Claude Code
 .claude/
-CLAUDE.md
+/CLAUDE.md
 tmp/
 
 # Cursor
