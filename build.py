@@ -663,15 +663,29 @@ def _resolve_missing_module_target(raw_path: str) -> Optional[Path]:
         if IS_WINDOWS and re.match(r"^/[A-Za-z]:", raw):
             raw = raw[1:]
     try:
-        return Path(raw).resolve()
+        path = Path(raw)
+        if path.is_absolute():
+            return path
+        return path.resolve()
     except Exception:
         return None
 
 
-def _find_openclaw_source_candidate(source_root: Path, dist_root: Path, missing_target: Path) -> Optional[Path]:
+def _relative_path_under_root(root: Path, candidate: Path) -> Optional[Path]:
     try:
-        relative_path = missing_target.relative_to(dist_root)
+        return candidate.relative_to(root)
     except ValueError:
+        root_norm = str(root).replace("\\", "/").rstrip("/")
+        candidate_norm = str(candidate).replace("\\", "/")
+        prefix = f"{root_norm}/"
+        if candidate_norm.casefold().startswith(prefix.casefold()):
+            return Path(candidate_norm[len(prefix):])
+        return None
+
+
+def _find_openclaw_source_candidate(source_root: Path, dist_root: Path, missing_target: Path) -> Optional[Path]:
+    relative_path = _relative_path_under_root(dist_root, missing_target)
+    if relative_path is None:
         return None
 
     direct_candidate = source_root / relative_path
@@ -772,6 +786,8 @@ def _verify_openclaw_runtime_import(
             ):
                 hydrated_count += 1
                 continue
+            if missing_target is not None:
+                log(f"无法将缺失的 OpenClaw dist 模块映射回源码: {missing_target}")
 
         diag_path = _write_openclaw_import_diagnostics(output) if output else None
         if diag_path:
