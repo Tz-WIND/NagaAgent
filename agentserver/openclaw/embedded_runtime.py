@@ -592,7 +592,7 @@ class EmbeddedRuntime:
     def _build_gateway_cmd(self) -> Optional[List[str]]:
         """构建启动 Gateway 的命令列表。
 
-        源码模式：node --import tsx gateway_start.mjs
+        源码模式：node --import tsx --loader source_resolver.mjs gateway_start.mjs
         编译模式：node gateway_start.mjs
         """
         node = self.node_path
@@ -600,14 +600,19 @@ class EmbeddedRuntime:
             return None
 
         # gateway_start.mjs 与本模块同目录，由 PyInstaller 一并冻结。
-        entry = Path(__file__).parent / "gateway_start.mjs"
+        module_dir = Path(__file__).parent
+        entry = module_dir / "gateway_start.mjs"
         if not entry.exists():
             logger.error(f"gateway_start.mjs 不存在: {entry}")
             return None
 
         # 有源码 + tsx 时，开发态和打包态都优先跑源码，避免半成品 dist 污染运行时。
         if self._prefer_source_runtime:
-            return [node, "--import", "tsx", str(entry)]
+            source_loader = module_dir / "source_resolver.mjs"
+            if not source_loader.exists():
+                logger.error(f"source_resolver.mjs 不存在: {source_loader}")
+                return None
+            return [node, "--import", "tsx", "--loader", str(source_loader), str(entry)]
         return [node, str(entry)]
 
     def _get_gateway_cwd(self) -> Optional[str]:
