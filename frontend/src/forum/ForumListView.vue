@@ -115,13 +115,13 @@ async function loadPosts() {
 watch([sortMode, timeOrder, yearMonth], () => {
   void loadPosts()
 })
-watch([backendConnected, sessionRestored, ACCESS_TOKEN], ([connected, restored, token]) => {
-  if (connected && restored && token) {
+watch([backendConnected, ACCESS_TOKEN], ([connected, token]) => {
+  if (connected && token) {
     void loadPosts()
   }
 })
 onMounted(() => {
-  if (backendConnected.value && sessionRestored.value && ACCESS_TOKEN.value) {
+  if (backendConnected.value && ACCESS_TOKEN.value) {
     void loadPosts()
   }
 })

@@ -51,8 +51,8 @@ watch(openclawAgents, (agents) => {
   }
 }, { immediate: true })
 
-watch([backendConnected, sessionRestored, ACCESS_TOKEN], ([connected, restored, token]) => {
-  if (connected && restored && token && !profile.value) {
+watch([backendConnected, ACCESS_TOKEN], ([connected, token]) => {
+  if (connected && token && !profile.value) {
     void reload()
   }
 })
