@@ -5,11 +5,10 @@ from typing import Any
 
 import httpx
 
+from apiserver import naga_auth
 from system.config import get_config
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_QQ_NOTIFY_URL = "http://62.234.131.204/api/notify"
 
 
 def build_travel_summary_message(session: Any) -> str:
@@ -71,18 +70,47 @@ def _render_qq_message(session: Any) -> str:
     return build_travel_summary_message(session)
 
 
-def _build_qq_payload(session: Any) -> dict[str, Any]:
+def _resolve_naga_user_id() -> str:
     cfg = get_config()
-    qq_cfg = cfg.notifications.qq
     naga_user_id = (cfg.naga_portal.username or "").strip()
     if naga_user_id in {"", "your-portal-username"}:
         naga_user_id = (cfg.system.active_character or cfg.system.ai_name or "naga-local").strip()
+    return naga_user_id
+
+
+def _resolve_qq_notify_url() -> str:
+    cfg = get_config()
+    base_url = cfg.naga_business.forum_api_url.rstrip("/")
+    return f"{base_url}/api/notify"
+
+
+async def _build_qq_notify_headers() -> dict[str, str]:
+    cfg = get_config()
+    headers = {"Content-Type": "application/json"}
+
+    internal_secret = cfg.naga_business.internal_secret.strip()
+    if internal_secret:
+        headers["X-Internal-Secret"] = internal_secret
+        return headers
+
+    token = naga_auth.get_access_token()
+    if not token:
+        await naga_auth.ensure_access_token()
+        token = naga_auth.get_access_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _build_qq_payload(session: Any) -> dict[str, Any]:
+    cfg = get_config()
+    qq_cfg = cfg.notifications.qq
 
     payload: dict[str, Any] = {
         "event": "explore.completed",
         "trace_id": f"travel:{session.session_id}",
         "idempotency_key": f"travel:{session.session_id}:qq:{qq_cfg.user_qq.strip()}",
-        "naga_user_id": naga_user_id,
+        "naga_user_id": _resolve_naga_user_id(),
         "message": _render_qq_message(session),
         "channel": "qq",
         "qq_user_id": int(qq_cfg.user_qq.strip()),
@@ -94,6 +122,74 @@ def _build_qq_payload(session: Any) -> dict[str, Any]:
         },
     }
     return payload
+
+
+async def _deliver_qq_payload(payload: dict[str, Any]) -> str:
+    notify_url = _resolve_qq_notify_url()
+    headers = await _build_qq_notify_headers()
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), trust_env=False) as client:
+        response = await client.post(notify_url, json=payload, headers=headers)
+
+    response_text = response.text.strip()
+    response_json: dict[str, Any] | None = None
+    try:
+        response_json = response.json()
+    except Exception:
+        response_json = None
+
+    if response.status_code >= 400:
+        detail = (
+            (response_json or {}).get("error")
+            or (response_json or {}).get("detail")
+            or response_text
+            or f"HTTP {response.status_code}"
+        )
+        if response.status_code == 401:
+            auth_mode = "X-Internal-Secret" if "X-Internal-Secret" in headers else "Bearer token"
+            detail = f"{detail}（QQ notify 鉴权失败，当前使用 {auth_mode} 调用 {notify_url}）"
+        raise RuntimeError(detail)
+
+    if response_json and response_json.get("ok") is False:
+        raise RuntimeError(
+            response_json.get("error")
+            or response_json.get("message")
+            or "通知服务返回失败"
+        )
+
+    delivery_id = (response_json or {}).get("delivery_id")
+    return f"accepted:{delivery_id}" if delivery_id else "accepted"
+
+
+async def send_test_qq_notification(
+    qq_user_id: str,
+    message: str | None = None,
+    naga_user_id: str | None = None,
+) -> str:
+    qq_value = str(qq_user_id or "").strip()
+    if not qq_value:
+        raise ValueError("缺少 QQ 号")
+    if not qq_value.isdigit():
+        raise ValueError("QQ 号必须是纯数字")
+
+    normalized_naga_user_id = str(naga_user_id or "").strip() or _resolve_naga_user_id()
+    message_content = (message or "这是一条来自 Naga 的 QQ 通知测试消息，用于验证机器人回调链路是否可用。").strip()
+
+    payload: dict[str, Any] = {
+        "event": "explore.test",
+        "trace_id": f"travel:test:qq:{qq_value}",
+        "idempotency_key": f"travel:test:qq:{qq_value}",
+        "naga_user_id": normalized_naga_user_id,
+        "message": f"[@{qq_value}] {message_content}",
+        "channel": "qq",
+        "qq_user_id": int(qq_value),
+        "metadata": {
+            "test": True,
+            "qq_user_id": qq_value,
+            "naga_user_id": normalized_naga_user_id,
+        },
+    }
+    return await _deliver_qq_payload(payload)
 
 
 async def deliver_travel_completion_notifications(session: Any, travel_client: Any | None) -> dict[str, str]:
@@ -132,36 +228,7 @@ async def deliver_travel_completion_notifications(session: Any, travel_client: A
         else:
             try:
                 payload = _build_qq_payload(session)
-                headers = {"Content-Type": "application/json"}
-
-                async with httpx.AsyncClient(timeout=httpx.Timeout(15.0), trust_env=False) as client:
-                    response = await client.post(_DEFAULT_QQ_NOTIFY_URL, json=payload, headers=headers)
-
-                response_text = response.text.strip()
-                response_json: dict[str, Any] | None = None
-                try:
-                    response_json = response.json()
-                except Exception:
-                    response_json = None
-
-                if response.status_code >= 400:
-                    detail = (
-                        (response_json or {}).get("error")
-                        or (response_json or {}).get("detail")
-                        or response_text
-                        or f"HTTP {response.status_code}"
-                    )
-                    raise RuntimeError(detail)
-
-                if response_json and response_json.get("ok") is False:
-                    raise RuntimeError(
-                        response_json.get("error")
-                        or response_json.get("message")
-                        or "通知服务返回失败"
-                    )
-
-                delivery_id = (response_json or {}).get("delivery_id")
-                statuses["qq"] = f"accepted:{delivery_id}" if delivery_id else "accepted"
+                statuses["qq"] = await _deliver_qq_payload(payload)
             except Exception as exc:
                 statuses["qq"] = f"failed:{exc}"
                 logger.warning("[旅行] QQ 完成通知发送失败: %s", exc)
