@@ -180,7 +180,7 @@ async def send_test_qq_notification(
         "trace_id": f"travel:test:qq:{qq_value}",
         "idempotency_key": f"travel:test:qq:{qq_value}",
         "naga_user_id": normalized_naga_user_id,
-        "message": f"[@{qq_value}] {message_content}",
+        "message": message_content,
         "channel": "qq",
         "qq_user_id": int(qq_value),
         "metadata": {
