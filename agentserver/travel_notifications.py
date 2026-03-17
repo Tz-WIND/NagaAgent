@@ -11,6 +11,12 @@ from system.config import get_config
 logger = logging.getLogger(__name__)
 
 
+class QQNotifyDeliveryError(RuntimeError):
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 def build_travel_summary_message(session: Any) -> str:
     base_summary = (getattr(session, "summary", None) or "").strip()
     if not base_summary:
@@ -148,13 +154,14 @@ async def _deliver_qq_payload(payload: dict[str, Any]) -> str:
         if response.status_code == 401:
             auth_mode = "X-Internal-Secret" if "X-Internal-Secret" in headers else "Bearer token"
             detail = f"{detail}（QQ notify 鉴权失败，当前使用 {auth_mode} 调用 {notify_url}）"
-        raise RuntimeError(detail)
+        raise QQNotifyDeliveryError(detail, status_code=response.status_code)
 
     if response_json and response_json.get("ok") is False:
-        raise RuntimeError(
+        raise QQNotifyDeliveryError(
             response_json.get("error")
             or response_json.get("message")
-            or "通知服务返回失败"
+            or "通知服务返回失败",
+            status_code=502,
         )
 
     delivery_id = (response_json or {}).get("delivery_id")
