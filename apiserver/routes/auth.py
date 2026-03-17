@@ -8,6 +8,7 @@ from fastapi.responses import Response, JSONResponse
 
 from apiserver import naga_auth
 from apiserver.telemetry import emit_telemetry
+from system.config_manager import update_config
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +87,30 @@ async def auth_me(request: Request):
 @router.post("/auth/logout")
 async def auth_logout():
     """登出"""
+    interrupted_session_ids: list[str] = []
+    try:
+        from apiserver.travel_service import interrupt_open_sessions
+
+        interrupted_sessions = interrupt_open_sessions(reason="logout")
+        interrupted_session_ids = [session.session_id for session in interrupted_sessions]
+    except Exception as e:
+        logger.warning(f"logout 时标记探索中断失败（可忽略）: {e}")
+
+    if interrupted_session_ids:
+        try:
+            import httpx
+            from system.config import get_server_port
+
+            port = get_server_port("agent_server")
+            async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+                await client.post(
+                    f"http://127.0.0.1:{port}/travel/interrupt",
+                    json={"reason": "logout", "session_ids": interrupted_session_ids},
+                )
+        except Exception as e:
+            logger.warning(f"logout 时通知 agent_server 中断探索失败（可忽略）: {e}")
     naga_auth.logout()
-    return {"success": True}
+    return {"success": True, "interrupted_sessions": interrupted_session_ids}
 
 
 @router.post("/auth/register")
@@ -136,10 +159,10 @@ async def auth_register(body: dict):
 
 
 @router.get("/auth/captcha")
-async def auth_captcha():
-    """获取验证码（数学计算题）"""
+async def auth_captcha(format: str = ""):
+    """获取验证码（图像优先，兼容旧版算术题）"""
     try:
-        result = await naga_auth.get_captcha()
+        result = await naga_auth.get_captcha(format)
         return result
     except Exception as e:
         logger.error(f"获取验证码失败: {e}")
@@ -191,6 +214,173 @@ async def auth_send_verification(body: dict):
             source="apiserver",
         )
         raise HTTPException(status_code=status, detail=detail)
+
+
+@router.post("/auth/send-qq-verification")
+async def auth_send_qq_verification(body: dict, request: Request):
+    """向 QQ 邮箱发送验证码，使用当前登录用户身份。"""
+    email = str(body.get("email", "")).strip()
+    captcha_id = str(body.get("captcha_id", "")).strip()
+    captcha_answer = str(body.get("captcha_answer", "")).strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="邮箱不能为空")
+
+    token = naga_auth.get_access_token()
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            naga_auth.restore_token(token)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录后再发送 QQ 邮箱验证码")
+
+    user = naga_auth.get_user_info() or await naga_auth.get_me(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="当前登录态无有效用户，请重新登录后再试")
+
+    try:
+        await naga_auth.send_qq_verification(email, token, captcha_id, captcha_answer)
+        emit_telemetry(
+            "qq_notification_verification_sent",
+            {
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+                "username_length": len(str(user.get("username") or "")),
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
+        return {"success": True, "message": f"验证码已发送到 {email}"}
+    except Exception as e:
+        import httpx
+
+        status = 500
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+        logger.error(f"发送 QQ 邮箱验证码失败 [{status}]: {detail}")
+        emit_telemetry(
+            "qq_notification_verification_fail",
+            {
+                "status_code": status,
+                "error": detail,
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+                "has_captcha": bool(captcha_id),
+            },
+            source="apiserver",
+        )
+        raise HTTPException(status_code=status, detail=detail)
+
+
+
+
+@router.post("/auth/qq-email")
+async def auth_bind_qq_email(body: dict, request: Request):
+    """提交 QQ 邮箱绑定。"""
+    email = str(body.get("qq_email", "")).strip()
+    verification_code = str(body.get("verification_code", "")).strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="qq_email 不能为空")
+    if not verification_code:
+        raise HTTPException(status_code=400, detail="verification_code 不能为空")
+
+    token = naga_auth.get_access_token()
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            naga_auth.restore_token(token)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录后再提交 QQ 邮箱绑定")
+
+    user = naga_auth.get_user_info() or await naga_auth.get_me(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="当前登录态无有效用户，请重新登录后再试")
+
+    try:
+        result = await naga_auth.bind_qq_email(email, verification_code, token)
+        update_config({
+            "notifications": {
+                "qq": {
+                    "binding_target": email,
+                    "user_qq": email.split("@", 1)[0] if "@qq.com" in email.lower() else "",
+                    "qq_email": email,
+                    "email_verification_code": "",
+                    "binding_verified": True,
+                    "binding_verified_email": email,
+                },
+            },
+        })
+        emit_telemetry(
+            "qq_notification_bound",
+            {
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+                "username_length": len(str(user.get("username") or "")),
+            },
+            source="apiserver",
+        )
+        return result
+    except Exception as e:
+        import httpx
+
+        status = 500
+        detail = str(e)
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+        logger.error(f"提交 QQ 邮箱绑定失败 [{status}]: {detail}")
+        emit_telemetry(
+            "qq_notification_bind_fail",
+            {
+                "status_code": status,
+                "error": detail,
+                "email_domain": email.split("@", 1)[1] if "@" in email else "",
+            },
+            source="apiserver",
+        )
+        raise HTTPException(status_code=status, detail=detail)
+
+
+@router.get("/auth/qq-email")
+async def auth_get_qq_email_binding(request: Request):
+    """获取当前账号 QQ 邮箱绑定状态。"""
+    token = naga_auth.get_access_token()
+    if not token:
+        auth_header = request.headers.get("authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            naga_auth.restore_token(token)
+    if not token:
+        raise HTTPException(status_code=401, detail="请先登录后再查询 QQ 邮箱绑定")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                f"{naga_auth.BUSINESS_URL}/api/auth/qq-email",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                logger.error(f"NagaBusiness qq-email 查询返回 {resp.status_code}: {resp.text}")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        if isinstance(e, httpx.HTTPStatusError):
+            status = e.response.status_code
+            try:
+                err_data = e.response.json()
+                detail = err_data.get("message", e.response.text)
+            except Exception:
+                detail = e.response.text
+            raise HTTPException(status_code=status, detail=detail)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/auth/refresh")
