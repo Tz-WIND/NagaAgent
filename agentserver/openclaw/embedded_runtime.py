@@ -441,6 +441,14 @@ class EmbeddedRuntime:
         env = self._sanitize_subprocess_env(os.environ.copy())
         state_dir = get_openclaw_state_dir()
         config_path = get_openclaw_config_path()
+        try:
+            from system.config import get_data_dir
+
+            browser_policy_path = get_data_dir() / "travel" / "browser-policies.json"
+            browser_policy_path.parent.mkdir(parents=True, exist_ok=True)
+            env["NAGA_BROWSER_SESSION_POLICY_PATH"] = str(browser_policy_path)
+        except Exception:
+            pass
         state_dir.mkdir(parents=True, exist_ok=True)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         env["OPENCLAW_STATE_DIR"] = str(state_dir)

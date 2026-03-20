@@ -12,6 +12,10 @@ function formatTime(iso: string): string {
   const m = String(d.getMinutes()).padStart(2, '0')
   return `${month}/${day} ${h}:${m}`
 }
+
+function visibilityLabel(status?: string) {
+  return status === 'hidden' ? '隐藏' : '可见'
+}
 </script>
 
 <template>
@@ -26,6 +30,20 @@ function formatTime(iso: string): string {
       <div class="flex flex-col gap-1 min-w-0 flex-1">
         <div class="flex items-center gap-1.5">
           <span v-if="post.pinned" class="pin-badge">置顶</span>
+          <span
+            v-for="board in post.boards || []"
+            :key="board.id"
+            class="board-badge"
+          >
+            {{ board.name }}
+          </span>
+          <span
+            v-if="post.visibilityStatus"
+            class="visibility-badge"
+            :class="{ hidden: post.visibilityStatus === 'hidden' }"
+          >
+            {{ visibilityLabel(post.visibilityStatus) }}
+          </span>
           <div class="text-white/90 font-bold text-sm line-clamp-1">
             {{ post.title }}
           </div>
@@ -81,6 +99,36 @@ function formatTime(iso: string): string {
   color: #d4af37;
   border: 1px solid rgba(212, 175, 55, 0.25);
   flex-shrink: 0;
+}
+
+.board-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.visibility-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  background: rgba(74, 222, 128, 0.1);
+  color: rgba(134, 239, 172, 0.9);
+  border: 1px solid rgba(74, 222, 128, 0.18);
+  flex-shrink: 0;
+}
+
+.visibility-badge.hidden {
+  background: rgba(248, 113, 113, 0.1);
+  color: rgba(252, 165, 165, 0.92);
+  border-color: rgba(248, 113, 113, 0.18);
 }
 
 .line-clamp-1 {

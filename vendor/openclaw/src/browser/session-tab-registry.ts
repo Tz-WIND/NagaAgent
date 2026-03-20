@@ -6,6 +6,9 @@ export type TrackedSessionBrowserTab = {
   baseUrl?: string;
   profile?: string;
   trackedAt: number;
+  lastActiveAt: number;
+  idleTimeoutMs?: number;
+  closeTimer?: ReturnType<typeof setTimeout>;
 };
 
 const trackedTabsBySession = new Map<string, Map<string, TrackedSessionBrowserTab>>();
@@ -48,11 +51,57 @@ function isIgnorableCloseError(err: unknown): boolean {
   );
 }
 
+function clearTrackedTabTimer(tab: TrackedSessionBrowserTab) {
+  if (!tab.closeTimer) {
+    return;
+  }
+  clearTimeout(tab.closeTimer);
+  tab.closeTimer = undefined;
+}
+
+function deleteTrackedTab(sessionKey: string, trackedId: string) {
+  const trackedForSession = trackedTabsBySession.get(sessionKey);
+  if (!trackedForSession) {
+    return;
+  }
+  const tracked = trackedForSession.get(trackedId);
+  if (tracked) {
+    clearTrackedTabTimer(tracked);
+  }
+  trackedForSession.delete(trackedId);
+  if (trackedForSession.size === 0) {
+    trackedTabsBySession.delete(sessionKey);
+  }
+}
+
+function scheduleTrackedTabClose(tab: TrackedSessionBrowserTab) {
+  clearTrackedTabTimer(tab);
+  if (!tab.idleTimeoutMs || tab.idleTimeoutMs <= 0) {
+    return;
+  }
+  const trackedId = toTrackedTabId(tab);
+  tab.closeTimer = setTimeout(async () => {
+    try {
+      await browserCloseTab(tab.baseUrl, tab.targetId, {
+        profile: tab.profile,
+      });
+    } catch (err) {
+      if (!isIgnorableCloseError(err)) {
+        // Ignore non-fatal close errors; timer is best-effort cleanup.
+      }
+    } finally {
+      deleteTrackedTab(tab.sessionKey, trackedId);
+    }
+  }, tab.idleTimeoutMs);
+  tab.closeTimer.unref?.();
+}
+
 export function trackSessionBrowserTab(params: {
   sessionKey?: string;
   targetId?: string;
   baseUrl?: string;
   profile?: string;
+  idleTimeoutMs?: number;
 }): void {
   const sessionKeyRaw = params.sessionKey?.trim();
   const targetIdRaw = params.targetId?.trim();
@@ -69,6 +118,11 @@ export function trackSessionBrowserTab(params: {
     baseUrl,
     profile,
     trackedAt: Date.now(),
+    lastActiveAt: Date.now(),
+    idleTimeoutMs:
+      typeof params.idleTimeoutMs === "number" && Number.isFinite(params.idleTimeoutMs)
+        ? Math.max(0, Math.floor(params.idleTimeoutMs))
+        : undefined,
   };
   const trackedId = toTrackedTabId(tracked);
   let trackedForSession = trackedTabsBySession.get(sessionKey);
@@ -76,7 +130,36 @@ export function trackSessionBrowserTab(params: {
     trackedForSession = new Map();
     trackedTabsBySession.set(sessionKey, trackedForSession);
   }
+  const existing = trackedForSession.get(trackedId);
+  if (existing) {
+    clearTrackedTabTimer(existing);
+  }
   trackedForSession.set(trackedId, tracked);
+  scheduleTrackedTabClose(tracked);
+}
+
+export function touchTrackedBrowserTabsForSession(params: {
+  sessionKey?: string;
+  idleTimeoutMs?: number;
+}): number {
+  const sessionKeyRaw = params.sessionKey?.trim();
+  if (!sessionKeyRaw) {
+    return 0;
+  }
+  const sessionKey = normalizeSessionKey(sessionKeyRaw);
+  const trackedForSession = trackedTabsBySession.get(sessionKey);
+  if (!trackedForSession || trackedForSession.size === 0) {
+    return 0;
+  }
+  const now = Date.now();
+  for (const tracked of trackedForSession.values()) {
+    tracked.lastActiveAt = now;
+    if (typeof params.idleTimeoutMs === "number" && Number.isFinite(params.idleTimeoutMs)) {
+      tracked.idleTimeoutMs = Math.max(0, Math.floor(params.idleTimeoutMs));
+    }
+    scheduleTrackedTabClose(tracked);
+  }
+  return trackedForSession.size;
 }
 
 export function untrackSessionBrowserTab(params: {
@@ -100,10 +183,7 @@ export function untrackSessionBrowserTab(params: {
     baseUrl: normalizeBaseUrl(params.baseUrl),
     profile: normalizeProfile(params.profile),
   });
-  trackedForSession.delete(trackedId);
-  if (trackedForSession.size === 0) {
-    trackedTabsBySession.delete(sessionKey);
-  }
+  deleteTrackedTab(sessionKey, trackedId);
 }
 
 function takeTrackedTabsForSessionKeys(
@@ -128,6 +208,7 @@ function takeTrackedTabsForSessionKeys(
     }
     trackedTabsBySession.delete(sessionKey);
     for (const tracked of trackedForSession.values()) {
+      clearTrackedTabTimer(tracked);
       const trackedId = toTrackedTabId(tracked);
       if (seenTrackedIds.has(trackedId)) {
         continue;
@@ -174,6 +255,11 @@ export async function closeTrackedBrowserTabsForSessions(params: {
 }
 
 export function __resetTrackedSessionBrowserTabsForTests(): void {
+  for (const trackedForSession of trackedTabsBySession.values()) {
+    for (const tracked of trackedForSession.values()) {
+      clearTrackedTabTimer(tracked);
+    }
+  }
   trackedTabsBySession.clear();
 }
 

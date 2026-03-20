@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
 import {
   browserAct,
   browserArmDialog,
@@ -20,6 +21,7 @@ import { resolveBrowserConfig } from "../../browser/config.js";
 import { DEFAULT_UPLOAD_DIR, resolveExistingPathsWithinRoot } from "../../browser/paths.js";
 import { applyBrowserProxyPaths, persistBrowserProxyFiles } from "../../browser/proxy-files.js";
 import {
+  touchTrackedBrowserTabsForSession,
   trackSessionBrowserTab,
   untrackSessionBrowserTab,
 } from "../../browser/session-tab-registry.js";
@@ -54,6 +56,53 @@ function readTargetUrlParam(params: Record<string, unknown>) {
     readStringParam(params, "targetUrl") ??
     readStringParam(params, "url", { required: true, label: "targetUrl" })
   );
+}
+
+type BrowserSessionPolicy = {
+  keepOpen?: boolean;
+  idleTimeoutSeconds?: number;
+  visible?: boolean;
+};
+
+const DEFAULT_BROWSER_IDLE_TIMEOUT_MS = 300_000;
+
+function loadSessionBrowserPolicy(sessionKey?: string): BrowserSessionPolicy | null {
+  const key = sessionKey?.trim();
+  const policyPath = process.env.NAGA_BROWSER_SESSION_POLICY_PATH?.trim();
+  if (!key || !policyPath) {
+    return null;
+  }
+  try {
+    const raw = fs.readFileSync(policyPath, "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, BrowserSessionPolicy>;
+    const policy = parsed?.[key];
+    return policy && typeof policy === "object" ? policy : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveBrowserIdlePolicy(params: {
+  keepOpenParam: unknown;
+  sessionKey?: string;
+}): { keepOpen: boolean; idleTimeoutMs?: number } {
+  const keepOpenParam = params.keepOpenParam;
+  const explicitKeepOpen =
+    typeof keepOpenParam === "boolean"
+      ? keepOpenParam
+      : typeof keepOpenParam === "string"
+        ? ["1", "true", "yes", "on"].includes(keepOpenParam.trim().toLowerCase())
+        : undefined;
+  const policy = loadSessionBrowserPolicy(params.sessionKey);
+  const keepOpen = explicitKeepOpen ?? policy?.keepOpen ?? false;
+  if (keepOpen) {
+    return { keepOpen: true, idleTimeoutMs: undefined };
+  }
+  const idleTimeoutSeconds =
+    typeof policy?.idleTimeoutSeconds === "number" && Number.isFinite(policy.idleTimeoutSeconds)
+      ? Math.max(30, Math.floor(policy.idleTimeoutSeconds))
+      : DEFAULT_BROWSER_IDLE_TIMEOUT_MS / 1000;
+  return { keepOpen: false, idleTimeoutMs: idleTimeoutSeconds * 1000 };
 }
 
 const LEGACY_BROWSER_ACT_REQUEST_KEYS = [
@@ -305,6 +354,10 @@ export function createBrowserTool(opts?: {
     execute: async (_toolCallId, args) => {
       const params = args as Record<string, unknown>;
       const action = readStringParam(params, "action", { required: true });
+      const idlePolicy = resolveBrowserIdlePolicy({
+        keepOpenParam: params.keepopen,
+        sessionKey: opts?.agentSessionKey,
+      });
       const profile = readStringParam(params, "profile");
       const requestedNode = readStringParam(params, "node");
       let target = readStringParam(params, "target") as "sandbox" | "host" | "node" | undefined;
@@ -376,6 +429,10 @@ export function createBrowserTool(opts?: {
               path: "/start",
               profile,
             });
+            touchTrackedBrowserTabsForSession({
+              sessionKey: opts?.agentSessionKey,
+              idleTimeoutMs: idlePolicy.idleTimeoutMs,
+            });
             return jsonResult(
               await proxyRequest({
                 method: "GET",
@@ -385,6 +442,10 @@ export function createBrowserTool(opts?: {
             );
           }
           await browserStart(baseUrl, { profile });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return jsonResult(await browserStatus(baseUrl, { profile }));
         case "stop":
           if (proxyRequest) {
@@ -423,6 +484,14 @@ export function createBrowserTool(opts?: {
               profile,
               body: { url: targetUrl },
             });
+            const opened = result as { targetId?: unknown };
+            trackSessionBrowserTab({
+              sessionKey: opts?.agentSessionKey,
+              targetId: typeof opened.targetId === "string" ? opened.targetId : undefined,
+              baseUrl: undefined,
+              profile,
+              idleTimeoutMs: idlePolicy.idleTimeoutMs,
+            });
             return jsonResult(result);
           }
           const opened = await browserOpenTab(baseUrl, targetUrl, { profile });
@@ -431,6 +500,7 @@ export function createBrowserTool(opts?: {
             targetId: opened.targetId,
             baseUrl,
             profile,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
           });
           return jsonResult(opened);
         }
@@ -445,9 +515,17 @@ export function createBrowserTool(opts?: {
               profile,
               body: { targetId },
             });
+            touchTrackedBrowserTabsForSession({
+              sessionKey: opts?.agentSessionKey,
+              idleTimeoutMs: idlePolicy.idleTimeoutMs,
+            });
             return jsonResult(result);
           }
           await browserFocusTab(baseUrl, targetId, { profile });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return jsonResult({ ok: true });
         }
         case "close": {
@@ -465,6 +543,14 @@ export function createBrowserTool(opts?: {
                   profile,
                   body: { kind: "close" },
                 });
+            if (targetId) {
+              untrackSessionBrowserTab({
+                sessionKey: opts?.agentSessionKey,
+                targetId,
+                baseUrl: undefined,
+                profile,
+              });
+            }
             return jsonResult(result);
           }
           if (targetId) {
@@ -481,6 +567,10 @@ export function createBrowserTool(opts?: {
           return jsonResult({ ok: true });
         }
         case "snapshot":
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return await executeSnapshotAction({
             input: params,
             baseUrl,
@@ -514,6 +604,10 @@ export function createBrowserTool(opts?: {
                 type,
                 profile,
               });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return await imageResultFromFile({
             label: "browser:screenshot",
             path: result.path,
@@ -533,17 +627,28 @@ export function createBrowserTool(opts?: {
                 targetId,
               },
             });
+            touchTrackedBrowserTabsForSession({
+              sessionKey: opts?.agentSessionKey,
+              idleTimeoutMs: idlePolicy.idleTimeoutMs,
+            });
             return jsonResult(result);
           }
-          return jsonResult(
-            await browserNavigate(baseUrl, {
-              url: targetUrl,
-              targetId,
-              profile,
-            }),
-          );
+          const result = await browserNavigate(baseUrl, {
+            url: targetUrl,
+            targetId,
+            profile,
+          });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
+          return jsonResult(result);
         }
         case "console":
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return await executeConsoleAction({
             input: params,
             baseUrl,
@@ -552,6 +657,10 @@ export function createBrowserTool(opts?: {
           });
         case "pdf": {
           const targetId = typeof params.targetId === "string" ? params.targetId.trim() : undefined;
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           const result = proxyRequest
             ? ((await proxyRequest({
                 method: "POST",
@@ -560,6 +669,10 @@ export function createBrowserTool(opts?: {
                 body: { targetId },
               })) as Awaited<ReturnType<typeof browserPdfSave>>)
             : await browserPdfSave(baseUrl, { targetId, profile });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return {
             content: [{ type: "text" as const, text: `FILE:${result.path}` }],
             details: result,
@@ -583,6 +696,10 @@ export function createBrowserTool(opts?: {
           const inputRef = readStringParam(params, "inputRef");
           const element = readStringParam(params, "element");
           const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           if (proxyRequest) {
             const result = await proxyRequest({
               method: "POST",
@@ -599,22 +716,29 @@ export function createBrowserTool(opts?: {
             });
             return jsonResult(result);
           }
-          return jsonResult(
-            await browserArmFileChooser(baseUrl, {
-              paths: normalizedPaths,
-              ref,
-              inputRef,
-              element,
-              targetId,
-              timeoutMs,
-              profile,
-            }),
-          );
+          const result = await browserArmFileChooser(baseUrl, {
+            paths: normalizedPaths,
+            ref,
+            inputRef,
+            element,
+            targetId,
+            timeoutMs,
+            profile,
+          });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
+          return jsonResult(result);
         }
         case "dialog": {
           const accept = Boolean(params.accept);
           const promptText = typeof params.promptText === "string" ? params.promptText : undefined;
           const { targetId, timeoutMs } = readOptionalTargetAndTimeout(params);
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           if (proxyRequest) {
             const result = await proxyRequest({
               method: "POST",
@@ -629,21 +753,28 @@ export function createBrowserTool(opts?: {
             });
             return jsonResult(result);
           }
-          return jsonResult(
-            await browserArmDialog(baseUrl, {
-              accept,
-              promptText,
-              targetId,
-              timeoutMs,
-              profile,
-            }),
-          );
+          const result = await browserArmDialog(baseUrl, {
+            accept,
+            promptText,
+            targetId,
+            timeoutMs,
+            profile,
+          });
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
+          return jsonResult(result);
         }
         case "act": {
           const request = readActRequestParam(params);
           if (!request) {
             throw new Error("request required");
           }
+          touchTrackedBrowserTabsForSession({
+            sessionKey: opts?.agentSessionKey,
+            idleTimeoutMs: idlePolicy.idleTimeoutMs,
+          });
           return await executeActAction({
             request,
             baseUrl,

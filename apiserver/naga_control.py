@@ -11,6 +11,7 @@ toggle_voice / toggle_live2d 控制的是**运行时状态**（暂停/恢复）�
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, Optional
 
@@ -316,14 +317,15 @@ async def _list_mcp_services(params: dict) -> dict:
 @register("start_travel")
 async def _start_travel(params: dict) -> dict:
     """启动旅行（创建会话 + 代理到 agent_server 执行）"""
-    from apiserver.travel_service import create_session, get_active_session
+    from apiserver.travel_service import create_session, get_open_session_for_agent
 
-    active = get_active_session()
+    agent_id = params.get("agent_id")
+    active = get_open_session_for_agent(agent_id)
     if active:
-        return {"success": False, "error": f"已有进行中的旅行 (session_id={active.session_id})，请先停止"}
+        return {"success": False, "error": f"该干员已有进行中的旅行 (session_id={active.session_id})，请先停止"}
 
     session = create_session(
-        agent_id=params.get("agent_id"),
+        agent_id=agent_id,
         time_limit_minutes=params.get("time_limit", 300),
         credit_limit=params.get("credit_limit", 1000),
         goal_prompt=params.get("goal_prompt"),
@@ -358,14 +360,23 @@ async def _start_travel(params: dict) -> dict:
 @register("stop_travel")
 async def _stop_travel(params: dict) -> dict:
     """停止旅行"""
-    from apiserver.travel_service import get_active_session, save_session, TravelStatus
+    from apiserver.travel_service import (
+        TravelStatus,
+        get_active_session,
+        load_session,
+        remove_session_browser_policy,
+        save_session,
+    )
 
-    active = get_active_session()
+    session_id = params.get("session_id")
+    active = load_session(session_id) if session_id else get_active_session()
     if not active:
         return {"success": False, "error": "当前没有进行中的旅行"}
 
     active.status = TravelStatus.CANCELLED
+    active.completed_at = datetime.now().isoformat()
     save_session(active)
+    remove_session_browser_policy(active.openclaw_session_key)
     return {"success": True, "result": f"旅行 {active.session_id} 已停止"}
 
 

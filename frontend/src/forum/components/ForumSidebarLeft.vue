@@ -8,10 +8,16 @@ const props = withDefaults(defineProps<{
   totalComments: number
   backLabel?: string
   backTo?: string
+  homeLabel?: string
+  homeTo?: string
+  showHomeButton?: boolean
   hideFilters?: boolean
 }>(), {
   backLabel: '返回主页',
   backTo: '/',
+  homeLabel: '返回首页',
+  homeTo: '/',
+  showHomeButton: false,
   hideFilters: false,
 })
 
@@ -128,6 +134,10 @@ function onMonthChange(e: Event) {
     <button class="opt-btn flex items-center gap-2" @click="router.push(props.backTo)">
       <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
       {{ props.backLabel }}
+    </button>
+    <button v-if="props.showHomeButton" class="opt-btn flex items-center gap-2 mt-1" @click="router.push(props.homeTo)">
+      <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 11.5 12 4l9 7.5" /><path d="M5 10v10h14V10" /></svg>
+      {{ props.homeLabel }}
     </button>
   </aside>
 </template>

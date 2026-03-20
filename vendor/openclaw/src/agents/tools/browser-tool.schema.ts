@@ -92,6 +92,7 @@ export const BrowserToolSchema = Type.Object({
   profile: Type.Optional(Type.String()),
   targetUrl: Type.Optional(Type.String()),
   url: Type.Optional(Type.String()),
+  keepopen: Type.Optional(Type.Boolean()),
   targetId: Type.Optional(Type.String()),
   limit: Type.Optional(Type.Number()),
   maxChars: Type.Optional(Type.Number()),

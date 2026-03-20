@@ -48,7 +48,7 @@ function isNewer(remote: string, local: string): boolean {
 export const updateInfo = ref<UpdateInfo | null>(null)
 export const showUpdateDialog = ref(false)
 
-export async function checkForUpdate(): Promise<void> {
+export async function checkForUpdate(): Promise<boolean> {
   try {
     const platform = detectPlatform()
     const res = await fetch(`${API.endpoint}/update/latest?platform=${platform}`, {
@@ -56,7 +56,7 @@ export async function checkForUpdate(): Promise<void> {
     })
 
     if (!res.ok)
-      return
+      return false
 
     const data = await res.json() as {
       version?: string
@@ -68,11 +68,11 @@ export async function checkForUpdate(): Promise<void> {
     }
 
     if (!data.version || data.has_update === false)
-      return
+      return false
 
     const currentVersion = CONFIG.value.system.version ?? '5.1.0'
     if (data.version === currentVersion || !isNewer(data.version, currentVersion))
-      return
+      return false
 
     updateInfo.value = {
       hasUpdate: true,
@@ -83,9 +83,11 @@ export async function checkForUpdate(): Promise<void> {
       fileSize: data.file_size ?? null,
     }
     showUpdateDialog.value = true
+    return true
   }
   catch (err) {
     console.warn('[VersionCheck] Failed to check for updates:', err)
+    return false
   }
 }
 

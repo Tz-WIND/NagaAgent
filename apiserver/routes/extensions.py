@@ -1,10 +1,12 @@
 """OpenClaw 技能市场、MCP 服务、技能导入、文件上传、旅行、记忆、搜索代理路由"""
 
+import html
 import json
 import logging
 import re
 import shutil
 import subprocess
+import tempfile
 import sys
 import time
 import traceback
@@ -42,8 +44,10 @@ NAGA_CACHE_SKILLS_DIR = NAGA_SKILLS_DIR / "cache"
 NAGA_AGENTS_DIR = NAGA_DATA_DIR / "agents"
 NAGA_AGENTS_MANIFEST_PATH = NAGA_AGENTS_DIR / "agents.json"
 SKILLS_TEMPLATE_DIR = Path(__file__).resolve().parent.parent / "skills_templates"
-MCPORTER_DIR = Path.home() / ".mcporter"
+MCPORTER_DIR = NAGA_DATA_DIR / "mcporter"
 MCPORTER_CONFIG_PATH = MCPORTER_DIR / "config.json"
+LEGACY_MCPORTER_DIR = Path.home() / ".mcporter"
+LEGACY_MCPORTER_CONFIG_PATH = LEGACY_MCPORTER_DIR / "config.json"
 SKILL_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
 for _path in (OPENCLAW_SKILLS_DIR, NAGA_PUBLIC_SKILLS_DIR, NAGA_CACHE_SKILLS_DIR, NAGA_AGENTS_DIR):
@@ -361,6 +365,30 @@ def _update_mcporter_firecrawl_config(api_key: Optional[str]) -> Path:
     return MCPORTER_CONFIG_PATH
 
 
+def _ensure_mcporter_storage() -> None:
+    if MCPORTER_CONFIG_PATH.exists():
+        MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
+        return
+
+    if LEGACY_MCPORTER_DIR.exists() and not MCPORTER_DIR.exists():
+        MCPORTER_DIR.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(LEGACY_MCPORTER_DIR), str(MCPORTER_DIR))
+            return
+        except Exception:
+            pass
+
+    MCPORTER_DIR.mkdir(parents=True, exist_ok=True)
+    if LEGACY_MCPORTER_CONFIG_PATH.exists() and not MCPORTER_CONFIG_PATH.exists():
+        try:
+            MCPORTER_CONFIG_PATH.write_text(
+                LEGACY_MCPORTER_CONFIG_PATH.read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+
 def _install_agent_browser() -> None:
     from agentserver.openclaw.embedded_runtime import get_embedded_runtime
 
@@ -613,7 +641,8 @@ async def api_openclaw_get_task(
 
 
 def _load_mcporter_config() -> Dict[str, Any]:
-    """读取 ~/.mcporter/config.json，不存在或格式错误时返回空 dict"""
+    """读取 ~/.naga/mcporter/config.json，不存在或格式错误时返回空 dict。"""
+    _ensure_mcporter_storage()
     if not MCPORTER_CONFIG_PATH.exists():
         return {}
     try:
@@ -814,7 +843,7 @@ class McpImportRequest(BaseModel):
 
 @router.post("/mcp/import")
 async def import_mcp_config(request: McpImportRequest):
-    """将 MCP JSON 配置写入 ~/.mcporter/config.json"""
+    """将 MCP JSON 配置写入 ~/.naga/mcporter/config.json"""
     telemetry_props = {
         "name": request.name,
         "scope": request.scope,
@@ -990,18 +1019,281 @@ class SkillImportRequest(BaseModel):
     agent_id: Optional[str] = None
 
 
+class SkillCloneRequest(BaseModel):
+    name: str
+    source_scope: str
+    target_scope: str = "private"
+    source_agent_id: Optional[str] = None
+    target_agent_id: Optional[str] = None
+
+
 class HubInstallRequest(BaseModel):
     name: str
     scope: str = "public"
     agent_id: Optional[str] = None
+    source: str = "tencent-skillhub"
+
+def _hub_base_url(source: str = "tencent-skillhub") -> str:
+    normalized = (source or "tencent-skillhub").strip().lower()
+    if normalized == "tencent-skillhub":
+        return "https://skillhub-1388575217.cos.ap-guangzhou.myqcloud.com"
+    if normalized == "clawhub":
+        return "https://clawhub.ai"
+    if normalized == "mcp.so":
+        return "https://mcp.so"
+    raise HTTPException(status_code=400, detail=f"未知下载源: {source}")
 
 
-def _hub_base_url() -> str:
-    return naga_auth.BUSINESS_URL.rstrip("/")
+def _build_hub_url(kind: str, name: str, source: str = "tencent-skillhub") -> str:
+    base_url = _hub_base_url(source)
+    if (source or "").strip().lower() == "tencent-skillhub":
+        return f"{base_url}/{kind}/{name}"
+    return f"{base_url}/api/hub/{kind}/{name}"
 
 
-def _build_hub_url(kind: str, name: str) -> str:
-    return f"{_hub_base_url()}/api/hub/{kind}/{name}"
+def _resolve_skillhub_cli() -> Optional[str]:
+    try:
+        from agentserver.openclaw.embedded_runtime import get_embedded_runtime
+
+        runtime = get_embedded_runtime()
+        project_runtime_root = runtime._get_project_runtime_root()
+        candidates = [
+            Path(runtime.runtime_root) / "skillhub" / "skills_store_cli.py" if runtime.runtime_root else None,
+            project_runtime_root / "skillhub" / "skills_store_cli.py",
+        ]
+        for candidate in candidates:
+            if candidate and candidate.exists():
+                return str(candidate)
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_skillhub_python() -> Optional[str]:
+    try:
+        from agentserver.openclaw.embedded_runtime import get_embedded_runtime
+
+        runtime = get_embedded_runtime()
+        return runtime.python_path
+    except Exception:
+        return None
+
+
+def _resolve_clawhub_runtime() -> tuple[Optional[str], Optional[str]]:
+    try:
+        from agentserver.openclaw.embedded_runtime import get_embedded_runtime
+
+        runtime = get_embedded_runtime()
+        return runtime.node_path, runtime.npx_path
+    except Exception:
+        return None, None
+
+
+def _normalize_mcpso_name(name: str) -> str:
+    return re.sub(r"\s+", "", (name or "").strip().lower())
+
+
+def _resolve_mcpso_url(name_or_url: str) -> tuple[str, bool]:
+    raw = (name_or_url or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="请输入 MCP 名称或完整链接")
+    if raw.startswith("http://") or raw.startswith("https://"):
+        return raw, True
+    normalized_name = _normalize_mcpso_name(raw)
+    return f"https://mcp.so/server/{normalized_name}/modelcontextprotocol", False
+
+
+def _extract_json_code_blocks_from_html(page_html: str) -> List[str]:
+    blocks = re.findall(r"```json\s*(.*?)\s*```", page_html, flags=re.S | re.I)
+    normalized_blocks: List[str] = []
+    for block in blocks:
+        text = html.unescape(block)
+        try:
+            text = text.encode("utf-8").decode("unicode_escape")
+        except Exception:
+            pass
+        stripped = text.strip()
+        if stripped:
+            normalized_blocks.append(stripped)
+    return normalized_blocks
+
+
+def _strip_json_line_comments(raw_text: str) -> str:
+    result: List[str] = []
+    in_string = False
+    escaped = False
+    i = 0
+    length = len(raw_text)
+    while i < length:
+        ch = raw_text[i]
+        nxt = raw_text[i + 1] if i + 1 < length else ""
+        if in_string:
+            result.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "/" and nxt == "/":
+            i += 2
+            while i < length and raw_text[i] not in "\r\n":
+                i += 1
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def _parse_mcp_install_payload(block_text: str, fallback_name: str) -> tuple[str, Optional[str], Optional[str], Dict[str, Any]]:
+    try:
+        payload = json.loads(_strip_json_line_comments(block_text))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=502, detail=f"获取到的 MCP 配置不是合法 JSON: {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=502, detail="获取到的 MCP 配置不是 JSON 对象")
+
+    if isinstance(payload.get("mcpServers"), dict) and payload["mcpServers"]:
+        mcp_name, config = next(iter(payload["mcpServers"].items()))
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=502, detail="mcpServers 下的配置格式无效")
+        return str(mcp_name), None, None, config
+
+    mcp_section = payload.get("mcp")
+    if isinstance(mcp_section, dict) and isinstance(mcp_section.get("servers"), dict) and mcp_section["servers"]:
+        mcp_name, config = next(iter(mcp_section["servers"].items()))
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=502, detail="mcp.servers 下的配置格式无效")
+        return str(mcp_name), None, None, config
+
+    if "command" in payload or "type" in payload or "url" in payload:
+        return fallback_name, None, None, payload
+
+    raise HTTPException(status_code=502, detail="未在 mcp.so 页面中找到可安装的 MCP 配置")
+
+
+def _install_mcp_via_mcpso(name_or_url: str) -> tuple[str, Optional[str], Optional[str], Dict[str, Any]]:
+    target_url, provided_full_url = _resolve_mcpso_url(name_or_url)
+    req = UrlRequest(target_url, headers={"User-Agent": "NagaAgent/mcpso-installer"})
+    try:
+        with urlopen(req, timeout=20) as resp:
+            page_html = resp.read().decode("utf-8", errors="ignore")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if provided_full_url:
+            raise HTTPException(status_code=502, detail="获取mcp内容失败") from exc
+        raise HTTPException(status_code=404, detail="获取mcp失败，请传输完整链接") from exc
+
+    blocks = _extract_json_code_blocks_from_html(page_html)
+    if not blocks:
+        if provided_full_url:
+            raise HTTPException(status_code=502, detail="获取mcp内容失败")
+        raise HTTPException(status_code=404, detail="获取mcp失败，请传输完整链接")
+
+    fallback_name = _normalize_mcpso_name(name_or_url)
+    if provided_full_url:
+        matched = re.search(r"/server/([^/]+)/", target_url)
+        if matched:
+            fallback_name = _normalize_mcpso_name(matched.group(1)) or fallback_name
+    for block in reversed(blocks):
+        try:
+            return _parse_mcp_install_payload(block, fallback_name)
+        except HTTPException:
+            continue
+
+    if provided_full_url:
+        raise HTTPException(status_code=502, detail="获取mcp内容失败")
+    raise HTTPException(status_code=404, detail="获取mcp失败，请传输完整链接")
+
+
+def _install_skill_via_tencent_skillhub(name: str) -> tuple[str, str]:
+    cli = _resolve_skillhub_cli()
+    python_bin = _resolve_skillhub_python()
+    if not cli or not python_bin:
+        raise HTTPException(
+            status_code=503,
+            detail="未找到内置腾讯 SkillHub CLI 或 Python 运行时，无法执行下载。",
+        )
+    with tempfile.TemporaryDirectory(prefix="naga-skillhub-") as tmp:
+        install_dir = Path(tmp)
+        try:
+            subprocess.run(
+                [python_bin, cli, "--dir", str(install_dir), "install", name, "--force"],
+                check=True,
+                cwd=str(install_dir),
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or exc.stdout or "").strip()
+            raise HTTPException(status_code=502, detail=f"腾讯 SkillHub 安装失败: {stderr or exc}") from exc
+
+        direct_path = install_dir / name / "SKILL.md"
+        if direct_path.exists():
+            return name, direct_path.read_text(encoding="utf-8")
+
+        fallback_path = next(install_dir.rglob("SKILL.md"), None)
+        if fallback_path is None:
+            raise HTTPException(status_code=502, detail="腾讯 SkillHub 安装完成，但未找到 SKILL.md")
+
+        resolved_name = fallback_path.parent.name or name
+        return resolved_name, fallback_path.read_text(encoding="utf-8")
+
+
+def _install_skill_via_clawhub(name: str) -> tuple[str, str]:
+    node_bin, npx_bin = _resolve_clawhub_runtime()
+    if not node_bin or not npx_bin:
+        raise HTTPException(
+            status_code=503,
+            detail="未找到内置 Node runtime 或 npx，无法执行 ClawHub 下载。",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="naga-clawhub-") as tmp:
+        workdir = Path(tmp)
+        try:
+            subprocess.run(
+                [
+                    node_bin,
+                    npx_bin,
+                    "--yes",
+                    "clawhub@latest",
+                    "--no-input",
+                    "--workdir",
+                    str(workdir),
+                    "--dir",
+                    "skills",
+                    "install",
+                    name,
+                    "--force",
+                ],
+                check=True,
+                cwd=str(workdir),
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or exc.stdout or "").strip()
+            raise HTTPException(status_code=502, detail=f"ClawHub 安装失败: {stderr or exc}") from exc
+
+        direct_path = workdir / "skills" / name / "SKILL.md"
+        if direct_path.exists():
+            return name, direct_path.read_text(encoding="utf-8")
+
+        fallback_path = next(workdir.rglob("SKILL.md"), None)
+        if fallback_path is None:
+            raise HTTPException(status_code=502, detail="ClawHub 安装完成，但未找到 SKILL.md")
+
+        resolved_name = fallback_path.parent.name or name
+        return resolved_name, fallback_path.read_text(encoding="utf-8")
 
 
 def _render_skill_file_content(name: str, content: str) -> str:
@@ -1078,8 +1370,31 @@ def _delete_skill_from_scope(name: str, scope: str, agent_id: Optional[str] = No
     raise HTTPException(status_code=404, detail=f"技能不存在: {name}")
 
 
-def _fetch_hub_payload(kind: str, name: str) -> tuple[str, Any]:
-    url = _build_hub_url(kind, name)
+def _read_skill_content_from_scope(name: str, scope: str, agent_id: Optional[str] = None) -> str:
+    candidates: List[Path]
+    if scope == "cache":
+        candidates = [
+            NAGA_CACHE_SKILLS_DIR / name / "SKILL.md",
+            OPENCLAW_SKILLS_DIR / name / "SKILL.md",
+        ]
+    elif scope == "public":
+        candidates = [NAGA_PUBLIC_SKILLS_DIR / name / "SKILL.md"]
+    elif scope == "private":
+        agent_id = (agent_id or "").strip()
+        if not agent_id:
+            raise HTTPException(status_code=400, detail="私有技能必须指定 source_agent_id")
+        candidates = [NAGA_AGENTS_DIR / agent_id / "skills" / name / "SKILL.md"]
+    else:
+        raise HTTPException(status_code=400, detail=f"未知技能范围: {scope}")
+
+    for path in candidates:
+        if path.exists():
+            return path.read_text(encoding="utf-8")
+    raise HTTPException(status_code=404, detail=f"技能不存在: {name}")
+
+
+def _fetch_hub_payload(kind: str, name: str, source: str = "tencent-skillhub") -> tuple[str, Any]:
+    url = _build_hub_url(kind, name, source)
     headers = {"User-Agent": "NagaAgent/hub-installer"}
     if naga_auth.is_authenticated():
         token = naga_auth.get_access_token()
@@ -1135,6 +1450,35 @@ def _parse_hub_mcp_payload(name: str, payload: Any) -> tuple[str, Optional[str],
     raise HTTPException(status_code=502, detail="NagaHub MCP 模板为空")
 
 
+def _normalize_memory_quintuple_item(item: Any) -> Optional[Dict[str, str]]:
+    if isinstance(item, dict):
+        if isinstance(item.get("quintuple"), (list, tuple)) and len(item["quintuple"]) >= 5:
+            q = item["quintuple"]
+            return {
+                "subject": str(q[0] or ""),
+                "subject_type": str(q[1] or ""),
+                "predicate": str(q[2] or ""),
+                "object": str(q[3] or ""),
+                "object_type": str(q[4] or ""),
+            }
+        return {
+            "subject": str(item.get("subject") or ""),
+            "subject_type": str(item.get("subject_type") or item.get("subjectType") or ""),
+            "predicate": str(item.get("predicate") or item.get("relation") or ""),
+            "object": str(item.get("object") or ""),
+            "object_type": str(item.get("object_type") or item.get("objectType") or ""),
+        }
+    if isinstance(item, (list, tuple)) and len(item) >= 5:
+        return {
+            "subject": str(item[0] or ""),
+            "subject_type": str(item[1] or ""),
+            "predicate": str(item[2] or ""),
+            "object": str(item[3] or ""),
+            "object_type": str(item[4] or ""),
+        }
+    return None
+
+
 def _build_skill_catalog() -> Dict[str, Any]:
     public_skills = _list_skill_dir(
         NAGA_PUBLIC_SKILLS_DIR,
@@ -1169,10 +1513,10 @@ def _build_skill_catalog() -> Dict[str, Any]:
     return {
         "remote_hub": {
             "status": "configured",
-            "base_url": _hub_base_url(),
-            "skill_endpoint_template": f"{_hub_base_url()}/api/hub/skill/{{skill_name}}",
-            "mcp_endpoint_template": f"{_hub_base_url()}/api/hub/mcp/{{mcp_name}}",
-            "message": "远端 Skill/MCP Hub 已预留，当前会按名称尝试拉取模板；服务端接口尚未上线时会返回不可达。",
+            "base_url": _hub_base_url("tencent-skillhub"),
+            "skill_endpoint_template": f"{_hub_base_url('tencent-skillhub')}/skill/{{skill_name}}",
+            "mcp_endpoint_template": "https://mcp.so/server/{mcp_name}/modelcontextprotocol",
+            "message": "当前 Skill 下载支持腾讯 SkillHub 与 ClawHub；MCP 下载当前使用 mcp.so 页面抓取。",
         },
         "local_cache": {
             "skills": cache_skills,
@@ -1243,6 +1587,30 @@ async def import_custom_skill(request: SkillImportRequest):
     }
 
 
+@router.post("/skills/clone")
+async def clone_skill(request: SkillCloneRequest):
+    source_scope = (request.source_scope or "").strip().lower()
+    target_scope = (request.target_scope or "private").strip().lower()
+    source_agent_id = (request.source_agent_id or "").strip() or None
+    target_agent_id = (request.target_agent_id or "").strip() or None
+
+    if source_scope == "legacy":
+        source_scope = "cache"
+    if target_scope == "legacy":
+        target_scope = "private"
+
+    content = _read_skill_content_from_scope(request.name, source_scope, source_agent_id)
+    skill_path = _write_skill_to_scope(request.name, content, target_scope, target_agent_id)
+
+    return {
+        "status": "success",
+        "message": f"技能已复制: {request.name}",
+        "source_scope": source_scope,
+        "target_scope": target_scope,
+        "path": str(skill_path),
+    }
+
+
 @router.delete("/skills/{name}")
 async def delete_skill(name: str, scope: str, agent_id: Optional[str] = None):
     telemetry_props = {
@@ -1289,10 +1657,17 @@ async def install_skill_from_hub(request: HubInstallRequest):
         "scope": request.scope,
         "agent_id": request.agent_id,
         "source": "hub",
+        "hub_source": request.source,
     }
     try:
-        _, payload = _fetch_hub_payload("skill", request.name)
-        skill_name, content = _parse_hub_skill_payload(request.name, payload)
+        normalized_source = (request.source or "").strip().lower()
+        if normalized_source == "tencent-skillhub":
+            skill_name, content = _install_skill_via_tencent_skillhub(request.name)
+        elif normalized_source == "clawhub":
+            skill_name, content = _install_skill_via_clawhub(request.name)
+        else:
+            _, payload = _fetch_hub_payload("skill", request.name, request.source)
+            skill_name, content = _parse_hub_skill_payload(request.name, payload)
         telemetry_props["resolved_name"] = skill_name
         skill_path = _write_skill_to_scope(skill_name, content, request.scope, request.agent_id)
     except HTTPException as exc:
@@ -1319,7 +1694,7 @@ async def install_skill_from_hub(request: HubInstallRequest):
     _emit_extensions_telemetry("hub_skill_install_success", telemetry_props, agent_id=(request.agent_id or "").strip() or None)
     return {
         "status": "success",
-        "message": f"已从 NagaHub 安装技能: {skill_name}",
+        "message": f"已从 Hub 安装技能: {skill_name}",
         "scope": request.scope,
         "path": str(skill_path),
         "name": skill_name,
@@ -1334,10 +1709,19 @@ async def install_mcp_from_hub(request: HubInstallRequest):
         "scope": request.scope,
         "agent_id": request.agent_id,
         "source": "hub",
+        "hub_source": request.source,
     }
     try:
-        _, payload = _fetch_hub_payload("mcp", request.name)
-        mcp_name, display_name, description, config = _parse_hub_mcp_payload(request.name, payload)
+        normalized_source = (request.source or "").strip().lower()
+        if normalized_source == "mcp.so":
+            mcp_name, display_name, description, config = _install_mcp_via_mcpso(request.name)
+        elif normalized_source == "tencent-skillhub":
+            raise HTTPException(status_code=400, detail="腾讯 SkillHub 当前只支持 Skill CLI 安装，暂不支持 MCP 模板下载")
+        elif normalized_source == "clawhub":
+            raise HTTPException(status_code=400, detail="ClawHub 当前只支持 Skill 下载，暂不支持 MCP 模板下载")
+        else:
+            _, payload = _fetch_hub_payload("mcp", request.name, request.source)
+            mcp_name, display_name, description, config = _parse_hub_mcp_payload(request.name, payload)
 
         scope = _normalize_mcp_scope(request.scope, strict=True)
         agent_id = (request.agent_id or "").strip() or None
@@ -1397,7 +1781,7 @@ async def install_mcp_from_hub(request: HubInstallRequest):
     _emit_extensions_telemetry("hub_mcp_install_success", telemetry_props, agent_id=agent_id)
     return {
         "status": "success",
-        "message": f"已从 NagaHub 安装 MCP: {mcp_name}",
+        "message": f"已从 Hub 安装 MCP: {mcp_name}",
         "scope": scope,
         "name": mcp_name,
         "source": "hub",
@@ -1506,15 +1890,8 @@ async def upload_parse(file: UploadFile = File(...)):
 # ============ 旅行端点 ============
 
 
-@router.post("/travel/start")
-async def travel_start(payload: Dict[str, Any]):
-    """创建旅行 session 并代理到 agent server 执行"""
-    from apiserver.travel_service import create_session, get_active_session
-
-    # 拒绝已有活跃 session
-    active = get_active_session()
-    if active:
-        raise HTTPException(409, f"已有进行中的旅行: {active.session_id}")
+async def _create_travel_session_and_dispatch(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from apiserver.travel_service import create_session, get_open_session_for_agent, load_session, save_session, TravelStatus
 
     agent_id = payload.get("agent_id")
     if agent_id:
@@ -1524,8 +1901,13 @@ async def travel_start(payload: Dict[str, Any]):
         if agent.get("engine", "openclaw") != "openclaw":
             raise HTTPException(400, "网络探索目前仅支持 OpenClaw 干员执行")
 
+    active_for_agent = get_open_session_for_agent(str(agent_id) if agent_id is not None else None)
+    if active_for_agent:
+        raise HTTPException(409, f"该干员已有进行中的探索: {active_for_agent.session_id}")
+
     session = create_session(
-        agent_id=agent_id,
+        agent_id=str(agent_id) if agent_id is not None else None,
+        agent_name=str(agent.get("name") or "").strip() if agent_id is not None and agent else None,
         time_limit_minutes=payload.get("time_limit_minutes", 300),
         credit_limit=payload.get("credit_limit", 1000),
         want_friends=payload.get("want_friends", True),
@@ -1535,6 +1917,9 @@ async def travel_start(payload: Dict[str, Any]):
         deliver_full_report=payload.get("deliver_full_report", True),
         deliver_channel=payload.get("deliver_channel"),
         deliver_to=payload.get("deliver_to"),
+        browser_visible=payload.get("browser_visible", False),
+        browser_keep_open=payload.get("browser_keep_open", False),
+        browser_idle_timeout_seconds=payload.get("browser_idle_timeout_seconds", 300),
     )
     emit_telemetry(
         "explore_start",
@@ -1552,7 +1937,7 @@ async def travel_start(payload: Dict[str, Any]):
         agent_id=session.agent_id,
         trace_id=f"travel:{session.session_id}",
     )
-    # 代理到 agent server
+
     try:
         await _call_agentserver(
             "POST", "/travel/execute",
@@ -1561,11 +1946,10 @@ async def travel_start(payload: Dict[str, Any]):
         )
     except Exception as e:
         logger.warning(f"代理旅行到 agent server 失败（将本地标记失败）: {e}")
-        from apiserver.travel_service import load_session as _ls, save_session as _ss, TravelStatus
-        s = _ls(session.session_id)
+        s = load_session(session.session_id)
         s.status = TravelStatus.FAILED
         s.error = f"agent server 不可达: {e}"
-        _ss(s)
+        save_session(s)
         emit_telemetry(
             "explore_fail",
             {
@@ -1579,54 +1963,277 @@ async def travel_start(payload: Dict[str, Any]):
         )
         raise HTTPException(503, f"agent server 不可达: {e}")
 
-    return {"status": "success", "session_id": session.session_id}
+    return {"status": "success", "session_id": session.session_id, "session": session.model_dump()}
+
+
+def _cancel_travel_session(session_id: str) -> Dict[str, Any]:
+    from apiserver.travel_service import load_session, remove_session_browser_policy, save_session, TravelStatus
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+
+    if session.status in {TravelStatus.COMPLETED, TravelStatus.FAILED, TravelStatus.CANCELLED}:
+        return {"status": "success", "session_id": session.session_id, "session": session.model_dump()}
+
+    session.status = TravelStatus.CANCELLED
+    session.completed_at = datetime.now().isoformat()
+    save_session(session)
+    remove_session_browser_policy(session.openclaw_session_key)
+    emit_telemetry(
+        "explore_cancel",
+        {
+            "elapsed_minutes": session.elapsed_minutes,
+            "discoveries": len(session.discoveries),
+        },
+        source="apiserver",
+        session_id=session.session_id,
+        agent_id=session.agent_id,
+        trace_id=f"travel:{session.session_id}",
+    )
+    return {"status": "success", "session_id": session.session_id, "session": session.model_dump()}
+
+
+@router.post("/travel/sessions")
+async def create_travel_session(payload: Dict[str, Any]):
+    return await _create_travel_session_and_dispatch(payload)
+
+
+@router.get("/travel/sessions")
+async def list_travel_sessions():
+    from apiserver.travel_service import list_sessions
+
+    sessions = list_sessions()
+    return {"status": "success", "sessions": [s.model_dump() for s in sessions]}
+
+
+@router.get("/travel/sessions/{session_id}")
+async def get_travel_session(session_id: str):
+    from apiserver.travel_service import load_session
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+    return {"status": "success", "session": session.model_dump()}
+
+
+@router.get("/travel/sessions/{session_id}/report")
+async def get_travel_session_report(session_id: str):
+    from apiserver.travel_service import load_session
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+
+    report_path = (session.summary_report_path or "").strip()
+    if not report_path:
+        return {
+            "status": "success",
+            "exists": False,
+            "path": None,
+            "title": session.summary_report_title,
+            "content": None,
+            "missing_reason": "not_generated",
+        }
+
+    path = Path(report_path)
+    if not path.exists():
+        return {
+            "status": "success",
+            "exists": False,
+            "path": report_path,
+            "title": session.summary_report_title,
+            "content": None,
+            "missing_reason": "missing",
+        }
+
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception as e:
+        raise HTTPException(500, f"读取探索成果文件失败: {e}")
+
+    return {
+        "status": "success",
+        "exists": True,
+        "path": report_path,
+        "title": session.summary_report_title,
+        "content": content,
+    }
+
+
+@router.get("/travel/sessions/{session_id}/history")
+async def get_travel_session_history(session_id: str, limit: int = 0, include_tools: bool = True):
+    from apiserver.travel_service import load_session
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+
+    session_key = (session.openclaw_session_key or "").strip()
+    if not session_key:
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "session_key": None,
+            "messages": [],
+        }
+
+    history = await _call_agentserver(
+        "GET",
+        "/openclaw/history",
+        params={
+            "session_key": session_key,
+            "limit": limit,
+            "include_tools": str(include_tools).lower(),
+        },
+        timeout_seconds=20.0,
+    )
+
+    messages = []
+    if isinstance(history, dict):
+        raw_history = history.get("history")
+        if isinstance(raw_history, dict):
+            messages = raw_history.get("messages", []) or []
+
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "session_key": session_key,
+        "messages": messages,
+    }
+
+
+@router.post("/travel/sessions/{session_id}/stop")
+async def stop_travel_session(session_id: str):
+    return _cancel_travel_session(session_id)
+
+
+@router.post("/travel/sessions/{session_id}/browser")
+async def update_travel_browser_settings(session_id: str, payload: Dict[str, Any]):
+    from apiserver.travel_service import append_progress_event, load_session, save_session, sync_session_browser_policy
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+
+    visibility_changed = False
+    if "browser_visible" in payload:
+        next_visible = bool(payload.get("browser_visible"))
+        visibility_changed = session.browser_visible != next_visible
+        session.browser_visible = next_visible
+    if "browser_keep_open" in payload:
+        session.browser_keep_open = bool(payload.get("browser_keep_open"))
+    if "browser_idle_timeout_seconds" in payload:
+        session.browser_idle_timeout_seconds = max(30, int(payload.get("browser_idle_timeout_seconds") or 300))
+
+    append_progress_event(
+        session,
+        "browser_settings_updated",
+        "已更新探索浏览器策略。",
+        meta={
+            "browser_visible": session.browser_visible,
+            "browser_keep_open": session.browser_keep_open,
+            "browser_idle_timeout_seconds": session.browser_idle_timeout_seconds,
+        },
+    )
+    save_session(session)
+    sync_session_browser_policy(session)
+
+    if visibility_changed and session.agent_id and session.status in {"pending", "running", "interrupted"}:
+        try:
+            await _call_agentserver(
+                "POST",
+                "/travel/browser-settings",
+                json_body={
+                    "session_id": session.session_id,
+                    "browser_visible": session.browser_visible,
+                },
+                timeout_seconds=10.0,
+            )
+        except Exception as e:
+            logger.warning(f"同步探索浏览器可见性到 agent_server 失败: {e}")
+
+    return {"status": "success", "session": session.model_dump()}
+
+
+@router.post("/travel/sessions/{session_id}/instruction")
+async def send_travel_instruction(session_id: str, payload: Dict[str, Any]):
+    from apiserver.travel_service import OPEN_TRAVEL_STATUSES, append_progress_event, load_session, save_session
+
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
+
+    if session.status not in OPEN_TRAVEL_STATUSES:
+        raise HTTPException(409, "当前探索已结束，不能再追加指令")
+
+    await _call_agentserver(
+        "POST",
+        "/travel/instruction",
+        json_body={"session_id": session_id, "message": message},
+        timeout_seconds=10.0,
+    )
+    append_progress_event(
+        session,
+        "instruction_requested",
+        f"用户追加了探索指令：{message[:80]}",
+        meta={"message": message[:400]},
+    )
+    save_session(session)
+    return {"status": "success", "session": session.model_dump()}
+
+
+@router.post("/travel/start")
+async def travel_start(payload: Dict[str, Any]):
+    """兼容旧接口。"""
+    result = await _create_travel_session_and_dispatch(payload)
+    return {"status": result["status"], "session_id": result["session_id"]}
 
 
 @router.get("/travel/status")
 async def travel_status():
-    """返回当前活跃 session 或最新完成的"""
-    from apiserver.travel_service import get_active_session, list_sessions
+    """兼容旧接口：返回任一活跃 session 或最近一条记录。"""
+    from apiserver.travel_service import get_latest_session, list_active_sessions
 
-    active = get_active_session()
+    active = list_active_sessions()
     if active:
-        return {"status": "success", "session": active.model_dump(), "active": True}
+        return {"status": "success", "session": active[0].model_dump(), "active": True}
 
-    sessions = list_sessions()
-    if sessions:
-        return {"status": "success", "session": sessions[0].model_dump(), "active": False}
+    latest = get_latest_session()
+    if latest:
+        return {"status": "success", "session": latest.model_dump(), "active": False}
 
     return {"status": "success", "session": None, "active": False}
 
 
 @router.post("/travel/stop")
 async def travel_stop(payload: Dict[str, Any] = None):
-    """取消活跃 session"""
-    from apiserver.travel_service import get_active_session, save_session, TravelStatus
+    """兼容旧接口：可选指定 session_id，否则停止最近活跃 session。"""
+    from apiserver.travel_service import list_active_sessions
 
-    active = get_active_session()
-    if not active:
-        raise HTTPException(404, "没有进行中的旅行")
-
-    active.status = TravelStatus.CANCELLED
-    active.completed_at = datetime.now().isoformat()
-    save_session(active)
-    emit_telemetry(
-        "explore_cancel",
-        {
-            "elapsed_minutes": active.elapsed_minutes,
-            "discoveries": len(active.discoveries),
-        },
-        source="apiserver",
-        session_id=active.session_id,
-        agent_id=active.agent_id,
-        trace_id=f"travel:{active.session_id}",
-    )
-    return {"status": "success", "session_id": active.session_id}
+    session_id = (payload or {}).get("session_id")
+    if not session_id:
+        active = list_active_sessions()
+        if not active:
+            raise HTTPException(404, "没有进行中的旅行")
+        session_id = active[0].session_id
+    result = _cancel_travel_session(str(session_id))
+    return {"status": result["status"], "session_id": result["session_id"]}
 
 
 @router.get("/travel/history")
 async def travel_history():
-    """历史列表"""
+    """兼容旧接口。"""
     from apiserver.travel_service import list_sessions
 
     sessions = list_sessions()
@@ -1635,14 +2242,8 @@ async def travel_history():
 
 @router.get("/travel/history/{session_id}")
 async def travel_history_detail(session_id: str):
-    """单个详情"""
-    from apiserver.travel_service import load_session
-
-    try:
-        session = load_session(session_id)
-    except FileNotFoundError:
-        raise HTTPException(404, f"旅行 session 不存在: {session_id}")
-    return {"status": "success", "session": session.model_dump()}
+    """兼容旧接口。"""
+    return await get_travel_session(session_id)
 
 
 # ============ 记忆 ============
@@ -1703,21 +2304,10 @@ async def get_quintuples():
                 result = await remote.get_quintuples(limit=500)
                 if result.get("success") is not False:
                     quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
-                    # 兼容 NagaMemory 返回格式：可能是 dict 列表或 tuple 列表
                     for q in quintuples_raw:
-                        if isinstance(q, dict):
-                            remote_quintuples.append({
-                                "subject": q.get("subject", ""),
-                                "subject_type": q.get("subject_type", ""),
-                                "predicate": q.get("predicate", q.get("relation", "")),
-                                "object": q.get("object", ""),
-                                "object_type": q.get("object_type", ""),
-                            })
-                        elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                            remote_quintuples.append({
-                                "subject": q[0], "subject_type": q[1],
-                                "predicate": q[2], "object": q[3], "object_type": q[4],
-                            })
+                        normalized = _normalize_memory_quintuple_item(q)
+                        if normalized:
+                            remote_quintuples.append(normalized)
                 else:
                     logger.warning(f"远程五元组获取失败: {result.get('error')}")
             except Exception as e:
@@ -1784,19 +2374,9 @@ async def search_quintuples(keywords: str = ""):
                     quintuples_raw = result.get("quintuples") or result.get("results") or result.get("data") or []
                     quintuples = []
                     for q in quintuples_raw:
-                        if isinstance(q, dict):
-                            quintuples.append({
-                                "subject": q.get("subject", ""),
-                                "subject_type": q.get("subject_type", ""),
-                                "predicate": q.get("predicate", q.get("relation", "")),
-                                "object": q.get("object", ""),
-                                "object_type": q.get("object_type", ""),
-                            })
-                        elif isinstance(q, (list, tuple)) and len(q) >= 5:
-                            quintuples.append({
-                                "subject": q[0], "subject_type": q[1],
-                                "predicate": q[2], "object": q[3], "object_type": q[4],
-                            })
+                        normalized = _normalize_memory_quintuple_item(q)
+                        if normalized:
+                            quintuples.append(normalized)
                     return {"status": "success", "quintuples": quintuples, "count": len(quintuples)}
                 else:
                     logger.warning(f"远程五元组搜索失败: {result.get('error')}")
@@ -1855,23 +2435,36 @@ async def proxy_search(request: Request):
     try:
         async with httpx.AsyncClient() as client:
             resp = None
+            token = naga_auth.get_access_token()
+            if not token and naga_auth.has_refresh_token():
+                try:
+                    await naga_auth.ensure_access_token()
+                    token = naga_auth.get_access_token()
+                except Exception as refresh_err:
+                    logger.warning(f"搜索代理预刷新 access token 失败: {refresh_err}")
+
+            if not token:
+                auth = request.headers.get("authorization", "")
+                if auth.startswith("Bearer "):
+                    token = auth[7:]
 
             # 优先 Naga 登录态；401 时自动 refresh 一次
-            if naga_auth.is_authenticated():
+            if token:
                 upstream_url = naga_auth.NAGA_MODEL_URL + "/tools/search"
                 resp = await _call_upstream(
                     client,
                     upstream_url,
-                    {"Authorization": f"Bearer {naga_auth.get_access_token()}"},
+                    {"Authorization": f"Bearer {token}"},
                 )
                 if resp.status_code == 401 and naga_auth.has_refresh_token():
                     logger.warning("搜索代理检测到 Naga token 过期，尝试刷新后重试")
                     try:
-                        await naga_auth.refresh()
+                        refresh_result = await naga_auth.refresh()
+                        token = refresh_result.get("access_token") or naga_auth.get_access_token()
                         resp = await _call_upstream(
                             client,
                             upstream_url,
-                            {"Authorization": f"Bearer {naga_auth.get_access_token()}"},
+                            {"Authorization": f"Bearer {token}"},
                         )
                     except Exception as refresh_err:
                         logger.warning(f"搜索代理刷新 Naga token 失败: {refresh_err}")

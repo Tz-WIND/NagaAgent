@@ -2,13 +2,16 @@
 import type { AgentEngine, AgentSettings, CharacterTemplate } from '@/api/core'
 import type { AgentContact } from '@/utils/session'
 import { Button, InputText, Select } from 'primevue'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import API from '@/api/core'
 import back from '@/assets/icons/back.png'
 import AgentSettingsDialog from '@/components/AgentSettingsDialog.vue'
+import { useTravel } from '@/travel/composables/useTravel'
 import { agentContacts, loadAgentContacts, nextAgentNumber, openAgentTab, tabs } from '@/utils/session'
 
 const backIcon = back
+const router = useRouter()
 
 const collapsed = ref(false)
 const adding = ref(false)
@@ -34,9 +37,18 @@ const contextMenu = ref<{ show: boolean, x: number, y: number, agentId: string, 
 
 const settingsVisible = ref(false)
 const selectedAgent = ref<AgentContact | null>(null)
+const { activeSessionByAgentId, viewTravelForAgent } = useTravel()
+const exploringIds = computed(() => new Set(Object.keys(activeSessionByAgentId.value)))
 
 function handleClick(agent: { id: string, name: string, running: boolean, created_at?: number, builtin?: boolean }) {
   openAgentTab(agent)
+}
+
+function openTravelContext(agentId: string) {
+  const session = viewTravelForAgent(agentId)
+  if (!session)
+    return
+  router.push('/forum/quota')
 }
 
 function handleContextMenu(e: MouseEvent, agent: { id: string, name: string, builtin?: boolean }) {
@@ -183,7 +195,12 @@ void API.listCharacterTemplates().then((res) => {
     <!-- 角色列表（box 样式边框） -->
     <div v-show="!collapsed" class="contacts-body box">
       <div class="contacts-header">
-        干员通讯录
+        <span>干员通讯录</span>
+        <button class="header-refresh-btn" title="刷新干员通讯录" @click.stop="loadAgentContacts">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
+          </svg>
+        </button>
       </div>
 
       <div class="contacts-items">
@@ -199,6 +216,14 @@ void API.listCharacterTemplates().then((res) => {
           <div class="contact-name">
             {{ agent.name }}
           </div>
+          <button
+            v-if="exploringIds.has(agent.id)"
+            class="travel-badge"
+            title="查看该干员的探索上下文"
+            @click.stop="openTravelContext(agent.id)"
+          >
+            探索中
+          </button>
           <div v-if="agent.builtin" class="builtin-badge">
             默认
           </div>
@@ -376,11 +401,35 @@ void API.listCharacterTemplates().then((res) => {
 }
 
 .contacts-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
   padding: 6px 10px;
   font-size: 11px;
   font-weight: 700;
   color: rgba(255, 255, 255, 0.55);
   letter-spacing: 0.5px;
+}
+
+.header-refresh-btn {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.header-refresh-btn:hover {
+  border-color: rgba(212, 175, 55, 0.32);
+  background: rgba(212, 175, 55, 0.08);
+  color: rgba(212, 175, 55, 0.86);
 }
 
 .contacts-items {
@@ -438,6 +487,17 @@ void API.listCharacterTemplates().then((res) => {
   line-height: 1.4;
   font-weight: 700;
   flex-shrink: 0;
+}
+
+.travel-badge {
+  margin-left: auto;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(66, 185, 131, 0.14);
+  color: rgba(163, 230, 187, 0.9);
+  font-size: 10px;
+  letter-spacing: 0.02em;
 }
 
 .builtin-badge {

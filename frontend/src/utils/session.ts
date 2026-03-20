@@ -216,6 +216,27 @@ export function normalizeMessages(messages: unknown, assistantName?: string): Me
   return normalized
 }
 
+function isInternalAgentArtifact(message: Message): boolean {
+  const text = `${message.content || ''}\n${message.reasoning || ''}`.trim()
+  if (!text)
+    return false
+  if (message.role === 'user' && /^\[cron:[^\]]+\s+Hook\]/i.test(text))
+    return true
+  if (message.role === 'user' && text.includes('Your previous response was only an acknowledgement'))
+    return true
+  if (message.role === 'assistant' && /\bNO_REPLY\b/.test(text))
+    return true
+  if (text.includes('/crons/') && text.includes('task.md'))
+    return true
+  if (text.includes('<|tool_calls_section_begin|>'))
+    return true
+  return false
+}
+
+function filterInternalAgentArtifacts(messages: Message[]): Message[] {
+  return messages.filter(message => !isInternalAgentArtifact(message))
+}
+
 function buildToolEventQueue(messages: Message[]): Map<string, ToolEvent[][]> {
   const queue = new Map<string, ToolEvent[][]>()
   for (const message of messages) {
@@ -428,8 +449,8 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
       try {
         const messages = normalizeMessages(JSON.parse(cached), tab.name)
         if (Array.isArray(messages) && messages.length > 0) {
-          storageMessages = messages
-          tab.messages = messages
+          storageMessages = filterInternalAgentArtifacts(messages)
+          tab.messages = storageMessages
         }
       }
       catch {}
@@ -453,6 +474,7 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
             }),
             tab.name,
           )
+          tab.messages = filterInternalAgentArtifacts(tab.messages)
           localStorage.setItem(storageKey, JSON.stringify(tab.messages))
           return
         }
@@ -490,8 +512,8 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
       try {
         const messages = normalizeMessages(JSON.parse(cached), tab.name)
         if (Array.isArray(messages) && messages.length > 0) {
-          storageMessages = messages
-          tab.messages = messages
+          storageMessages = filterInternalAgentArtifacts(messages)
+          tab.messages = storageMessages
           if (!forceRefresh) {
             return
           }
@@ -512,6 +534,7 @@ export async function loadAgentMessages(tab: ChatTab, options?: { forceRefresh?:
         })),
         tab.name,
       )
+      tab.messages = filterInternalAgentArtifacts(tab.messages)
       localStorage.setItem(storageKey, JSON.stringify(tab.messages))
     }
     else if (storageMessages.length > 0) {

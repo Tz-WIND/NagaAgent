@@ -41,7 +41,11 @@ function notificationStatusLabel(status: string) {
     <div class="flex items-center gap-2 text-white/80 text-base font-bold">
       <span
         class="inline-block w-2 h-2 rounded-full"
-        :class="session.status === 'completed' ? 'bg-blue-400' : 'bg-red-400'"
+        :class="session.status === 'completed'
+          ? 'bg-blue-400'
+          : session.status === 'interrupted'
+            ? 'bg-orange-300'
+            : 'bg-red-400'"
       />
       {{ statusLabel[session.status] || session.status }}
     </div>
@@ -120,7 +124,7 @@ function notificationStatusLabel(status: string) {
   <!-- 返回设置 -->
   <div class="flex justify-center">
     <Button
-      label="开始新旅行"
+      label="新建探索"
       outlined
       class="px-6!"
       @click="$emit('newTravel')"

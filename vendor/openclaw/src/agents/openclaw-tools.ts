@@ -22,6 +22,12 @@ import { createSessionsSendTool } from "./tools/sessions-send-tool.js";
 import { createSessionsSpawnTool } from "./tools/sessions-spawn-tool.js";
 import { createSubagentsTool } from "./tools/subagents-tool.js";
 import { createTtsTool } from "./tools/tts-tool.js";
+import {
+  createTravelDiscoveryTool,
+  createTravelProgressTool,
+  createTravelStateTool,
+  createTravelSummaryTool,
+} from "./tools/travel-tools.js";
 import { createWebFetchTool, createWebSearchTool } from "./tools/web-tools.js";
 import { resolveWorkspaceRoot } from "./workspace-dir.js";
 
@@ -71,6 +77,9 @@ export function createOpenClawTools(
     sessionId?: string;
   } & SpawnedToolContext,
 ): AnyAgentTool[] {
+  const isTravelSession =
+    typeof options?.agentSessionKey === "string" &&
+    (options.agentSessionKey.startsWith("travel:") || options.agentSessionKey.includes(":travel:"));
   const workspaceDir = resolveWorkspaceRoot(options?.workspaceDir);
   const imageTool = options?.agentDir?.trim()
     ? createImageTool({
@@ -187,6 +196,14 @@ export function createOpenClawTools(
       agentSessionKey: options?.agentSessionKey,
       config: options?.config,
     }),
+    ...(isTravelSession
+      ? [
+          createTravelProgressTool({ agentSessionKey: options?.agentSessionKey }),
+          createTravelDiscoveryTool({ agentSessionKey: options?.agentSessionKey }),
+          createTravelStateTool({ agentSessionKey: options?.agentSessionKey }),
+          createTravelSummaryTool({ agentSessionKey: options?.agentSessionKey }),
+        ]
+      : []),
     ...(webSearchTool ? [webSearchTool] : []),
     ...(webFetchTool ? [webFetchTool] : []),
     ...(imageTool ? [imageTool] : []),

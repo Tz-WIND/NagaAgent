@@ -187,6 +187,8 @@ export const DEFAULT_CONFIG = {
       user_qq: '',
       qq_email: '',
       email_verification_code: '',
+      binding_verified: false,
+      binding_verified_email: '',
     },
   },
   telemetry: {
@@ -316,11 +318,16 @@ function sanitizeLegacyNotificationConfig(config: Config) {
   if (parsed.isValid) {
     qqConfig.user_qq = parsed.normalizedQq
     qqConfig.qq_email = parsed.normalizedEmail
+    if (qqConfig.binding_verified_email !== parsed.normalizedEmail) {
+      qqConfig.binding_verified = false
+    }
   }
   else {
     qqConfig.user_qq = ''
     qqConfig.qq_email = ''
     qqConfig.email_verification_code = ''
+    qqConfig.binding_verified = false
+    qqConfig.binding_verified_email = ''
   }
 }
 

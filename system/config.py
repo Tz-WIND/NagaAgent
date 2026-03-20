@@ -637,6 +637,7 @@ class NagaBusinessConfig(BaseModel):
     """NagaBusiness 服务配置（娜迦网络）"""
 
     forum_api_url: str = Field(default="http://62.234.131.204:30031", description="NagaBusiness API 地址")
+    internal_secret: str = Field(default="", description="NagaBusiness 内部调用密钥（可选，用于 X-Internal-Secret）")
     enabled: bool = Field(default=False, description="是否启用娜迦网络")
 
 
@@ -671,6 +672,8 @@ class QQNotificationConfig(BaseModel):
     user_qq: str = Field(default="", description="归一化后的纯数字 QQ 号")
     qq_email: str = Field(default="", description="归一化后的纯数字 QQ 邮箱")
     email_verification_code: str = Field(default="", description="QQ 邮箱验证码")
+    binding_verified: bool = Field(default=False, description="QQ 邮箱是否已完成绑定验证")
+    binding_verified_email: str = Field(default="", description="已完成绑定验证的 QQ 邮箱")
 
 
 class NotificationsConfig(BaseModel):

@@ -26,6 +26,86 @@ from agentserver.openclaw.embedded_runtime import get_embedded_runtime, Embedded
 logger = logging.getLogger(__name__)
 
 
+def _track_travel_task(session_id: str, task: asyncio.Task) -> None:
+    Modules.travel_tasks[session_id] = task
+
+    def _cleanup(done: asyncio.Task) -> None:
+        Modules.travel_tasks.pop(session_id, None)
+        try:
+            done.result()
+        except asyncio.CancelledError:
+            logger.info(f"[旅行] 任务已取消: {session_id}")
+        except Exception as exc:
+            logger.error(f"[旅行] 任务退出异常 [{session_id}]: {exc}")
+
+    task.add_done_callback(_cleanup)
+
+
+def _spawn_travel_session(session_id: str, *, resumed: bool = False) -> bool:
+    existing = Modules.travel_tasks.get(session_id)
+    if existing and not existing.done():
+        return False
+    task = asyncio.create_task(_run_travel_session(session_id, resumed=resumed), name=f"travel:{session_id}")
+    _track_travel_task(session_id, task)
+    return True
+
+
+async def _resume_open_travel_sessions() -> None:
+    from apiserver.travel_service import list_open_sessions
+
+    sessions = list_open_sessions()
+    restored = 0
+    for session in sessions:
+        if _spawn_travel_session(session.session_id, resumed=True):
+            restored += 1
+    if restored:
+        logger.info(f"[旅行] 已恢复 {restored} 个未完成探索")
+
+
+def _mark_travel_sessions_interrupted(
+    *,
+    session_ids: Optional[list[str]] = None,
+    reason: str = "interrupted",
+) -> list[str]:
+    from apiserver.travel_service import (
+        get_session_or_none,
+        interrupt_open_sessions,
+        mark_session_interrupted,
+    )
+
+    interrupted_ids: list[str] = []
+    if session_ids:
+        for session_id in session_ids:
+            session = get_session_or_none(session_id)
+            if session is None:
+                continue
+            updated = mark_session_interrupted(session, reason=reason)
+            if updated.session_id not in interrupted_ids:
+                interrupted_ids.append(updated.session_id)
+        return interrupted_ids
+
+    for session in interrupt_open_sessions(reason=reason):
+        interrupted_ids.append(session.session_id)
+    return interrupted_ids
+
+
+async def _interrupt_travel_sessions(
+    *,
+    session_ids: Optional[list[str]] = None,
+    reason: str = "interrupted",
+) -> list[str]:
+    interrupted_ids = _mark_travel_sessions_interrupted(session_ids=session_ids, reason=reason)
+    cancelled_tasks: list[asyncio.Task] = []
+    for session_id in interrupted_ids:
+        task = Modules.travel_tasks.get(session_id)
+        if task and not task.done():
+            task.cancel()
+            cancelled_tasks.append(task)
+    if cancelled_tasks:
+        await asyncio.gather(*cancelled_tasks, return_exceptions=True)
+    return interrupted_ids
+
+
 async def _start_gateway_if_port_free(runtime: EmbeddedRuntime) -> bool:
     """主 Gateway 仅按主端口状态判定是否需要启动。"""
     if runtime.gateway_running:
@@ -192,6 +272,10 @@ async def lifespan(app: FastAPI):
                 logger.info(f"通讯录恢复完成，共 {len(agents)} 个干员")
             except Exception as e:
                 logger.warning(f"恢复通讯录失败（可忽略）: {e}")
+            try:
+                await _resume_open_travel_sessions()
+            except Exception as e:
+                logger.warning(f"恢复探索任务失败（可忽略）: {e}")
         except Exception as e:
             logger.warning(f"干员多实例管理器初始化失败（可选功能）: {e}")
             Modules.instance_manager = None
@@ -266,6 +350,10 @@ async def lifespan(app: FastAPI):
             await hb_executor.close()
 
         # 停止所有干员子实例（主 Gateway 由下方 stop_gateway 处理）
+        interrupted_ids = await _interrupt_travel_sessions(reason="shutdown")
+        if interrupted_ids:
+            logger.info(f"[旅行] 服务关闭前已中断 {len(interrupted_ids)} 个探索任务")
+
         if Modules.instance_manager:
             await Modules.instance_manager.destroy_all()
             logger.info("干员多实例已全部停止")
@@ -297,6 +385,7 @@ class Modules:
     openclaw_client = None
     dogtag_scheduler = None  # 军牌系统统一调度器
     instance_manager = None  # 干员多实例管理器
+    travel_tasks: Dict[str, asyncio.Task] = {}
 
 
 def _now_iso() -> str:
@@ -784,10 +873,9 @@ async def get_agent_history(agent_id: str, limit: int = 50):
 
     try:
         logger.info(f"获取干员 [{inst.name}] 历史: session_key={session_key}, limit={limit}")
-        history = await inst.client.get_sessions_history(
+        history = await inst.client.get_local_session_history(
             session_key=session_key,
             limit=limit,
-            include_tools=True,
         )
         if history.get("success"):
             messages = [
@@ -1076,6 +1164,52 @@ async def openclaw_get_task_detail(
         raise
     except Exception as e:
         logger.error(f"获取 OpenClaw 任务详情失败: {e}")
+        raise HTTPException(500, f"获取失败: {e}")
+
+
+@app.get("/openclaw/history")
+async def openclaw_get_history(session_key: str, limit: int = 120, include_tools: bool = True):
+    """按 session_key 获取 OpenClaw 原始历史，供 travel 看板/对话界面查看原始记录。"""
+    if not session_key:
+        raise HTTPException(400, "session_key 不能为空")
+
+    normalized_key = str(session_key).strip()
+    if not normalized_key:
+        raise HTTPException(400, "session_key 不能为空")
+
+    try:
+        if normalized_key.startswith("travel:"):
+            parts = normalized_key.split(":")
+            agent_id = parts[1] if len(parts) >= 3 and parts[1] != "main" else None
+            if agent_id:
+                if not Modules.instance_manager:
+                    raise HTTPException(503, "实例管理器未就绪")
+                inst = await Modules.instance_manager.ensure_running(agent_id)
+                if not inst.client:
+                    raise HTTPException(503, "干员客户端未就绪")
+                history = await inst.client.get_local_session_transcript(
+                    session_key=normalized_key,
+                    limit=limit,
+                )
+            else:
+                if not Modules.openclaw_client:
+                    raise HTTPException(503, "OpenClaw 客户端未就绪")
+                history = await Modules.openclaw_client.get_local_session_transcript(
+                    session_key=normalized_key,
+                    limit=limit,
+                )
+        else:
+            if not Modules.openclaw_client:
+                raise HTTPException(503, "OpenClaw 客户端未就绪")
+            history = await Modules.openclaw_client.get_local_session_transcript(
+                session_key=normalized_key,
+                limit=limit,
+            )
+        return {"success": True, "history": history}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"按 session_key 获取 OpenClaw 历史失败 [{normalized_key}]: {e}")
         raise HTTPException(500, f"获取失败: {e}")
 
 
@@ -1571,7 +1705,7 @@ async def travel_execute(payload: Dict[str, Any]):
     if not session_id:
         raise HTTPException(400, "session_id 不能为空")
 
-    from apiserver.travel_service import load_session
+    from apiserver.travel_service import load_session, TravelStatus
 
     try:
         session = load_session(session_id)
@@ -1584,21 +1718,136 @@ async def travel_execute(payload: Dict[str, Any]):
     elif not Modules.openclaw_client:
         raise HTTPException(503, "OpenClaw 客户端未就绪")
 
-    asyncio.create_task(_run_travel_session(session_id))
+    _spawn_travel_session(session_id, resumed=session.status == TravelStatus.INTERRUPTED)
     return {"status": "accepted", "session_id": session_id}
 
 
-async def _run_travel_session(session_id: str):
+@app.post("/travel/interrupt")
+async def travel_interrupt(payload: Dict[str, Any]):
+    """将一个或多个探索任务切到 interrupted，并中断对应协程。"""
+    raw_session_ids = payload.get("session_ids")
+    session_id = payload.get("session_id")
+    session_ids: Optional[list[str]]
+    if isinstance(raw_session_ids, list):
+        session_ids = [str(item) for item in raw_session_ids if item]
+    elif session_id:
+        session_ids = [str(session_id)]
+    else:
+        session_ids = None
+
+    interrupted_ids = await _interrupt_travel_sessions(
+        session_ids=session_ids,
+        reason=str(payload.get("reason") or "interrupted"),
+    )
+    return {"status": "success", "session_ids": interrupted_ids}
+
+
+@app.post("/travel/browser-settings")
+async def travel_browser_settings(payload: Dict[str, Any]):
+    from apiserver.travel_service import load_session
+
+    session_id = payload.get("session_id")
+    if not session_id:
+        raise HTTPException(400, "session_id 不能为空")
+
+    try:
+        session = load_session(str(session_id))
+    except FileNotFoundError:
+        raise HTTPException(404, "旅行 session 不存在")
+
+    if not session.agent_id or not Modules.instance_manager:
+        return {"status": "success", "applied": False, "reason": "no_agent_instance"}
+
+    visible = payload.get("browser_visible")
+    result = await Modules.instance_manager.update_browser_preferences(
+        session.agent_id,
+        visible=None if visible is None else bool(visible),
+    )
+    return {"status": "success", "applied": True, "result": result}
+
+
+@app.post("/travel/instruction")
+async def travel_instruction(payload: Dict[str, Any]):
+    from apiserver.travel_service import (
+        OPEN_TRAVEL_STATUSES,
+        append_progress_event,
+        build_travel_instruction_prompt,
+        load_session,
+        save_session,
+    )
+
+    session_id = str(payload.get("session_id") or "").strip()
+    message = str(payload.get("message") or "").strip()
+    if not session_id:
+        raise HTTPException(400, "session_id 不能为空")
+    if not message:
+        raise HTTPException(400, "message 不能为空")
+
+    try:
+        session = load_session(session_id)
+    except FileNotFoundError:
+        raise HTTPException(404, "旅行 session 不存在")
+
+    if session.status not in OPEN_TRAVEL_STATUSES:
+        raise HTTPException(409, "当前探索已结束，不能再追加指令")
+
+    session_key = (session.openclaw_session_key or "").strip()
+    if not session_key:
+        raise HTTPException(409, "当前探索还没进入可交互阶段")
+
+    prompt = build_travel_instruction_prompt(message)
+    if session.agent_id:
+        if not Modules.instance_manager:
+            raise HTTPException(503, "实例管理器未就绪")
+        await Modules.instance_manager.ensure_running(session.agent_id)
+
+        async def _worker(inst):
+            if not inst.client:
+                raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+            return await inst.client.send_message(
+                message=prompt,
+                session_key=session_key,
+                name="NagaTravel",
+                timeout_seconds=0,
+            )
+
+        await Modules.instance_manager.run_serialized(session.agent_id, _worker)
+    else:
+        if not Modules.openclaw_client:
+            raise HTTPException(503, "OpenClaw 客户端未就绪")
+        await Modules.openclaw_client.send_message(
+            message=prompt,
+            session_key=session_key,
+            name="NagaTravel",
+            timeout_seconds=0,
+        )
+
+    append_progress_event(
+        session,
+        "user_instruction",
+        f"已追加探索指令：{message[:80]}",
+        meta={"message": message[:400]},
+    )
+    save_session(session)
+    return {"status": "success", "session_id": session_id}
+
+
+async def _run_travel_session(session_id: str, *, resumed: bool = False):
     """旅行主循环协程"""
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
     from apiserver.travel_service import (
+        append_progress_event,
         load_session, save_session, TravelStatus,
         analyze_history,
         build_forum_post_payload,
+        build_quota_warning_prompt,
         build_social_prompt,
         build_travel_prompt,
         build_wrap_up_prompt,
+        remove_session_browser_policy,
+        set_session_phase,
+        sync_session_browser_policy,
     )
     from agentserver.travel_notifications import (
         build_travel_full_report_message,
@@ -1620,14 +1869,35 @@ async def _run_travel_session(session_id: str):
             raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
         session.agent_name = inst.name
         travel_client = inst.client
+        await Modules.instance_manager.update_browser_preferences(
+            session.agent_id,
+            visible=session.browser_visible,
+            stop_browser_if_changed=False,
+        )
     elif travel_client is None:
         raise RuntimeError("OpenClaw 客户端未就绪")
 
     session_key = f"travel:{session.agent_id or 'main'}:{session_id[:8]}"
     session.openclaw_session_key = session_key
     session.status = TravelStatus.RUNNING
-    session.started_at = datetime.now().isoformat()
-    save_session(session)
+    session.interrupted_at = None
+    session.interrupted_reason = None
+    if not session.started_at:
+        session.started_at = datetime.now().isoformat()
+    if resumed:
+        session.resume_count += 1
+    session.last_heartbeat_at = datetime.now().isoformat()
+    set_session_phase(
+        session,
+        "bootstrapping",
+        message=f"已分配给干员 {session.agent_name or session.agent_id or '默认干员'}，准备开始探索。",
+        meta={
+            "agent_id": session.agent_id,
+            "openclaw_session_key": session_key,
+            "resumed": resumed,
+        },
+    )
+    sync_session_browser_policy(session)
     await emit_local_telemetry(
         "explore_dispatch_agent",
         {
@@ -1656,23 +1926,120 @@ async def _run_travel_session(session_id: str):
         f"agent={session.agent_name or session.agent_id or 'default'}"
     )
 
+    def _apply_history_analysis(current_session, analysis) -> None:
+        current_session.discoveries = analysis.discoveries
+        current_session.social_interactions = analysis.social_interactions
+        current_session.credits_used = analysis.credits_used
+        current_session.tool_stats = analysis.tool_stats
+        current_session.sources = list(getattr(analysis, "sources", []) or [])
+        current_session.unique_sources = len(current_session.sources)
+        if getattr(analysis, "summary_report_path", None):
+            current_session.summary_report_path = analysis.summary_report_path
+        if getattr(analysis, "summary_report_title", None):
+            current_session.summary_report_title = analysis.summary_report_title
+
+    async def _send_to_travel_client(**kwargs):
+        if session.agent_id:
+            if not Modules.instance_manager:
+                raise RuntimeError("实例管理器未就绪")
+
+            async def _worker(inst):
+                if not inst.client:
+                    raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+                return await inst.client.send_message(**kwargs)
+
+            return await Modules.instance_manager.run_serialized(session.agent_id, _worker)
+        return await travel_client.send_message(**kwargs)
+
+    async def _load_travel_history(*, limit: int, include_tools: bool):
+        if session.agent_id:
+            if not Modules.instance_manager:
+                raise RuntimeError("实例管理器未就绪")
+
+            async def _worker(inst):
+                if not inst.client:
+                    raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+                return await inst.client.get_local_session_history(
+                    session_key=session_key,
+                    limit=limit,
+                )
+
+            return await Modules.instance_manager.run_serialized(session.agent_id, _worker)
+        return await travel_client.get_local_session_history(
+            session_key=session_key,
+            limit=limit,
+        )
+
+    async def _cleanup_travel_browser(current_session, *, reason: str) -> None:
+        cleanup_session_key = str(
+            getattr(current_session, "openclaw_session_key", None) or session_key or ""
+        ).strip()
+        if not cleanup_session_key:
+            return
+
+        try:
+            if current_session.agent_id:
+                if not Modules.instance_manager:
+                    raise RuntimeError("实例管理器未就绪")
+
+                async def _worker(inst):
+                    if not inst.client:
+                        raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+                    return await inst.client.invoke_tool(
+                        tool="browser",
+                        args={"action": "stop"},
+                        session_key=cleanup_session_key,
+                    )
+
+                result = await Modules.instance_manager.run_serialized(current_session.agent_id, _worker)
+            else:
+                result = await travel_client.invoke_tool(
+                    tool="browser",
+                    args={"action": "stop"},
+                    session_key=cleanup_session_key,
+                )
+
+            if isinstance(result, dict) and result.get("success"):
+                logger.info(f"[旅行] 已回收浏览器句柄: session={session_id}, reason={reason}")
+            else:
+                logger.warning(
+                    f"[旅行] 浏览器句柄回收未完全成功: session={session_id}, reason={reason}, result={result}"
+                )
+        except Exception as cleanup_error:
+            logger.warning(
+                f"[旅行] 浏览器句柄回收失败: session={session_id}, reason={reason}, error={cleanup_error}"
+            )
+        finally:
+            remove_session_browser_policy(cleanup_session_key)
+
     try:
         # 发送探索指令
-        await travel_client.send_message(
+        await _send_to_travel_client(
             message=build_travel_prompt(session),
             session_key=session_key,
             name="NagaTravel",
             timeout_seconds=0,
         )
+        set_session_phase(
+            session,
+            "running",
+            message="主探索指令已下发，开始检索最新线索。",
+        )
 
         # 如果想社交，额外发送社交指令
         if session.want_friends:
-            await travel_client.send_message(
+            await _send_to_travel_client(
                 message=build_social_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
                 timeout_seconds=0,
             )
+            append_progress_event(
+                session,
+                "social_prompt_sent",
+                "已追加社交探索指令，会在合适时尝试扩展互动。",
+            )
+            save_session(session)
 
         # 监控循环
         start_time = datetime.fromisoformat(session.started_at)
@@ -1685,6 +2052,8 @@ async def _run_travel_session(session_id: str):
             # 检查时间限制
             elapsed = (datetime.now() - start_time).total_seconds() / 60
             session.elapsed_minutes = round(elapsed, 1)
+            remaining_minutes = max(0.0, session.time_limit_minutes - elapsed)
+            remaining_credits = max(0, session.credit_limit - session.credits_used)
 
             if elapsed >= session.time_limit_minutes:
                 logger.info(f"[旅行] 时间到达限制 {session.time_limit_minutes} 分钟")
@@ -1698,35 +2067,44 @@ async def _run_travel_session(session_id: str):
 
             if session.status == TravelStatus.CANCELLED:
                 logger.info(f"[旅行] session 已被取消: {session_id}")
+                await _cleanup_travel_browser(session, reason="cancelled")
+                return
+
+            if session.status == TravelStatus.INTERRUPTED:
+                logger.info(f"[旅行] session 已被中断: {session_id}")
+                await _cleanup_travel_browser(session, reason="interrupted")
                 return
 
             previous_discovery_count = len(session.discoveries)
 
             # 轮询 OpenClaw 获取新消息
             try:
-                history = await travel_client.get_sessions_history(
-                    session_key=session_key, limit=80, include_tools=True,
-                )
+                history = await _load_travel_history(limit=80, include_tools=True)
                 messages = history if isinstance(history, list) else history.get("messages", [])
 
                 # 从工具结果和阶段性文本中提炼发现、社交、预算
                 analysis = analyze_history(messages)
-                session.discoveries = analysis.discoveries
-                session.social_interactions = analysis.social_interactions
-                session.credits_used = analysis.credits_used
-                session.tool_stats = analysis.tool_stats
-                session.unique_sources = len(
-                    {
-                        d.site_name
-                        or (
-                            d.url.split("/")[2]
-                            if isinstance(d.url, str) and d.url.count("/") >= 2
-                            else d.url
-                        )
-                        for d in session.discoveries
-                        if d.url
-                    }
-                )
+                _apply_history_analysis(session, analysis)
+
+                existing_activity_ids = {
+                    str((event.meta or {}).get("travel_tool_call_id"))
+                    for event in session.progress_events
+                    if (event.meta or {}).get("travel_tool_call_id")
+                }
+                for activity_event in getattr(analysis, "activity_events", []) or []:
+                    activity_id = str((activity_event.meta or {}).get("travel_tool_call_id") or "")
+                    if activity_id and activity_id in existing_activity_ids:
+                        continue
+                    append_progress_event(
+                        session,
+                        activity_event.type,
+                        activity_event.message,
+                        level=activity_event.level,
+                        meta=activity_event.meta,
+                        timestamp=activity_event.timestamp,
+                    )
+                    if activity_id:
+                        existing_activity_ids.add(activity_id)
 
                 for d in session.discoveries:
                     seen_discovery_urls.add(d.url)
@@ -1736,6 +2114,16 @@ async def _run_travel_session(session_id: str):
                     if key not in seen_social_keys:
                         seen_social_keys.add(key)
                 if len(session.discoveries) > previous_discovery_count:
+                    append_progress_event(
+                        session,
+                        "discoveries_updated",
+                        f"本轮新增 {len(session.discoveries) - previous_discovery_count} 条发现，累计 {len(session.discoveries)} 条。",
+                        meta={
+                            "discoveries": len(session.discoveries),
+                            "unique_sources": session.unique_sources,
+                            "credits_used": session.credits_used,
+                        },
+                    )
                     await emit_local_telemetry(
                         "openclaw_discovery_added",
                         {
@@ -1756,23 +2144,78 @@ async def _run_travel_session(session_id: str):
                 logger.warning(f"[旅行] 轮询历史失败: {e}")
 
             session.elapsed_minutes = round(elapsed, 1)
+            session.last_heartbeat_at = datetime.now().isoformat()
+
+            time_warning_threshold = max(1.0, session.time_limit_minutes * 0.1)
+            credit_warning_threshold = max(1, int(session.credit_limit * 0.1))
+            warning_trigger: Optional[str] = None
+            if not session.time_warning_sent and remaining_minutes <= time_warning_threshold:
+                warning_trigger = "time"
+            if not session.credit_warning_sent and remaining_credits <= credit_warning_threshold:
+                warning_trigger = "both" if warning_trigger == "time" else "credit"
+            if warning_trigger:
+                try:
+                    await _send_to_travel_client(
+                        message=build_quota_warning_prompt(
+                            session,
+                            remaining_minutes=remaining_minutes,
+                            remaining_credits=remaining_credits,
+                            trigger=warning_trigger,
+                        ),
+                        session_key=session_key,
+                        name="NagaTravel",
+                        timeout_seconds=0,
+                    )
+                    append_progress_event(
+                        session,
+                        "quota_warning",
+                        f"配额接近上限：剩余约 {max(0.0, remaining_minutes):.1f} 分钟，剩余约 {max(0, remaining_credits)} 积分。",
+                        level="warn",
+                        meta={
+                            "trigger": warning_trigger,
+                            "remaining_minutes": round(max(0.0, remaining_minutes), 1),
+                            "remaining_credits": max(0, remaining_credits),
+                        },
+                    )
+                    if warning_trigger in {"time", "both"}:
+                        session.time_warning_sent = True
+                    if warning_trigger in {"credit", "both"}:
+                        session.credit_warning_sent = True
+                except Exception as e:
+                    logger.warning(f"[旅行] 发送预算预警失败: {e}")
 
             # 预算接近上限或长时间无增量时，要求 OpenClaw 开始收束
             wrap_up_threshold = int(session.credit_limit * 0.9)
-            hard_stop_threshold = max(session.credit_limit, int(session.credit_limit * 1.1))
+            hard_stop_threshold = session.credit_limit
             should_request_wrap_up = (
-                (session.credits_used >= wrap_up_threshold and len(session.discoveries) > 0)
+                (
+                    (
+                        session.credits_used >= wrap_up_threshold
+                        or remaining_minutes <= time_warning_threshold
+                    )
+                    and (len(session.discoveries) > 0 or session.idle_polls >= 1)
+                )
                 or (session.idle_polls >= 2 and len(session.discoveries) > 0)
             )
             if should_request_wrap_up and not session.wrap_up_sent:
                 try:
-                    await travel_client.send_message(
+                    await _send_to_travel_client(
                         message=build_wrap_up_prompt(session),
                         session_key=session_key,
                         name="NagaTravel",
                         timeout_seconds=0,
                     )
                     session.wrap_up_sent = True
+                    set_session_phase(
+                        session,
+                        "wrapping_up",
+                        message="探索已进入收束阶段，正在整理最终报告。",
+                        meta={
+                            "credits_used": session.credits_used,
+                            "idle_polls": session.idle_polls,
+                            "discoveries": len(session.discoveries),
+                        },
+                    )
                     logger.info(
                         f"[旅行] 已发送收束指令: {session_id}, credits={session.credits_used}, idle={session.idle_polls}"
                     )
@@ -1792,10 +2235,22 @@ async def _run_travel_session(session_id: str):
                     logger.warning(f"[旅行] 发送收束指令失败: {e}")
 
             if session.credits_used >= hard_stop_threshold:
+                append_progress_event(
+                    session,
+                    "hard_limit",
+                    f"已达到积分限制 {session.credits_used}/{session.credit_limit}，准备结束探索。",
+                    level="warn",
+                )
                 logger.info(f"[旅行] 估算积分到达限制 {session.credits_used}/{session.credit_limit}")
                 break
 
             if session.idle_polls >= 4 and len(session.discoveries) > 0:
+                append_progress_event(
+                    session,
+                    "idle_stop",
+                    "长时间没有新增发现，准备结束并整理结果。",
+                    meta={"idle_polls": session.idle_polls},
+                )
                 logger.info(f"[旅行] 长时间无新增发现，准备结束: idle_polls={session.idle_polls}")
                 break
 
@@ -1803,8 +2258,13 @@ async def _run_travel_session(session_id: str):
 
         # 发送收尾指令
         logger.info(f"[旅行] 发送收尾指令: {session_id}")
+        set_session_phase(
+            session,
+            "finalizing",
+            message="已发送最终收尾指令，正在等待探索总结。",
+        )
         try:
-            await travel_client.send_message(
+            await _send_to_travel_client(
                 message=build_wrap_up_prompt(session),
                 session_key=session_key,
                 name="NagaTravel",
@@ -1813,9 +2273,7 @@ async def _run_travel_session(session_id: str):
 
             # 等待并获取最终回复
             await asyncio.sleep(30)
-            history = await travel_client.get_sessions_history(
-                session_key=session_key, limit=5, include_tools=False,
-            )
+            history = await _load_travel_history(limit=20, include_tools=False)
             messages = history if isinstance(history, list) else history.get("messages", [])
             # 最后一条 assistant 消息作为 summary
             for msg in reversed(messages):
@@ -1832,13 +2290,32 @@ async def _run_travel_session(session_id: str):
                         agent_id=session.agent_id,
                     )
                     break
+
+            # 收尾完成后重新解析完整历史，确保最终总结里的真实 discovery 会落盘。
+            final_history = await _load_travel_history(limit=120, include_tools=True)
+            final_messages = final_history if isinstance(final_history, list) else final_history.get("messages", [])
+            final_analysis = analyze_history(final_messages)
+            _apply_history_analysis(session, final_analysis)
         except Exception as e:
             logger.warning(f"[旅行] 收尾指令失败: {e}")
             session.summary = f"旅行完成，共发现 {len(session.discoveries)} 个内容。（收尾指令超时）"
 
         session.status = TravelStatus.COMPLETED
+        session.phase = "completed"
         session.completed_at = datetime.now().isoformat()
+        append_progress_event(
+            session,
+            "completed",
+            f"探索已完成：累计 {len(session.discoveries)} 条发现，{session.unique_sources} 个来源。",
+            meta={
+                "discoveries": len(session.discoveries),
+                "unique_sources": session.unique_sources,
+                "credits_used": session.credits_used,
+                "elapsed_minutes": session.elapsed_minutes,
+            },
+        )
         save_session(session)
+        await _cleanup_travel_browser(session, reason="completed")
 
         logger.info(
             f"[旅行] 完成: {session_id}, 发现={len(session.discoveries)}, 社交={len(session.social_interactions)}"
@@ -1847,6 +2324,11 @@ async def _run_travel_session(session_id: str):
         # 自动产出论坛精华版
         if session.post_to_forum and session.summary:
             try:
+                set_session_phase(
+                    session,
+                    "publishing",
+                    message="正在自动发布论坛精华摘要。",
+                )
                 from apiserver.routes.forum import create_forum_post_internal
 
                 forum_payload = build_forum_post_payload(session)
@@ -1860,16 +2342,33 @@ async def _run_travel_session(session_id: str):
                         or ""
                     ) or None
                 session.forum_post_status = "posted"
+                append_progress_event(
+                    session,
+                    "forum_posted",
+                    "探索摘要已自动发布到论坛。",
+                    meta={"forum_post_id": session.forum_post_id},
+                )
                 save_session(session)
                 logger.info(f"[旅行] 已自动发布论坛精华帖: session={session_id}, post_id={session.forum_post_id}")
             except Exception as e:
                 session.forum_post_status = f"failed:{e}"
+                append_progress_event(
+                    session,
+                    "forum_post_failed",
+                    f"论坛自动发布失败：{e}",
+                    level="error",
+                )
                 save_session(session)
                 logger.warning(f"[旅行] 自动发布论坛精华帖失败: {e}")
 
         # 完整版报告回传给用户/通道
         if session.deliver_full_report:
             try:
+                set_session_phase(
+                    session,
+                    "delivering_report",
+                    message="正在回传完整探索报告。",
+                )
                 if not session.deliver_channel and not session.deliver_to:
                     session.full_report_delivery_status = "stored_in_app"
                     save_session(session)
@@ -1885,15 +2384,32 @@ async def _run_travel_session(session_id: str):
                         deliver_kwargs["channel"] = session.deliver_channel
                     if session.deliver_to:
                         deliver_kwargs["to"] = session.deliver_to
-                    await travel_client.send_message(**deliver_kwargs)
+                    await _send_to_travel_client(**deliver_kwargs)
                     session.full_report_delivery_status = "delivered"
+                append_progress_event(
+                    session,
+                    "report_delivery",
+                    "探索结果已按当前配置完成回传。",
+                    meta={"channel": session.deliver_channel or "in_app"},
+                )
                 save_session(session)
             except Exception as e:
                 session.full_report_delivery_status = f"failed:{e}"
+                append_progress_event(
+                    session,
+                    "report_delivery_failed",
+                    f"探索结果回传失败：{e}",
+                    level="error",
+                )
                 save_session(session)
                 logger.warning(f"[旅行] 完整报告回传失败: {e}")
 
         try:
+            set_session_phase(
+                session,
+                "notifying",
+                message="正在发送探索完成通知。",
+            )
             session.notification_delivery_statuses = await deliver_travel_completion_notifications(session, travel_client)
             save_session(session)
             for channel, status in session.notification_delivery_statuses.items():
@@ -1909,6 +2425,9 @@ async def _run_travel_session(session_id: str):
                 )
         except Exception as e:
             logger.warning(f"[旅行] 完成通知发送失败: {e}")
+
+        session.phase = "completed"
+        save_session(session)
 
         await emit_local_telemetry(
             "explore_finish",
@@ -1927,14 +2446,50 @@ async def _run_travel_session(session_id: str):
             agent_id=session.agent_id,
         )
 
+    except asyncio.CancelledError:
+        try:
+            session = load_session(session_id)
+            if session.status == TravelStatus.CANCELLED:
+                session.phase = "cancelled"
+                append_progress_event(
+                    session,
+                    "cancelled",
+                    "探索已取消。",
+                    level="warn",
+                )
+                save_session(session)
+                await _cleanup_travel_browser(session, reason="cancelled")
+                logger.info(f"[旅行] 协程已取消（已取消态）: {session_id}")
+            elif session.status == TravelStatus.INTERRUPTED:
+                session.phase = "interrupted"
+                save_session(session)
+                await _cleanup_travel_browser(session, reason="interrupted")
+                logger.info(f"[旅行] 协程已取消（已中断态）: {session_id}")
+            else:
+                from apiserver.travel_service import mark_session_interrupted
+
+                session = mark_session_interrupted(session, reason="task_cancelled")
+                await _cleanup_travel_browser(session, reason="task_cancelled")
+                logger.info(f"[旅行] 协程已取消并转为中断态: {session_id}")
+        except Exception as inner:
+            logger.warning(f"[旅行] 处理取消态失败 [{session_id}]: {inner}")
+        raise
     except Exception as e:
         logger.error(f"[旅行] 异常: {e}", exc_info=True)
         try:
             session = load_session(session_id)
             session.status = TravelStatus.FAILED
+            session.phase = "failed"
             session.error = str(e)
             session.completed_at = datetime.now().isoformat()
+            append_progress_event(
+                session,
+                "failed",
+                f"探索执行失败：{e}",
+                level="error",
+            )
             save_session(session)
+            await _cleanup_travel_browser(session, reason="failed")
             await emit_local_telemetry(
                 "explore_fail",
                 {

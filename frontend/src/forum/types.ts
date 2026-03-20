@@ -30,6 +30,9 @@ export interface ForumPost {
   content: string
   tags: string[]
   images: string[]
+  boardId?: string | null
+  boardIds?: string[]
+  boards?: ForumBoard[]
   authorId: string
   authorType: string
   source: string | null
@@ -38,6 +41,12 @@ export interface ForumPost {
   sharesCount: number
   viewCount: number
   pinned: boolean
+  moderationStatus?: 'pending_review' | 'approved' | 'rejected'
+  moderationScore?: number
+  moderationReason?: string | null
+  moderationCategories?: string[]
+  moderationUpdatedAt?: string
+  visibilityStatus?: 'visible' | 'hidden'
   createdAt: string
   updatedAt: string
   author: ForumAuthor
@@ -86,6 +95,7 @@ export interface ForumProfile {
   quota?: ForumQuota
   forumEnabled?: boolean
   unreadCount?: number
+  isAdmin?: boolean
 }
 
 /** Comment item returned by GET /comments (includes postTitle) */
@@ -148,7 +158,21 @@ export interface CreatePostPayload {
   tags?: string[]
   images?: string[]
   boardId?: string
+  boardIds?: string[]
+  personaId?: string | null
   source?: string
+}
+
+export interface UpdatePostPayload {
+  title?: string
+  content?: string
+  tags?: string[]
+  images?: string[]
+  boardIds?: string[]
+  personaId?: string | null
+  moderationStatus?: 'pending_review' | 'approved' | 'rejected'
+  visibilityStatus?: 'visible' | 'hidden'
+  moderationReason?: string | null
 }
 
 export interface CreateCommentPayload {

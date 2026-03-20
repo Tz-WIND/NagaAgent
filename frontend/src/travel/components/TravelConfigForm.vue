@@ -3,10 +3,12 @@ import { Button, InputNumber, Select, Textarea, ToggleSwitch } from 'primevue'
 import { computed, onMounted, ref, watch } from 'vue'
 import ConfigItem from '@/components/ConfigItem.vue'
 import { CONFIG } from '@/utils/config'
-import { hasQqEmailVerificationCode, parseQqBindingTarget } from '@/utils/qqNotification'
+import { parseQqBindingTarget } from '@/utils/qqNotification'
 import { agentContacts, loadAgentContacts } from '@/utils/session'
 
-defineProps<{ loading: boolean }>()
+const props = withDefaults(defineProps<{ loading: boolean, buttonLabel?: string }>(), {
+  buttonLabel: '出发！',
+})
 const emit = defineEmits<{
   start: [params: {
     agentId?: string
@@ -18,6 +20,9 @@ const emit = defineEmits<{
     deliverFullReport?: boolean
     deliverChannel?: string
     deliverTo?: string
+    browserVisible?: boolean
+    browserKeepOpen?: boolean
+    browserIdleTimeoutSeconds?: number
   }]
 }>()
 
@@ -27,6 +32,8 @@ const wantFriends = ref(true)
 const friendDescription = ref('')
 const goalPrompt = ref('追踪 AI、技术与互联网的最新热点，优先关注仍在持续发酵的话题和一手来源')
 const selectedAgentId = ref('')
+const browserVisible = ref(false)
+const browserKeepOpen = ref(false)
 const openclawAgents = computed(() => agentContacts.value.filter(agent => (agent.engine || 'openclaw') === 'openclaw'))
 const feishuDeliverTarget = computed(() => {
   const settings = CONFIG.value.notifications.feishu
@@ -38,7 +45,10 @@ const feishuDeliverTarget = computed(() => {
     : settings.recipient_open_id.trim()
 })
 const qqBinding = computed(() => parseQqBindingTarget(CONFIG.value.notifications.qq.binding_target))
-const qqVerificationReady = computed(() => hasQqEmailVerificationCode(CONFIG.value.notifications.qq.email_verification_code))
+const qqVerificationReady = computed(() => {
+  const settings = CONFIG.value.notifications.qq
+  return settings.binding_verified && settings.binding_verified_email === qqBinding.value.normalizedEmail
+})
 const qqNotificationReady = computed(() => {
   const settings = CONFIG.value.notifications.qq
   return settings.enabled
@@ -100,6 +110,9 @@ function onStart() {
     deliverFullReport: deliverChannel ? CONFIG.value.notifications.feishu.deliver_full_report : false,
     deliverChannel,
     deliverTo,
+    browserVisible: browserVisible.value,
+    browserKeepOpen: browserKeepOpen.value,
+    browserIdleTimeoutSeconds: 300,
   })
 }
 </script>
@@ -183,6 +196,20 @@ function onStart() {
 
   <div class="flex flex-col gap-2">
     <div class="text-white/60 text-xs pl-1">
+      浏览器策略
+    </div>
+    <ConfigItem name="浏览器可见" description="关闭时默认无头运行；打开后会尝试用可见窗口执行后续浏览器动作">
+      <ToggleSwitch v-model="browserVisible" />
+    </ConfigItem>
+    <ConfigItem name="页面保持打开" description="关闭时，页面空闲 300 秒会自动关闭；打开后不会自动回收标签页">
+      <ToggleSwitch v-model="browserKeepOpen" />
+    </ConfigItem>
+  </div>
+
+  <div class="border-t border-white/8 my-1" />
+
+  <div class="flex flex-col gap-2">
+    <div class="text-white/60 text-xs pl-1">
       通知回传
     </div>
     <div class="text-xs text-white/40 pl-1 leading-6">
@@ -195,7 +222,7 @@ function onStart() {
   <!-- 出发按钮 -->
   <div class="flex justify-center mt-2">
     <Button
-      label="出发！"
+      :label="props.buttonLabel"
       class="px-8!"
       :loading="loading"
       :disabled="!openclawAgents.length || !selectedAgentId"

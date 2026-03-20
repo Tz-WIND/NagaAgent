@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from json import JSONDecodeError
 from typing import Any, Dict, Iterable, List, Tuple
 from uuid import uuid4
@@ -12,11 +13,12 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from apiserver import naga_auth
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 NAGABUSINESS_URL = "http://62.234.131.204:30031/v1/chat/completions"
-NAGABUSINESS_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIyNjMxIiwidXNlcm5hbWUiOiJkZW1vIiwidHlwZSI6ImFjY2VzcyIsImlhdCI6MTc3MjYwMDQyMCwiZXhwIjoyMDg3OTYwNDIwLCJqdGkiOiJjYmNlYjExNGU3YzdkODI3MGI1NGE4Njk4MmIxMWEwNCJ9.qNoceinJ24dGHhqoatF8ckALh4qzUwXEZiV80p8ZTAY"
 
 _TOOL_SECTION_BEGIN = "<|tool_calls_section_begin|>"
 _TOOL_SECTION_END = "<|tool_calls_section_end|>"
@@ -24,11 +26,27 @@ _TOOL_CALL_BEGIN = "<|tool_call_begin|>functions."
 _TOOL_CALL_ARG_BEGIN = "<|tool_call_argument_begin|>"
 _TOOL_CALL_END = "<|tool_call_end|>"
 _STREAM_HOLDBACK_CHARS = 48
+_LAST_AUTH_INTERRUPT_AT = 0.0
+_AUTH_INTERRUPT_DEBOUNCE_SECONDS = 5.0
 
 
-def _upstream_headers() -> Dict[str, str]:
+async def _upstream_headers() -> Dict[str, str]:
+    token = naga_auth.get_access_token()
+    if not token and naga_auth.has_refresh_token():
+        try:
+            await naga_auth.ensure_access_token()
+        except Exception as exc:
+            logger.error("openai_proxy ensure_access_token failed: %s", exc)
+            await _interrupt_open_travel_sessions_for_auth_expired()
+            raise HTTPException(status_code=401, detail="当前登录已失效，请重新登录") from exc
+        token = naga_auth.get_access_token()
+
+    if not token:
+        await _interrupt_open_travel_sessions_for_auth_expired()
+        raise HTTPException(status_code=401, detail="缺少当前登录态，无法调用模型服务")
+
     return {
-        "Authorization": f"Bearer {NAGABUSINESS_TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json, text/event-stream",
     }
 
@@ -38,6 +56,102 @@ def _json_error(status_code: int, message: str, error_type: str = "upstream_erro
         status_code=status_code,
         content={"error": {"message": message, "type": error_type}},
     )
+
+
+async def _interrupt_open_travel_sessions_for_auth_expired() -> None:
+    """登录态过期时，将所有未完成探索挂起并通知 agent_server 取消协程。"""
+    global _LAST_AUTH_INTERRUPT_AT
+    now = time.monotonic()
+    if now - _LAST_AUTH_INTERRUPT_AT < _AUTH_INTERRUPT_DEBOUNCE_SECONDS:
+        return
+    _LAST_AUTH_INTERRUPT_AT = now
+
+    try:
+        from apiserver.travel_service import interrupt_open_sessions
+        from system.config import get_server_port
+
+        interrupted_sessions = interrupt_open_sessions(reason="auth_expired")
+        interrupted_session_ids = [session.session_id for session in interrupted_sessions]
+        if not interrupted_session_ids:
+            return
+
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            await client.post(
+                f"http://127.0.0.1:{get_server_port('agent_server')}/travel/interrupt",
+                json={"reason": "auth_expired", "session_ids": interrupted_session_ids},
+            )
+        logger.warning(
+            "openai_proxy auth expired -> interrupted %s travel sessions",
+            len(interrupted_session_ids),
+        )
+    except Exception as exc:
+        logger.warning("openai_proxy failed to interrupt travel sessions on auth expiry: %s", exc)
+
+
+async def _refresh_upstream_token() -> str | None:
+    if not naga_auth.has_refresh_token():
+        return None
+    try:
+        refresh_result = await naga_auth.refresh()
+    except Exception as exc:
+        logger.warning("openai_proxy refresh after 401 failed: %s", exc)
+        return None
+    return refresh_result.get("access_token") or naga_auth.get_access_token()
+
+
+async def _post_with_auth_retry(
+    client: httpx.AsyncClient,
+    *,
+    json_body: Dict[str, Any],
+    headers: Dict[str, str],
+) -> httpx.Response:
+    resp = await client.post(NAGABUSINESS_URL, json=json_body, headers=headers)
+    if resp.status_code != 401:
+        return resp
+
+    new_token = await _refresh_upstream_token()
+    if new_token:
+        retry_headers = {**headers, "Authorization": f"Bearer {new_token}"}
+        resp = await client.post(NAGABUSINESS_URL, json=json_body, headers=retry_headers)
+        if resp.status_code != 401:
+            return resp
+
+    await _interrupt_open_travel_sessions_for_auth_expired()
+    return resp
+
+
+async def _stream_with_auth_retry(
+    client: httpx.AsyncClient,
+    *,
+    json_body: Dict[str, Any],
+    headers: Dict[str, str],
+):
+    stream_ctx = client.stream("POST", NAGABUSINESS_URL, json=json_body, headers=headers)
+    resp = await stream_ctx.__aenter__()
+    if resp.status_code != 401:
+        return resp, stream_ctx
+
+    text = await resp.aread()
+    await stream_ctx.__aexit__(None, None, None)
+    logger.info(
+        "openai_proxy received 401 from upstream stream, attempting token refresh and retry: %r",
+        text.decode("utf-8", errors="replace")[:300],
+    )
+
+    new_token = await _refresh_upstream_token()
+    if new_token:
+        retry_headers = {**headers, "Authorization": f"Bearer {new_token}"}
+        retry_ctx = client.stream("POST", NAGABUSINESS_URL, json=json_body, headers=retry_headers)
+        retry_resp = await retry_ctx.__aenter__()
+        if retry_resp.status_code != 401:
+            return retry_resp, retry_ctx
+        await _interrupt_open_travel_sessions_for_auth_expired()
+        return retry_resp, retry_ctx
+
+    await _interrupt_open_travel_sessions_for_auth_expired()
+    retry_ctx = client.stream("POST", NAGABUSINESS_URL, json=json_body, headers=headers)
+    retry_resp = await retry_ctx.__aenter__()
+    return retry_resp, retry_ctx
 
 
 def _extract_message_payload(payload: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]], str | None]:
@@ -212,6 +326,81 @@ def _extract_special_tool_calls_with_state(text: str) -> Tuple[str, List[Dict[st
     return clean_text, tool_calls, False
 
 
+def _iter_message_text_fragments(messages: Any) -> Iterable[str]:
+    if not isinstance(messages, list):
+        return
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            yield content
+            continue
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            text = block.get("text")
+            if isinstance(text, str):
+                yield text
+
+
+def _looks_like_travel_request(body: Dict[str, Any]) -> bool:
+    for text in _iter_message_text_fragments(body.get("messages")):
+        if "NagaTravel" in text:
+            return True
+        if "长期网络探索任务" in text:
+            return True
+        if "请停止扩展探索，开始收束并输出最终旅行报告" in text:
+            return True
+    return False
+
+
+async def _stream_normalized_non_stream_response(body: Dict[str, Any]):
+    upstream_body = dict(body)
+    upstream_body["stream"] = False
+    payload = await _fetch_upstream_json(upstream_body)
+    normalized = _normalize_non_stream_response(payload, upstream_body)
+    model = normalized.get("model") or body.get("model") or "naga-proxy"
+    run_id = normalized.get("id") or f"chatcmpl-{uuid4().hex}"
+    content, tool_calls, _finish_reason = _extract_message_payload(normalized)
+    for chunk in _iter_normalized_stream(
+        content=content,
+        tool_calls=tool_calls,
+        model=str(model),
+        run_id=str(run_id),
+    ):
+        yield chunk
+
+
+async def _stream_buffered_with_fallback(body: Dict[str, Any]):
+    events, model, run_id = await _fetch_upstream_stream_events(body)
+    content, tool_calls, finish_reason = _extract_stream_payload(events)
+    clean_text, special_tool_calls = _extract_special_tool_calls(content)
+    normalized_tool_calls = tool_calls or special_tool_calls
+
+    has_meaningful_stream = bool(events) and (
+        bool(clean_text.strip())
+        or bool(normalized_tool_calls)
+        or bool(finish_reason)
+    )
+
+    if not has_meaningful_stream:
+        logger.info("openai_proxy: upstream stream returned no usable content, falling back to non-stream normalization")
+        async for chunk in _stream_normalized_non_stream_response(body):
+            yield chunk
+        return
+
+    for chunk in _iter_normalized_stream(
+        content=clean_text,
+        tool_calls=normalized_tool_calls,
+        model=str(model),
+        run_id=str(run_id),
+    ):
+        yield chunk
+
+
 def _normalize_non_stream_response(payload: Dict[str, Any], request_body: Dict[str, Any]) -> Dict[str, Any]:
     content, tool_calls, finish_reason = _extract_message_payload(payload)
     clean_text, special_tool_calls = _extract_special_tool_calls(content)
@@ -320,8 +509,9 @@ def _make_stream_chunk(
 
 
 async def _fetch_upstream_json(body: Dict[str, Any]) -> Dict[str, Any]:
+    headers = await _upstream_headers()
     async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(NAGABUSINESS_URL, json=body, headers=_upstream_headers())
+        resp = await _post_with_auth_retry(client, json_body=body, headers=headers)
 
     if resp.status_code >= 400:
         snippet = (resp.text or "")[:500]
@@ -340,9 +530,11 @@ async def _fetch_upstream_stream_events(body: Dict[str, Any]) -> Tuple[List[Dict
     events: List[Dict[str, Any]] = []
     model = body.get("model") or "naga-proxy"
     run_id = f"chatcmpl-{uuid4().hex}"
+    headers = await _upstream_headers()
 
     async with httpx.AsyncClient(timeout=120) as client:
-        async with client.stream("POST", NAGABUSINESS_URL, json=body, headers=_upstream_headers()) as resp:
+        resp, stream_ctx = await _stream_with_auth_retry(client, json_body=body, headers=headers)
+        try:
             if resp.status_code >= 400:
                 text = await resp.aread()
                 snippet = text.decode("utf-8", errors="replace")[:500]
@@ -365,6 +557,8 @@ async def _fetch_upstream_stream_events(body: Dict[str, Any]) -> Tuple[List[Dict
                     model = payload["model"]
                 if isinstance(payload.get("id"), str) and payload["id"]:
                     run_id = payload["id"]
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
     return events, model, run_id
 
@@ -378,9 +572,11 @@ async def _stream_upstream_with_normalization(body: Dict[str, Any]):
     special_buffer = ""
     special_tool_calls: List[Dict[str, Any]] = []
     finished = False
+    headers = await _upstream_headers()
 
     async with httpx.AsyncClient(timeout=120) as client:
-        async with client.stream("POST", NAGABUSINESS_URL, json=body, headers=_upstream_headers()) as resp:
+        resp, stream_ctx = await _stream_with_auth_retry(client, json_body=body, headers=headers)
+        try:
             if resp.status_code >= 400:
                 text = await resp.aread()
                 snippet = text.decode("utf-8", errors="replace")[:500]
@@ -541,6 +737,8 @@ async def _stream_upstream_with_normalization(body: Dict[str, Any]):
                     )
                     finished = True
                     break
+        finally:
+            await stream_ctx.__aexit__(None, None, None)
 
     if not role_sent:
         yield _make_stream_chunk(
@@ -616,8 +814,14 @@ async def chat_completions(request: Request):
     body = await request.json()
 
     if body.get("stream"):
+        if _looks_like_travel_request(body):
+            logger.info("openai_proxy: detected NagaTravel request, forcing non-stream upstream fallback")
+            return StreamingResponse(
+                _stream_normalized_non_stream_response(body),
+                media_type="text/event-stream",
+            )
         return StreamingResponse(
-            _stream_upstream_with_normalization(body),
+            _stream_buffered_with_fallback(body),
             media_type="text/event-stream",
         )
 

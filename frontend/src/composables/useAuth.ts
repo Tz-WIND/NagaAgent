@@ -91,8 +91,8 @@ export function useAuth() {
     return await coreApi.authSendVerification(email, username, captchaId, captchaAnswer)
   }
 
-  async function getCaptcha() {
-    return await coreApi.authGetCaptcha()
+  async function getCaptcha(format?: 'image') {
+    return await coreApi.authGetCaptcha(format)
   }
 
   async function fetchMe() {
