@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import Dialog from 'primevue/dialog'
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import API from '@/api/core'
 import BoxContainer from '@/components/BoxContainer.vue'
@@ -115,6 +116,7 @@ const errorMsg = ref('')
 const searchQuery = ref('')
 const nodeCount = ref(0)
 const quintupleCount = ref(0)
+const helpVisible = ref(false)
 
 // ── State ──
 let W = 0
@@ -1285,9 +1287,20 @@ watch(nodeCount, () => {
     <div class="text-white flex flex-col flex-1 min-h-0">
       <!-- Header -->
       <div class="flex items-center gap-3 mb-3 shrink-0">
-        <h2 class="text-lg font-bold">
-          记忆云海
-        </h2>
+        <div class="mind-header-main">
+          <h2 class="text-lg font-bold">
+            记忆云海
+          </h2>
+          <button
+            type="button"
+            class="mind-help-btn"
+            aria-label="查看记忆云海说明"
+            title="查看记忆云海说明"
+            @click="helpVisible = true"
+          >
+            ?
+          </button>
+        </div>
         <div class="flex-1 flex items-center gap-2">
           <input
             v-model="searchQuery"
@@ -1382,6 +1395,81 @@ watch(nodeCount, () => {
           </div>
         </div>
       </div>
+
+      <Dialog
+        v-model:visible="helpVisible"
+        modal
+        header="记忆云海说明"
+        :style="{ width: 'min(720px, 92vw)' }"
+      >
+        <div class="mind-help">
+        <section>
+          <h4>记忆云海是什么</h4>
+          <p>记忆云海是一种三维的知识图谱，用来展示当前记忆中的实体、关系和五元组，帮助你从整体上理解长期记忆结构。</p>
+        </section>
+        <section>
+          <h4>你能做什么</h4>
+          <p>你可以搜索关键词、查看记忆规模，并通过图谱关系观察不同实体之间是怎么关联起来的。</p>
+        </section>
+        <section>
+          <h4>高度与遗忘</h4>
+          <p>调度频率越高的记忆会越靠上方，说明它被注入 AI 上下文的频率也更高；随着时间推移，这些记忆会逐渐变小，用来模拟遗忘过程。</p>
+        </section>
+        <section>
+          <h4>显示范围</h4>
+          <p>为了防止显示卡顿，当前画面只展示最近使用的最多 100 个节点；这不会影响实际 LLM 调度，记忆系统本身仍然正常工作。</p>
+        </section>
+      </div>
+    </Dialog>
     </div>
   </BoxContainer>
 </template>
+
+<style scoped>
+.mind-header-main {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-shrink: 0;
+}
+
+.mind-help-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  border: 1px solid rgba(212, 175, 55, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(212, 175, 55, 0.88);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.18s ease, background-color 0.18s ease, color 0.18s ease;
+}
+
+.mind-help-btn:hover {
+  border-color: rgba(212, 175, 55, 0.52);
+  background: rgba(212, 175, 55, 0.08);
+  color: rgba(248, 222, 159, 0.96);
+}
+
+.mind-help {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 0.84rem;
+  line-height: 1.7;
+}
+
+.mind-help h4 {
+  margin: 0 0 0.25rem;
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.mind-help p {
+  margin: 0;
+}
+</style>

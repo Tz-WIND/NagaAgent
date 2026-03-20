@@ -9,10 +9,10 @@ defineEmits<{ select: [session: TravelSession] }>()
 <template>
   <div class="flex flex-col gap-2">
     <div class="text-white/40 text-xs">
-      旅行记录
+      探索记录
     </div>
     <div v-if="!sessions.length" class="flex items-center justify-center min-h-20 rounded-lg border border-white/6 bg-white/2 text-white/25 text-sm">
-      暂无旅行记录
+      暂无探索记录
     </div>
     <div v-else class="flex flex-col gap-1.5 max-h-60 overflow-y-auto">
       <button
@@ -40,6 +40,7 @@ defineEmits<{ select: [session: TravelSession] }>()
             'bg-red-500/10 text-red-400/60': session.status === 'failed',
             'bg-yellow-500/10 text-yellow-400/60': session.status === 'cancelled',
             'bg-blue-500/10 text-blue-400/60': session.status === 'running',
+            'bg-orange-500/10 text-orange-300/70': session.status === 'interrupted',
           }"
         >
           {{ statusLabel[session.status] || session.status }}

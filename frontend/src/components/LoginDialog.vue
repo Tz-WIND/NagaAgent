@@ -6,6 +6,7 @@ import { ref, watch } from 'vue'
 import { useAuth } from '@/composables/useAuth'
 import { backendConnected } from '@/utils/config'
 import { trackTelemetry } from '@/utils/telemetry'
+import PrivacyPolicy from './PrivacyPolicy.vue'
 import UserAgreement from './UserAgreement.vue'
 
 const props = defineProps<{ visible: boolean }>()
@@ -34,10 +35,13 @@ let countdownTimer: ReturnType<typeof setInterval> | null = null
 // 协议勾选状态（持久化）
 const agreementAccepted = useStorage('naga-agreement-accepted', false)
 const showAgreement = ref(false)
+const showPrivacyPolicy = ref(false)
 
 // 验证码状态
 const captchaId = ref('')
 const captchaQuestion = ref('')
+const captchaImageData = ref('')
+const captchaType = ref<'image' | 'math'>('math')
 const captchaAnswer = ref('')
 const captchaLoading = ref(false)
 
@@ -71,12 +75,16 @@ function resetForm() {
 async function fetchCaptcha() {
   captchaId.value = ''
   captchaQuestion.value = ''
+  captchaImageData.value = ''
+  captchaType.value = 'math'
   captchaAnswer.value = ''
   captchaLoading.value = true
   try {
-    const res = await getCaptcha()
+    const res = await getCaptcha('image')
     captchaId.value = res.captchaId
-    captchaQuestion.value = res.question
+    captchaQuestion.value = res.question || ''
+    captchaImageData.value = res.imageData || ''
+    captchaType.value = res.imageData ? 'image' : 'math'
   }
   catch {
     // 验证码获取失败不阻塞，用户操作时再提示
@@ -261,10 +269,18 @@ const stopWatch = watch(backendConnected, (connected) => {
             />
             <!-- 验证码 -->
             <div class="captcha-row">
-              <span class="captcha-question">{{ captchaQuestion || '加载中...' }}</span>
+              <div class="captcha-display">
+                <img
+                  v-if="captchaImageData"
+                  :src="captchaImageData"
+                  alt="验证码"
+                  class="captcha-image"
+                >
+                <span v-else class="captcha-question">{{ captchaQuestion || '加载中...' }}</span>
+              </div>
               <InputText
                 v-model="captchaAnswer"
-                placeholder="答案"
+                :placeholder="captchaType === 'image' ? '输入图中字符' : '答案'"
                 class="captcha-input"
                 @keydown.enter="handleSubmitByEnter($event, handleLogin)"
               />
@@ -281,6 +297,8 @@ const stopWatch = watch(backendConnected, (connected) => {
               <label for="agree-login" class="agreement-label">
                 我已阅读并同意
                 <span class="agreement-link" @click.prevent="showAgreement = true">《用户使用协议》</span>
+                与
+                <span class="agreement-link" @click.prevent="showPrivacyPolicy = true">《隐私政策》</span>
               </label>
             </div>
             <Button
@@ -328,10 +346,18 @@ const stopWatch = watch(backendConnected, (connected) => {
             />
             <!-- 验证码 -->
             <div class="captcha-row">
-              <span class="captcha-question">{{ captchaQuestion || '加载中...' }}</span>
+              <div class="captcha-display">
+                <img
+                  v-if="captchaImageData"
+                  :src="captchaImageData"
+                  alt="验证码"
+                  class="captcha-image"
+                >
+                <span v-else class="captcha-question">{{ captchaQuestion || '加载中...' }}</span>
+              </div>
               <InputText
                 v-model="captchaAnswer"
-                placeholder="答案"
+                :placeholder="captchaType === 'image' ? '输入图中字符' : '答案'"
                 class="captcha-input"
                 @keydown.enter="handleSubmitByEnter($event, sendCode)"
               />
@@ -364,6 +390,8 @@ const stopWatch = watch(backendConnected, (connected) => {
               <label for="agree-register" class="agreement-label">
                 我已阅读并同意
                 <span class="agreement-link" @click.prevent="showAgreement = true">《用户使用协议》</span>
+                与
+                <span class="agreement-link" @click.prevent="showPrivacyPolicy = true">《隐私政策》</span>
               </label>
             </div>
             <Button
@@ -386,6 +414,7 @@ const stopWatch = watch(backendConnected, (connected) => {
     </div>
   </Transition>
   <UserAgreement v-model:visible="showAgreement" />
+  <PrivacyPolicy v-model:visible="showPrivacyPolicy" />
 </template>
 
 <style scoped>
@@ -439,11 +468,24 @@ const stopWatch = watch(backendConnected, (connected) => {
 }
 
 .captcha-question {
-  flex: 1;
   font-size: 0.9rem;
   color: rgba(212, 175, 55, 0.85);
   font-weight: 500;
   white-space: nowrap;
+}
+
+.captcha-display {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.captcha-image {
+  height: 42px;
+  max-width: 100%;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .captcha-input {

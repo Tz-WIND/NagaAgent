@@ -69,6 +69,7 @@ const expressionDefs: Map<string, ExpressionDef> = new Map()
 let currentEmotionName: string | null = null
 let emotionCurrentValues: Record<string, number> = {}
 let _emotionFadeStartTime = 0
+let emotionResetTimer: ReturnType<typeof setTimeout> | null = null
 
 // 手动参数覆盖（由 setExpression 驱动，用于开屏闭眼等，优先级最高）
 let expressionTarget: Record<string, number> = {}
@@ -581,6 +582,10 @@ export async function setEmotion(emotion: EmotionCategory) {
 
 /** 清除情绪表情，平滑回归 normal 表情（而非归零，避免看起来像哭脸） */
 export function clearEmotion() {
+  if (emotionResetTimer) {
+    clearTimeout(emotionResetTimer)
+    emotionResetTimer = null
+  }
   if (expressionDefs.has('normal')) {
     currentEmotionName = 'normal'
     _emotionFadeStartTime = performance.now()
@@ -610,6 +615,13 @@ export function triggerAction(name: string) {
       console.log('[Live2D] Action → emotion expression:', name)
       currentEmotionName = name
       _emotionFadeStartTime = performance.now()
+      if (emotionResetTimer) {
+        clearTimeout(emotionResetTimer)
+      }
+      emotionResetTimer = setTimeout(() => {
+        emotionResetTimer = null
+        clearEmotion()
+      }, 5000)
     }
   }
 
@@ -705,6 +717,10 @@ export function destroyController() {
   activeAction = null
   // Emotion 通道
   expressionDefs.clear()
+  if (emotionResetTimer) {
+    clearTimeout(emotionResetTimer)
+    emotionResetTimer = null
+  }
   currentEmotionName = null
   emotionCurrentValues = {}
   _emotionFadeStartTime = 0

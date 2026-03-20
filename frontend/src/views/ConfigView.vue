@@ -14,6 +14,7 @@ import ConfigItem from '@/components/ConfigItem.vue'
 import NotificationSettingsPanel from '@/components/NotificationSettingsPanel.vue'
 import { audioSettings, effectFileOptions, wakeVoiceOptions } from '@/composables/useAudio'
 import { isNagaLoggedIn, nagaUser } from '@/composables/useAuth'
+import { checkForUpdate } from '@/composables/useVersionCheck'
 import { CONFIG, DEFAULT_CONFIG, DEFAULT_MODEL, MODELS, SYSTEM_PROMPT } from '@/utils/config'
 import { trackingCalibration } from '@/utils/live2dController'
 
@@ -127,6 +128,26 @@ async function onAutoLaunchChange(value: boolean) {
   if (isElectron) {
     await window.electronAPI!.autoLaunch.set(value)
     autoLaunchEnabled.value = value
+  }
+}
+
+const checkingUpdate = ref(false)
+
+async function handleCheckUpdate() {
+  if (checkingUpdate.value)
+    return
+  checkingUpdate.value = true
+  try {
+    const hasUpdate = await checkForUpdate()
+    if (!hasUpdate) {
+      toast.add({ severity: 'info', summary: '已是最新版本', detail: `当前版本 v${CONFIG.value.system.version}`, life: 2500 })
+    }
+  }
+  catch {
+    toast.add({ severity: 'error', summary: '检查更新失败', detail: '请稍后重试', life: 3000 })
+  }
+  finally {
+    checkingUpdate.value = false
   }
 }
 
@@ -473,7 +494,7 @@ async function testConnection() {
 
     <!-- 终端 Tab -->
     <div v-show="activeTab === 'terminal'">
-      <Accordion :value="accordionTerminal" class="pb-8" multiple>
+      <Accordion :value="accordionTerminal" class="pb-6" multiple>
         <ConfigGroup value="ui">
           <template #header>
             <div class="w-full flex justify-between items-center -my-1.5">
@@ -623,6 +644,18 @@ async function testConnection() {
           </div>
         </ConfigGroup>
       </Accordion>
+      <div class="terminal-footer">
+        <div class="terminal-footer-version">
+          当前版本 v{{ CONFIG.system.version }}
+        </div>
+        <Button
+          size="small"
+          outlined
+          :loading="checkingUpdate"
+          label="检查更新"
+          @click="handleCheckUpdate"
+        />
+      </div>
     </div>
 
     <div v-show="activeTab === 'notifications'">
@@ -671,5 +704,20 @@ async function testConnection() {
   color: rgba(255, 255, 255, 0.4);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+.terminal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.25rem;
+  padding: 0.9rem 0.25rem 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.terminal-footer-version {
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
 }
 </style>

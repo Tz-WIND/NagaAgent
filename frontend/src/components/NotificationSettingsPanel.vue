@@ -3,9 +3,12 @@ import { Divider, InputText, Select, ToggleSwitch } from 'primevue'
 import Button from 'primevue/button'
 import Dialog from 'primevue/dialog'
 import { computed, ref, watch } from 'vue'
+import { useToast } from 'primevue/usetoast'
+import API from '@/api/core'
 import ConfigItem from '@/components/ConfigItem.vue'
 import { CONFIG } from '@/utils/config'
-import { hasQqEmailVerificationCode, parseQqBindingTarget } from '@/utils/qqNotification'
+import { backendConnected } from '@/utils/config'
+import { parseQqBindingTarget } from '@/utils/qqNotification'
 
 const FEISHU_TARGET_OPTIONS = [
   { label: '发给个人', value: 'open_id' },
@@ -13,6 +16,20 @@ const FEISHU_TARGET_OPTIONS = [
 ]
 
 const activeTutorial = ref<'feishu' | 'qq' | null>(null)
+const toast = useToast()
+const qqSendingVerification = ref(false)
+const qqSubmittingBinding = ref(false)
+const qqVerificationFeedback = ref('')
+const qqTestingNotification = ref(false)
+const qqTestFeedback = ref('')
+const qqCaptchaId = ref('')
+const qqCaptchaQuestion = ref('')
+const qqCaptchaImageData = ref('')
+const qqCaptchaType = ref<'image' | 'math'>('math')
+const qqCaptchaAnswer = ref('')
+const qqCaptchaLoading = ref(false)
+const qqBindingEditorOpened = ref(false)
+const qqVerificationCodeInput = ref('')
 
 const feishuTargetValue = computed({
   get() {
@@ -62,8 +79,11 @@ const qqBindingTarget = computed({
 })
 const qqBinding = computed(() => parseQqBindingTarget(qqBindingTarget.value))
 const qqNumberValid = computed(() => qqBinding.value.isValid)
-const qqVerificationVisible = computed(() => !qqBinding.value.isEmpty)
-const qqVerificationReady = computed(() => hasQqEmailVerificationCode(CONFIG.value.notifications.qq.email_verification_code))
+const qqVerificationVisible = computed(() => qqBindingEditorOpened.value && !qqBinding.value.isEmpty)
+const qqVerificationReady = computed(() => {
+  const qq = CONFIG.value.notifications.qq
+  return qq.binding_verified && qq.binding_verified_email === qqBinding.value.normalizedEmail
+})
 const qqConfigured = computed(() => {
   return CONFIG.value.notifications.qq.enabled && qqNumberValid.value && qqVerificationReady.value
 })
@@ -89,7 +109,7 @@ const qqStatusText = computed(() => {
     return `QQ 绑定目标已识别为 ${qqBinding.value.normalizedQq}，还需要填写 ${qqBinding.value.normalizedEmail} 收到的验证码。`
   }
   if (qqConfigured.value) {
-    return `探索完成后会通过 Undefined QQ机器人在群里 @${qqBinding.value.normalizedQq}。群号由服务器侧绑定关系决定。`
+    return `探索完成后会通过 Undefined QQ机器人在群里 @${qqBinding.value.normalizedQq}。当前已绑定 ${CONFIG.value.notifications.qq.binding_verified_email}。`
   }
   return '填好 QQ 绑定信息后，探索完成会自动走 QQ 机器人回调。'
 })
@@ -114,21 +134,171 @@ watch(qqBinding, (next, prev) => {
   const qq = CONFIG.value.notifications.qq
   qq.user_qq = next.isValid ? next.normalizedQq : ''
   qq.qq_email = next.isValid ? next.normalizedEmail : ''
+  qqCaptchaAnswer.value = ''
 
   if (next.isEmpty) {
-    qq.email_verification_code = ''
+    qqVerificationCodeInput.value = ''
+    qqCaptchaId.value = ''
+    qqCaptchaQuestion.value = ''
+    qqCaptchaImageData.value = ''
+    qqCaptchaType.value = 'math'
     return
   }
 
   if (!next.isValid) {
-    qq.email_verification_code = ''
+    qqVerificationCodeInput.value = ''
+    qqCaptchaId.value = ''
+    qqCaptchaQuestion.value = ''
+    qqCaptchaImageData.value = ''
+    qqCaptchaType.value = 'math'
     return
   }
 
   if (prev && prev.normalizedEmail !== next.normalizedEmail) {
-    qq.email_verification_code = ''
+    qqVerificationCodeInput.value = ''
   }
 }, { immediate: true })
+
+watch([qqVerificationVisible, backendConnected], ([visible, connected]) => {
+  if (visible && connected && !qqCaptchaLoading.value && !qqCaptchaId.value) {
+    void fetchQqCaptcha()
+  }
+}, { immediate: true })
+
+watch([() => CONFIG.value.notifications.qq.enabled, backendConnected], ([enabled, connected]) => {
+  if (enabled && connected) {
+    void refreshQqBindingStatus()
+  }
+}, { immediate: true })
+
+function openQqBindingEditor() {
+  qqBindingEditorOpened.value = true
+}
+
+async function refreshQqBindingStatus() {
+  try {
+    const res = await API.authGetQqEmailBinding()
+    const binding = res.binding
+    CONFIG.value.notifications.qq.binding_verified = !!binding
+    CONFIG.value.notifications.qq.binding_verified_email = binding?.qqEmail || ''
+    if (!qqBindingTarget.value && binding?.qqEmail) {
+      qqBindingTarget.value = binding.qqEmail
+    }
+  }
+  catch {
+    // ignore binding probe failures
+  }
+}
+
+async function fetchQqCaptcha() {
+  qqCaptchaLoading.value = true
+  qqCaptchaId.value = ''
+  qqCaptchaQuestion.value = ''
+  qqCaptchaImageData.value = ''
+  qqCaptchaType.value = 'math'
+  qqCaptchaAnswer.value = ''
+  try {
+    const res = await API.authGetCaptcha('image')
+    qqCaptchaId.value = res.captchaId
+    qqCaptchaQuestion.value = res.question || ''
+    qqCaptchaImageData.value = res.imageData || ''
+    qqCaptchaType.value = res.imageData ? 'image' : 'math'
+  }
+  catch {
+    qqVerificationFeedback.value = '验证码加载失败，请点击刷新后重试'
+  }
+  finally {
+    qqCaptchaLoading.value = false
+  }
+}
+
+async function sendQqVerificationCode() {
+  if (qqSendingVerification.value || !qqBinding.value.isValid)
+    return
+  if (!qqCaptchaId.value) {
+    qqVerificationFeedback.value = '验证码未加载，请刷新后重试'
+    void fetchQqCaptcha()
+    return
+  }
+  if (!qqCaptchaAnswer.value.trim()) {
+    qqVerificationFeedback.value = '请先填写验证码答案'
+    return
+  }
+  qqSendingVerification.value = true
+  qqVerificationFeedback.value = ''
+  try {
+    const res = await API.authSendQqVerification(
+      qqBinding.value.normalizedEmail,
+      qqCaptchaId.value,
+      qqCaptchaAnswer.value.trim(),
+    )
+    qqVerificationFeedback.value = res.message || `验证码已发送到 ${qqBinding.value.normalizedEmail}`
+    toast.add({ severity: 'success', summary: '验证码已发送', detail: qqVerificationFeedback.value, life: 3000 })
+    await fetchQqCaptcha()
+  }
+  catch (e: any) {
+    const detail = e?.response?.data?.detail || e?.response?.data?.message || e?.message || '发送验证码失败'
+    qqVerificationFeedback.value = detail
+    toast.add({ severity: 'error', summary: '发送失败', detail, life: 4000 })
+    await fetchQqCaptcha()
+  }
+  finally {
+    qqSendingVerification.value = false
+  }
+}
+
+async function submitQqEmailBinding() {
+  if (qqSubmittingBinding.value)
+    return
+  if (!qqBinding.value.isValid) {
+    qqVerificationFeedback.value = '请先填写有效的 QQ 号或 QQ 邮箱'
+    return
+  }
+  if (!qqVerificationCodeInput.value.trim()) {
+    qqVerificationFeedback.value = '请先填写邮箱验证码'
+    return
+  }
+  qqSubmittingBinding.value = true
+  try {
+    const res = await API.authBindQqEmail(
+      qqBinding.value.normalizedEmail,
+      qqVerificationCodeInput.value.trim(),
+    )
+    await refreshQqBindingStatus()
+    CONFIG.value.notifications.qq.email_verification_code = ''
+    qqVerificationCodeInput.value = ''
+    qqVerificationFeedback.value = res.message || 'QQ 邮箱绑定成功'
+    toast.add({ severity: 'success', summary: '绑定成功', detail: qqVerificationFeedback.value, life: 2500 })
+  }
+  catch (e: any) {
+    const detail = e?.response?.data?.detail || e?.response?.data?.message || e?.message || '提交失败'
+    qqVerificationFeedback.value = detail
+    toast.add({ severity: 'error', summary: '提交失败', detail, life: 3500 })
+  }
+  finally {
+    qqSubmittingBinding.value = false
+  }
+}
+
+async function sendQqTestNotification() {
+  if (qqTestingNotification.value || !qqBinding.value.isValid)
+    return
+  qqTestingNotification.value = true
+  qqTestFeedback.value = ''
+  try {
+    const res = await API.testQqNotification(qqBinding.value.normalizedQq)
+    qqTestFeedback.value = `测试消息已提交，状态：${res.deliveryStatus}`
+    toast.add({ severity: 'success', summary: '测试已发送', detail: qqTestFeedback.value, life: 3000 })
+  }
+  catch (e: any) {
+    const detail = e?.response?.data?.detail || e?.response?.data?.message || e?.message || 'QQ 通知测试失败'
+    qqTestFeedback.value = detail
+    toast.add({ severity: 'error', summary: '测试失败', detail, life: 4000 })
+  }
+  finally {
+    qqTestingNotification.value = false
+  }
+}
 </script>
 
 <template>
@@ -171,17 +341,95 @@ watch(qqBinding, (next, prev) => {
           </div>
         </ConfigItem>
         <ConfigItem name="你的 QQ 号 / QQ 邮箱" description="支持纯数字 QQ 号或纯数字@qq.com，别名邮箱不支持">
-          <InputText v-model="qqBindingTarget" placeholder="填写纯数字 QQ 号或纯数字@qq.com" />
-        </ConfigItem>
-        <ConfigItem v-if="qqVerificationVisible" name="邮箱验证码" :description="qqVerificationHint">
           <InputText
-            v-model="CONFIG.notifications.qq.email_verification_code"
-            :disabled="!qqNumberValid"
-            placeholder="填写 QQ 邮箱收到的验证码"
+            v-model="qqBindingTarget"
+            placeholder="填写纯数字 QQ 号或纯数字@qq.com"
+            @focus="openQqBindingEditor"
           />
         </ConfigItem>
+        <div v-if="qqVerificationVisible" class="qq-verification-block">
+          <div class="qq-verification-head">
+            <div class="qq-verification-meta">
+              <div class="qq-verification-title">
+                邮箱验证码
+              </div>
+              <div class="qq-verification-desc">
+                {{ qqVerificationHint }}
+              </div>
+            </div>
+            <div class="qq-captcha-row">
+              <div class="notification-captcha-question">
+                <img
+                  v-if="qqCaptchaImageData"
+                  :src="qqCaptchaImageData"
+                  alt="验证码"
+                  class="notification-captcha-image"
+                >
+                <span v-else>{{ qqCaptchaQuestion || (qqCaptchaLoading ? '加载中...' : '点击刷新验证码') }}</span>
+              </div>
+              <InputText
+                v-model="qqCaptchaAnswer"
+                :disabled="!qqNumberValid || qqCaptchaLoading"
+                class="w-28"
+                :placeholder="qqCaptchaType === 'image' ? '输入图中字符' : '答案'"
+              />
+              <Button
+                label="刷新"
+                :disabled="qqCaptchaLoading"
+                size="small"
+                text
+                @click="fetchQqCaptcha"
+              />
+            </div>
+          </div>
+          <div class="qq-submit-row">
+            <InputText
+              v-model="qqVerificationCodeInput"
+              :disabled="!qqNumberValid"
+              class="qq-verification-input"
+              placeholder="填写 QQ 邮箱收到的验证码"
+            />
+            <Button
+              :label="qqSendingVerification ? '发送中...' : '发送验证码'"
+              :disabled="!qqNumberValid || qqSendingVerification"
+              class="qq-send-code-btn"
+              outlined
+              @click="sendQqVerificationCode"
+            />
+            <Button
+              :label="qqSubmittingBinding ? '提交中...' : '提交'"
+              :disabled="!qqNumberValid || qqSubmittingBinding"
+              class="qq-save-code-btn"
+              outlined
+              @click="submitQqEmailBinding"
+            />
+          </div>
+          <div v-if="qqVerificationFeedback" class="text-[11px] text-white/45">
+            {{ qqVerificationFeedback }}
+          </div>
+        </div>
         <div v-if="qqBindingTarget && !qqNumberValid" class="notification-warning">
           {{ qqBinding.errorMessage }}
+        </div>
+        <div v-if="qqNumberValid" class="flex flex-col gap-2 rounded-lg border border-white/8 bg-white/2 p-3">
+          <div class="flex items-center justify-between gap-3">
+            <div class="text-sm text-white/75">
+              测试 QQ 回调
+            </div>
+            <Button
+              :label="qqTestingNotification ? '发送中...' : '测试发送'"
+              :disabled="qqTestingNotification"
+              size="small"
+              outlined
+              @click="sendQqTestNotification"
+            />
+          </div>
+          <div class="text-[11px] text-white/40">
+            直接向 {{ qqBinding.normalizedQq }} 发一条测试消息，用来验证 QQ 机器人回调链路。
+          </div>
+          <div v-if="qqTestFeedback" class="text-[11px] text-white/50">
+            {{ qqTestFeedback }}
+          </div>
         </div>
         <div class="notification-note">
           {{ qqStatusText }}
@@ -425,6 +673,104 @@ watch(qqBinding, (next, prev) => {
   color: rgb(255 255 255 / 0.44);
   font-size: 11px;
   line-height: 1.7;
+}
+
+.qq-verification-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.qq-verification-head {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: center;
+}
+
+.qq-verification-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.qq-verification-title {
+  font-weight: 700;
+}
+
+.qq-verification-desc {
+  font-size: 0.875rem;
+  color: rgb(107 114 128);
+  line-height: 1.5;
+}
+
+.notification-captcha-question {
+  min-height: 2.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-width: 0;
+  border-radius: 10px;
+  border: 1px solid rgb(255 255 255 / 0.08);
+  background: rgb(255 255 255 / 0.04);
+  font-size: 0.85rem;
+  color: rgb(255 255 255 / 0.72);
+  overflow: hidden;
+}
+
+.notification-captcha-image {
+  display: block;
+  width: 100%;
+  max-width: 160px;
+  height: auto;
+  object-fit: contain;
+  border-radius: 6px;
+}
+
+.qq-send-code-btn {
+  width: 96px;
+  white-space: nowrap;
+  flex: 0 0 96px;
+}
+
+.qq-save-code-btn {
+  width: 72px;
+  white-space: nowrap;
+  flex: 0 0 72px;
+}
+
+.qq-verification-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  width: 100%;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.qq-captcha-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px auto;
+  gap: 0.5rem;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+
+.qq-submit-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px 72px;
+  gap: 0.5rem;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+}
+
+.qq-verification-input {
+  flex: 1 1 0;
+  min-width: 0;
+  width: auto;
 }
 
 .tutorial-content {

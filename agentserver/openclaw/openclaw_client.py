@@ -751,13 +751,18 @@ class OpenClawClient:
             pass
         return replies
 
-    @staticmethod
-    def _openclaw_home() -> Path:
-        return get_openclaw_state_dir()
+    def _local_sessions_dir(self) -> Path:
+        session_file = getattr(self, "_SESSION_FILE", None)
+        if isinstance(session_file, Path):
+            session_root = session_file.parent
+            state_root = session_root / "state"
+            sessions_dir = state_root / "agents" / "main" / "sessions"
+            if sessions_dir.exists():
+                return sessions_dir
+        return get_openclaw_state_dir() / "agents" / "main" / "sessions"
 
-    @classmethod
-    def _resolve_local_session_file(cls, session_key: str) -> Optional[Path]:
-        sessions_dir = cls._openclaw_home() / "agents" / "main" / "sessions"
+    def _resolve_local_session_file(self, session_key: str) -> Optional[Path]:
+        sessions_dir = self._local_sessions_dir()
         sessions_index = sessions_dir / "sessions.json"
         if not sessions_index.exists():
             return None
@@ -871,6 +876,7 @@ class OpenClawClient:
         raw_content = message.get("content", "")
         text_parts: List[str] = []
         tool_events: List[Dict[str, Any]] = []
+        usage = message.get("usage")
 
         if isinstance(raw_content, str):
             if raw_content.strip():
@@ -913,13 +919,25 @@ class OpenClawClient:
 
         role_key = role.lower().replace("-", "_")
         if role_key in {"toolresult", "tool_result"}:
+            details = message.get("details")
+            text_payload = "\n".join(part for part in text_parts if part).strip()
+            if isinstance(details, dict):
+                result_payload: Any = {"details": details}
+                if text_payload:
+                    result_payload["content"] = text_payload
+            else:
+                result_payload = cls._stringify_tool_payload(text_payload)
             tool_events.append(
                 {
                     "type": "tool_result",
                     "name": message.get("toolName") or message.get("tool_name") or "",
                     "toolCallId": message.get("toolCallId") or message.get("tool_call_id") or "",
-                    "isError": bool(message.get("isError", False) or message.get("is_error", False)),
-                    "result": cls._stringify_tool_payload("\n".join(part for part in text_parts if part).strip()),
+                    "isError": bool(
+                        message.get("isError", False)
+                        or message.get("is_error", False)
+                        or (isinstance(details, dict) and str(details.get("status", "")).strip().lower() == "error")
+                    ),
+                    "result": result_payload,
                 }
             )
             text_parts = []
@@ -928,6 +946,7 @@ class OpenClawClient:
             "role": role,
             "content": "\n\n".join(part for part in text_parts if part).strip(),
             "toolEvents": tool_events,
+            "usage": usage if isinstance(usage, dict) else None,
         }
 
     @classmethod
@@ -951,12 +970,26 @@ class OpenClawClient:
             if role_key == "user":
                 current_assistant = None
                 if content:
-                    normalized.append({"role": "user", "content": content, "type": "message", "toolEvents": []})
+                    normalized.append(
+                        {
+                            "role": "user",
+                            "content": content,
+                            "type": "message",
+                            "toolEvents": [],
+                            "usage": extracted.get("usage"),
+                        }
+                    )
                 continue
 
             if role_key in {"assistant", "toolresult", "tool_result"}:
                 if current_assistant is None:
-                    current_assistant = {"role": "assistant", "content": "", "type": "message", "toolEvents": []}
+                    current_assistant = {
+                        "role": "assistant",
+                        "content": "",
+                        "type": "message",
+                        "toolEvents": [],
+                        "usage": extracted.get("usage"),
+                    }
                     normalized.append(current_assistant)
 
                 if content:
@@ -967,6 +1000,8 @@ class OpenClawClient:
                     )
                 if isinstance(tool_events, list) and tool_events:
                     current_assistant["toolEvents"].extend(tool_events)
+                if extracted.get("usage") and not current_assistant.get("usage"):
+                    current_assistant["usage"] = extracted.get("usage")
                 continue
 
         cleaned: List[Dict[str, Any]] = []
@@ -979,9 +1014,8 @@ class OpenClawClient:
             cleaned.append(message)
         return cleaned
 
-    @classmethod
-    def _read_local_session_messages(cls, session_key: str) -> List[Dict[str, Any]]:
-        session_file = cls._resolve_local_session_file(session_key)
+    def _read_local_session_messages(self, session_key: str) -> List[Dict[str, Any]]:
+        session_file = self._resolve_local_session_file(session_key)
         if not session_file:
             return []
 
@@ -1000,12 +1034,76 @@ class OpenClawClient:
         except Exception as e:
             logger.warning(f"[OpenClaw] 读取本地会话历史失败: {e}")
             return []
-        return cls._normalize_history_messages(raw_messages)
+        return self._normalize_history_messages(raw_messages)
 
-    @classmethod
-    def _extract_local_assistant_replies(cls, session_key: str) -> List[str]:
+    def _read_local_session_transcript(self, session_key: str) -> List[Dict[str, Any]]:
+        sessions_dir = self._local_sessions_dir()
+        candidate_keys = [session_key.strip()]
+        if candidate_keys[0] and not candidate_keys[0].startswith("agent:main:"):
+            candidate_keys.append(f"agent:main:{candidate_keys[0]}")
+        candidate_keys = [key for key in candidate_keys if key]
+
+        candidate_files: List[Path] = []
+        primary_file = self._resolve_local_session_file(session_key)
+        if primary_file and primary_file.exists():
+            candidate_files.append(primary_file)
+
+        try:
+            for session_file in sessions_dir.glob("*.jsonl"):
+                if session_file in candidate_files:
+                    continue
+                try:
+                    text = session_file.read_text(encoding="utf-8", errors="ignore")
+                except Exception:
+                    continue
+                if any(key in text for key in candidate_keys):
+                    candidate_files.append(session_file)
+        except Exception as e:
+            logger.warning(f"[OpenClaw] 扫描本地 transcript 片段失败: {e}")
+
+        transcript_entries: List[Dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        try:
+            for session_file in candidate_files:
+                for line_no, raw_line in enumerate(
+                    session_file.read_text(encoding="utf-8", errors="ignore").splitlines(),
+                    start=1,
+                ):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    entry = json.loads(line)
+                    entry_id = str(entry.get("id") or "").strip()
+                    dedupe_key = f"{session_file.name}:{entry_id or line_no}"
+                    if dedupe_key in seen_keys:
+                        continue
+                    seen_keys.add(dedupe_key)
+                    transcript_entries.append(
+                        {
+                            "entryType": entry.get("type"),
+                            "id": entry.get("id"),
+                            "parentId": entry.get("parentId"),
+                            "timestamp": entry.get("timestamp"),
+                            "sourceFile": session_file.name,
+                            "message": entry.get("message"),
+                            "raw": entry,
+                        }
+                    )
+        except Exception as e:
+            logger.warning(f"[OpenClaw] 读取本地 transcript 失败: {e}")
+            return []
+
+        def _sort_key(item: Dict[str, Any]) -> tuple[str, str]:
+            timestamp = str(item.get("timestamp") or "")
+            source_file = str(item.get("sourceFile") or "")
+            return (timestamp, source_file)
+
+        transcript_entries.sort(key=_sort_key)
+        return transcript_entries
+
+    def _extract_local_assistant_replies(self, session_key: str) -> List[str]:
         replies: List[str] = []
-        for message in cls._read_local_session_messages(session_key):
+        for message in self._read_local_session_messages(session_key):
             if message.get("role") != "assistant":
                 continue
             text = str(message.get("content") or "").strip()
@@ -1160,7 +1258,8 @@ class OpenClawClient:
             limit: 返回消息条数限制
 
         Returns:
-            包含历史消息的结果
+            包含历史消息的结果。此函数只负责调用 OpenClaw 的 sessions_history 工具，
+            不再隐式回退到本地 transcript。
         """
         # 如果没有指定 session_key，尝试回退到默认会话
         actual_session_key = session_key or self._default_session_key
@@ -1181,33 +1280,49 @@ class OpenClawClient:
                 # 解析返回的消息
                 raw_result = result.get("result", {})
                 messages = self._parse_history_messages(raw_result)
-                if not messages:
-                    messages = self._read_local_session_messages(actual_session_key)
                 return {"success": True, "session_key": actual_session_key, "messages": messages, "raw": raw_result}
             else:
-                fallback_messages = self._read_local_session_messages(actual_session_key)
-                if fallback_messages:
-                    return {
-                        "success": True,
-                        "session_key": actual_session_key,
-                        "messages": fallback_messages,
-                        "raw": {},
-                        "note": "local_session_fallback",
-                    }
                 return {"success": False, "error": result.get("error", "unknown"), "messages": []}
 
         except Exception as e:
             logger.error(f"[OpenClaw] 获取会话历史失败: {e}")
-            fallback_messages = self._read_local_session_messages(actual_session_key)
-            if fallback_messages:
-                return {
-                    "success": True,
-                    "session_key": actual_session_key,
-                    "messages": fallback_messages,
-                    "raw": {},
-                    "note": "local_session_fallback_after_exception",
-                }
             return {"success": False, "error": str(e), "messages": []}
+
+    async def get_local_session_history(
+        self,
+        session_key: Optional[str] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        从本地 transcript 明确读取会话历史。
+
+        此函数只负责读取本地文件，不调用 OpenClaw tools。
+        """
+        actual_session_key = session_key or self._default_session_key
+        if not actual_session_key:
+            return {"success": True, "messages": [], "note": "no_session_key_available"}
+
+        messages = self._read_local_session_messages(actual_session_key)
+        if limit > 0:
+            messages = messages[-limit:]
+        return {"success": True, "session_key": actual_session_key, "messages": messages}
+
+    async def get_local_session_transcript(
+        self,
+        session_key: Optional[str] = None,
+        limit: int = 120,
+    ) -> Dict[str, Any]:
+        """
+        从本地 transcript 明确读取原始会话记录（不做 assistant/toolResult 合并）。
+        """
+        actual_session_key = session_key or self._default_session_key
+        if not actual_session_key:
+            return {"success": True, "messages": [], "note": "no_session_key_available"}
+
+        messages = self._read_local_session_transcript(actual_session_key)
+        if limit > 0:
+            messages = messages[-limit:]
+        return {"success": True, "session_key": actual_session_key, "messages": messages}
 
     def _parse_history_messages(self, raw_result: Dict[str, Any]) -> List[Dict[str, Any]]:
         """

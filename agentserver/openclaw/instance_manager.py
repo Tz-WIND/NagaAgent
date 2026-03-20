@@ -12,7 +12,7 @@ OpenClaw 多实例管理器 — 通讯录模式
   - 关闭 Naga → 杀所有进程
 
 端口映射：
-  通讯录干员统一使用 20790+ 独立 Gateway 进程
+  通讯录干员使用稀疏端口块分配独立 Gateway 进程
   20789 主 Gateway 保留给全局 OpenClaw（探索/旅行等链路）
 """
 
@@ -28,16 +28,22 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .embedded_runtime import EmbeddedRuntime
 from .openclaw_client import OpenClawClient, OpenClawConfig
+from .ws_client import OpenClawWSClient
 
 logger = logging.getLogger("openclaw.instance_manager")
 
 MAX_INSTANCES = 100
-PORT_RANGE_START = 20789
-PORT_RANGE_END = 20889  # exclusive
+PRIMARY_GATEWAY_PORT = 20789
+LEGACY_AGENT_PORT_RANGE_START = 20790
+LEGACY_AGENT_PORT_RANGE_END = 20889  # exclusive
+AGENT_BASE_PORT = 20920
+AGENT_PORT_STRIDE = 128
+PORT_RANGE_START = PRIMARY_GATEWAY_PORT
+PORT_RANGE_END = AGENT_BASE_PORT + (AGENT_PORT_STRIDE * MAX_INSTANCES)  # exclusive
 
 # ── 通讯录目录 ──
 
@@ -151,11 +157,33 @@ def _get_agent_session_file(agent_id: str) -> Path:
     return _get_agent_openclaw_dir(agent_id) / "openclaw_session.json"
 
 
+def _get_agent_travel_report_sync_path(agent_id: str) -> Path:
+    return _get_agent_openclaw_dir(agent_id) / "travel_report_sync.json"
+
+
+def _get_agent_state_dir(agent_id: str) -> Path:
+    return _get_agent_openclaw_dir(agent_id) / "state"
+
+
+def _get_agent_config_path(agent_id: str) -> Path:
+    return _get_agent_state_dir(agent_id) / "openclaw.json"
+
+
+def _get_agent_auth_profiles_path(agent_id: str) -> Path:
+    return _get_agent_config_path(agent_id).parent / "agents" / "main" / "agent" / "auth-profiles.json"
+
+
 def _build_agent_env(agent_id: str) -> Dict[str, str]:
     agent_runtime_dir = _get_agent_runtime_dir(agent_id)
+    agent_state_dir = _get_agent_state_dir(agent_id)
+    agent_config_path = _get_agent_config_path(agent_id)
+    agent_state_dir.mkdir(parents=True, exist_ok=True)
+    agent_config_path.parent.mkdir(parents=True, exist_ok=True)
     return {
         "OPENCLAW_AGENT_DIR": str(agent_runtime_dir),
         "PI_CODING_AGENT_DIR": str(agent_runtime_dir),
+        "OPENCLAW_STATE_DIR": str(agent_state_dir),
+        "OPENCLAW_CONFIG_PATH": str(agent_config_path),
     }
 
 
@@ -272,8 +300,19 @@ class AgentInstance:
 
 def cleanup_port_range(start: int = PORT_RANGE_START, end: int = PORT_RANGE_END) -> int:
     """启动时清理端口范围内的残留进程。返回清理的数量。"""
+    def _default_cleanup_ports():
+        yield PRIMARY_GATEWAY_PORT
+        for port in range(LEGACY_AGENT_PORT_RANGE_START, LEGACY_AGENT_PORT_RANGE_END):
+            yield port
+        for port in range(AGENT_BASE_PORT, PORT_RANGE_END, AGENT_PORT_STRIDE):
+            yield port
+
     killed = 0
-    for port in range(start, end):
+    if start == PORT_RANGE_START and end == PORT_RANGE_END:
+        ports = _default_cleanup_ports()
+    else:
+        ports = range(start, end)
+    for port in ports:
         killed += _kill_stale_on_port(port)
     if killed:
         logger.info(f"端口清理完成，共清理 {killed} 个残留进程")
@@ -318,8 +357,9 @@ class InstanceManager:
         self._runtime = runtime
         self._primary_client = primary_client
         self._instances: Dict[str, AgentInstance] = {}
+        self._agent_locks: Dict[str, asyncio.Lock] = {}
         self._port_pool: List[int] = []
-        self._base_port: int = 20790
+        self._base_port: int = AGENT_BASE_PORT
         self._next_port: int = self._base_port
         self._agent_counter: int = 0
 
@@ -334,7 +374,7 @@ class InstanceManager:
                 if self._next_port >= PORT_RANGE_END:
                     raise RuntimeError("OpenClaw 端口池已耗尽")
                 port = self._next_port
-                self._next_port += 1
+                self._next_port += AGENT_PORT_STRIDE
 
             if any(inst.running and inst.port == port for inst in self._instances.values()):
                 continue
@@ -372,10 +412,33 @@ class InstanceManager:
         except Exception:
             return None, None, "/hooks"
 
+    def _get_instance_auth_snapshot(self, inst: AgentInstance):
+        if inst.primary:
+            return self._get_auth_snapshot()
+
+        try:
+            config_path = _get_agent_config_path(inst.id)
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
+            hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+
+            gateway_auth = gateway.get("auth") if isinstance(gateway.get("auth"), dict) else {}
+            gateway_token = gateway_auth.get("token") if isinstance(gateway_auth.get("token"), str) else None
+            hooks_token = hooks.get("token") if isinstance(hooks.get("token"), str) else None
+            hooks_path = hooks.get("path") if isinstance(hooks.get("path"), str) else "/hooks"
+            hooks_path = hooks_path.strip() or "/hooks"
+            if not hooks_path.startswith("/"):
+                hooks_path = f"/{hooks_path}"
+            hooks_path = hooks_path.rstrip("/") or "/hooks"
+            return gateway_token, hooks_token, hooks_path
+        except Exception as exc:
+            logger.warning(f"[{inst.name}] 读取实例认证快照失败，回退到全局快照: {exc}")
+            return self._get_auth_snapshot()
+
     def _refresh_client_auth(self, inst: AgentInstance) -> None:
         if not inst.client:
             return
-        gateway_token, hooks_token, hooks_path = self._get_auth_snapshot()
+        gateway_token, hooks_token, hooks_path = self._get_instance_auth_snapshot(inst)
         inst.client.config.gateway_token = gateway_token
         inst.client.config.hooks_token = hooks_token
         if hooks_path:
@@ -386,7 +449,154 @@ class InstanceManager:
             from system.config import config as _cfg
             return _cfg.openclaw.gateway_port
         except Exception:
-            return 20789
+            return PRIMARY_GATEWAY_PORT
+
+    def _sync_agent_gateway_config(self, inst: AgentInstance, port: int) -> None:
+        try:
+            from .llm_config_bridge import (
+                ensure_gateway_local_mode,
+                ensure_gateway_port,
+                ensure_hooks_allow_request_session_key,
+                ensure_hooks_path,
+                ensure_openclaw_config,
+                inject_naga_llm_config,
+            )
+            from .state_paths import get_openclaw_config_path
+
+            ensure_openclaw_config()
+            ensure_gateway_local_mode(auto_create=False)
+            ensure_hooks_path(auto_create=False)
+            ensure_hooks_allow_request_session_key(auto_create=False)
+            ensure_gateway_port(auto_create=False)
+            inject_naga_llm_config()
+
+            source_config_path = get_openclaw_config_path()
+            if not source_config_path.exists():
+                raise RuntimeError("主 OpenClaw 配置不存在")
+
+            config_data = json.loads(source_config_path.read_text(encoding="utf-8"))
+            gateway = config_data.setdefault("gateway", {})
+            gateway["mode"] = "local"
+            gateway["port"] = port
+            gateway["bind"] = "loopback"
+
+            hooks = config_data.setdefault("hooks", {})
+            hooks["enabled"] = True
+            hooks["path"] = "/hooks"
+            hooks["allowRequestSessionKey"] = True
+
+            browser = config_data.setdefault("browser", {})
+            browser.pop("profiles", None)
+            browser.pop("cdpUrl", None)
+            browser["cdpPortRangeStart"] = port + 11
+
+            agents = config_data.setdefault("agents", {})
+            defaults = agents.setdefault("defaults", {})
+            defaults["workspace"] = str(get_agent_dir(inst.id))
+
+            target_config_path = _get_agent_config_path(inst.id)
+            target_config_path.parent.mkdir(parents=True, exist_ok=True)
+            target_config_path.write_text(
+                json.dumps(config_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            source_auth_profiles = source_config_path.parent / "agents" / "main" / "agent" / "auth-profiles.json"
+            target_auth_profiles = _get_agent_auth_profiles_path(inst.id)
+            if source_auth_profiles.exists():
+                target_auth_profiles.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_auth_profiles, target_auth_profiles)
+        except Exception as exc:
+            raise RuntimeError(f"同步干员 OpenClaw 配置失败: {exc}") from exc
+
+    def _get_agent_lock(self, agent_id: str) -> asyncio.Lock:
+        lock = self._agent_locks.get(agent_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._agent_locks[agent_id] = lock
+        return lock
+
+    def _set_agent_browser_visibility(self, agent_id: str, visible: bool) -> bool:
+        agent_id = str(agent_id)
+        inst = self._instances.get(agent_id)
+        if inst is None:
+            raise RuntimeError(f"干员 {agent_id} 不存在")
+        target_config_path = _get_agent_config_path(agent_id)
+        if not target_config_path.exists():
+            self._ensure_gateway_config()
+            self._sync_agent_gateway_config(inst, inst.port if inst.port > 0 else self._base_port)
+        config_data = json.loads(target_config_path.read_text(encoding="utf-8"))
+        browser = config_data.setdefault("browser", {})
+        next_headless = not visible
+        changed = browser.get("headless") != next_headless
+        browser["headless"] = next_headless
+        target_config_path.write_text(
+            json.dumps(config_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        return changed
+
+    async def update_browser_preferences(
+        self,
+        agent_id: str,
+        *,
+        visible: Optional[bool] = None,
+        stop_browser_if_changed: bool = True,
+    ) -> dict:
+        lock = self._get_agent_lock(agent_id)
+        async with lock:
+            inst = self._instances.get(agent_id)
+            if inst is None:
+                raise RuntimeError(f"干员 {agent_id} 不存在")
+
+            visibility_changed = False
+            if visible is not None:
+                visibility_changed = self._set_agent_browser_visibility(agent_id, bool(visible))
+
+            browser_stopped = False
+            if visibility_changed and stop_browser_if_changed and inst.client is not None:
+                try:
+                    await inst.client.invoke_tool(
+                        tool="browser",
+                        args={"action": "stop"},
+                    )
+                    browser_stopped = True
+                except Exception as exc:
+                    logger.warning(f"[{inst.name}] 变更浏览器可见性后停止旧浏览器失败: {exc}")
+
+            return {
+                "id": inst.id,
+                "name": inst.name,
+                "browser_visible": None if visible is None else bool(visible),
+                "visibility_changed": visibility_changed,
+                "browser_stopped": browser_stopped,
+            }
+
+    async def _prepare_instance_for_request(self, inst: AgentInstance) -> AgentInstance:
+        if not inst.client:
+            raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
+        self._refresh_client_auth(inst)
+
+        if not inst.primary and inst.process is not None and inst.process.returncode is not None:
+            raise RuntimeError(f"干员 [{inst.name}] 进程已退出")
+
+        if not self._check_port(inst.port):
+            logger.info(f"[{inst.name}] 端口 {inst.port} 不可达，重新启动...")
+            started = await self._try_start_gateway(inst)
+            if not started:
+                raise RuntimeError(f"Gateway 端口 {inst.port} 正在启动中")
+        return inst
+
+    async def run_serialized(
+        self,
+        instance_id: str,
+        worker: Callable[[AgentInstance], Awaitable[Any]],
+    ):
+        lock = self._get_agent_lock(instance_id)
+        async with lock:
+            inst = await self.ensure_running(instance_id)
+            inst = await self._prepare_instance_for_request(inst)
+            return await worker(inst)
 
     # ── 通讯录操作（不启动进程） ──
 
@@ -469,6 +679,7 @@ class InstanceManager:
 
         self._save_to_manifest()
         logger.info(f"干员 [{inst.name}] 已销毁 delete_data={delete_data}")
+        self._agent_locks.pop(agent_id, None)
 
     def rename_agent(self, agent_id: str, new_name: str) -> bool:
         """重命名干员（只改 manifest，目录用 UUID 不变）。"""
@@ -632,6 +843,7 @@ class InstanceManager:
                 raise RuntimeError(f"端口 {port} 已被其他进程持续占用")
 
         self._ensure_gateway_config()
+        self._sync_agent_gateway_config(inst, port)
         process = await self._runtime.start_gateway_on_port(
             port,
             extra_env=_build_agent_env(inst.id),
@@ -640,7 +852,7 @@ class InstanceManager:
             self._release_port(port)
             raise RuntimeError(f"无法在端口 {port} 启动 Gateway 进程")
 
-        gateway_token, hooks_token, hooks_path = self._get_auth_snapshot()
+        gateway_token, hooks_token, hooks_path = self._get_instance_auth_snapshot(inst)
         gw_url = f"http://127.0.0.1:{port}"
         client = OpenClawClient(OpenClawConfig(
             gateway_url=gw_url,
@@ -787,58 +999,42 @@ class InstanceManager:
     ) -> dict:
         """通过指定实例发送消息。自动 ensure_running。"""
         try:
-            inst = await self.ensure_running(instance_id)
-        except RuntimeError as e:
-            return {"success": False, "error": str(e)}
+            async def _worker(inst: AgentInstance):
+                if not inst.client:
+                    raise RuntimeError(f"干员 [{inst.name}] 客户端未就绪")
 
-        if not inst.client:
-            return {"success": False, "error": f"干员 [{inst.name}] 客户端未就绪"}
-        self._refresh_client_auth(inst)
-
-        # 非主实例检查进程存活
-        if not inst.primary and inst.process is not None and inst.process.returncode is not None:
-            return {"success": False, "error": f"干员 [{inst.name}] 进程已退出"}
-
-        logger.info(
-            f"发送消息到 [{inst.name}] port={inst.port} primary={inst.primary} "
-            f"gateway_url={inst.client.config.gateway_url} msg={message[:50]}..."
-        )
-
-        # 端口不可达 → 尝试重启
-        if not self._check_port(inst.port):
-            logger.info(f"[{inst.name}] 端口 {inst.port} 不可达，重新启动...")
-            started = await self._try_start_gateway(inst)
-            if not started:
+                logger.info(
+                    f"发送消息到 [{inst.name}] port={inst.port} primary={inst.primary} "
+                    f"gateway_url={inst.client.config.gateway_url} msg={message[:50]}..."
+                )
+                agent_workspace = str(_get_agents_dir() / instance_id)
+                task = await inst.client.send_message(
+                    message=message,
+                    session_key=session_key,
+                    workspace=agent_workspace,
+                    name=name,
+                    wake_mode="now",
+                    deliver=False,
+                    timeout_seconds=timeout,
+                )
                 return {
-                    "success": False,
-                    "retry": True,
-                    "error": f"Gateway 端口 {inst.port} 正在启动中",
+                    "success": task.status.value != "failed",
+                    "reply": task.result.get("reply") if task.result else None,
+                    "replies": task.result.get("replies") if task.result else None,
+                    "error": task.error,
                 }
 
-        try:
-            agent_workspace = str(_get_agents_dir() / instance_id)
-            task = await inst.client.send_message(
-                message=message,
-                session_key=session_key,
-                workspace=agent_workspace,
-                name=name,
-                wake_mode="now",
-                deliver=False,
-                timeout_seconds=timeout,
-            )
-            return {
-                "success": task.status.value != "failed",
-                "reply": task.result.get("reply") if task.result else None,
-                "replies": task.result.get("replies") if task.result else None,
-                "error": task.error,
-            }
+            return await self.run_serialized(instance_id, _worker)
+        except RuntimeError as e:
+            return {"success": False, "retry": "正在启动中" in str(e), "error": str(e)}
         except Exception as e:
-            logger.error(f"发送消息到 [{inst.name}] 失败: {e}")
+            logger.error(f"发送消息到干员 [{instance_id}] 失败: {e}")
             return {"success": False, "error": str(e)}
 
     async def _try_start_gateway(self, inst: AgentInstance) -> bool:
         self._ensure_gateway_config()
         _ensure_agent_runtime_dir(inst.id)
+        self._sync_agent_gateway_config(inst, inst.port)
         try:
             _kill_stale_on_port(inst.port)
             await asyncio.sleep(0.5)
@@ -1034,98 +1230,253 @@ class InstanceManager:
                 yield {"type": "error", "text": "流结束但无回复"}
 
     async def send_message_stream(self, instance_id: str, message: str, timeout: int = 120):
-        """流式发送消息。自动 ensure_running + 自动检测并执行 skill。"""
-        import httpx
+        """流式发送消息。使用 Gateway chat.send 正常聊天通道，不走 hooks/agent。"""
+
+        def _extract_chat_text(msg: Any) -> str:
+            if isinstance(msg, dict):
+                content = msg.get("content")
+            else:
+                content = None
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts: List[str] = []
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("type") == "text" and isinstance(item.get("text"), str):
+                        text = item["text"].strip()
+                        if text:
+                            parts.append(text)
+                return "\n".join(parts).strip()
+            return ""
+
+        async def _sync_latest_travel_report_if_needed(
+            *,
+            inst: AgentInstance,
+            ws_client: OpenClawWSClient,
+            session_key: str,
+        ) -> None:
+            from apiserver.travel_service import TravelStatus, list_sessions
+
+            completed_sessions = list_sessions(
+                agent_id=inst.id,
+                statuses={TravelStatus.COMPLETED},
+            )
+            latest_report = next(
+                (
+                    session for session in completed_sessions
+                    if (session.summary_report_path or "").strip() or (session.summary or "").strip()
+                ),
+                None,
+            )
+            if latest_report is None:
+                return
+
+            report_title = (latest_report.summary_report_title or "").strip() or "最近一次探索报告"
+            report_path = (latest_report.summary_report_path or "").strip()
+            report_body = ""
+            if report_path:
+                try:
+                    report_body = Path(report_path).read_text(encoding="utf-8")
+                except Exception as exc:
+                    logger.warning(f"[{inst.name}] 读取探索报告文件失败: {exc}")
+            if not report_body:
+                report_body = (latest_report.summary or "").strip()
+            report_body = report_body.strip()
+            if not report_body:
+                return
+
+            transcript_path = None
+            if inst.client:
+                try:
+                    transcript_path = inst.client._resolve_local_session_file(session_key)
+                except Exception:
+                    transcript_path = None
+
+            sync_path = _get_agent_travel_report_sync_path(inst.id)
+            sync_state: Dict[str, Any] = {}
+            try:
+                if sync_path.exists():
+                    sync_state = json.loads(sync_path.read_text(encoding="utf-8"))
+            except Exception:
+                sync_state = {}
+
+            current_sync_key = {
+                "travel_session_id": latest_report.session_id,
+                "report_path": report_path or None,
+                "session_key": session_key,
+                "transcript_path": str(transcript_path) if transcript_path else None,
+            }
+            if all(sync_state.get(k) == v for k, v in current_sync_key.items()):
+                return
+
+            if len(report_body) > 12000:
+                report_body = f"{report_body[:12000]}\n\n...后续内容已截断。"
+
+            report_path_line = f"报告文件：{report_path}\n" if report_path else ""
+            injected_message = (
+                f"以下是你最近一次已完成探索的成果报告，请在后续对话中视为可用上下文。\n\n"
+                f"报告标题：{report_title}\n"
+                f"探索会话：{latest_report.session_id}\n"
+                f"{report_path_line}"
+                f"\n{report_body}"
+            )
+            await ws_client.chat_inject(
+                session_key=session_key,
+                message=injected_message,
+                label="travel-report-sync",
+            )
+            sync_path.parent.mkdir(parents=True, exist_ok=True)
+            sync_path.write_text(
+                json.dumps(current_sync_key, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         inst = self._instances.get(instance_id)
         if inst is None:
             yield {"type": "error", "text": f"干员 {instance_id} 不存在"}
             return
 
-        # 确保进程在运行
-        if not inst.running or not inst.client:
-            yield {"type": "status", "text": "干员苏醒中"}
+        lock = self._get_agent_lock(instance_id)
+        await lock.acquire()
+        try:
+            if not inst.running or not inst.client:
+                yield {"type": "status", "text": "干员苏醒中"}
             try:
                 inst = await self.ensure_running(instance_id)
+                inst = await self._prepare_instance_for_request(inst)
             except Exception as e:
                 yield {"type": "error", "text": f"启动失败: {e}"}
                 return
 
-        logger.info(f"[stream] [{inst.name}] 开始: {message[:50]}...")
+            logger.info(f"[stream] [{inst.name}] 开始: {message[:50]}...")
+            yield {"type": "status", "text": "思考中"}
 
-        if not inst.primary and inst.process is not None and inst.process.returncode is not None:
-            yield {"type": "error", "text": f"干员 [{inst.name}] 进程已退出"}
-            return
-
-        # 端口不可达 → 启动 Gateway
-        if not self._check_port(inst.port):
-            yield {"type": "status", "text": "干员苏醒中"}
-            started = await self._try_start_gateway(inst)
-            if not started:
-                yield {"type": "error", "text": f"Gateway 端口 {inst.port} 启动失败"}
+            client = inst.client
+            if not client:
+                yield {"type": "error", "text": f"干员 [{inst.name}] 客户端未就绪"}
                 return
+            session_key = client._default_session_key
+            if not session_key:
+                session_key = f"agent:main:{instance_id}"
+                client._default_session_key = session_key
 
-        yield {"type": "status", "text": "思考中"}
+            logger.info(f"[stream] [{inst.name}] chat.send → {client.config.gateway_url} session={session_key}")
+            try:
+                event_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
 
-        client = inst.client
-        self._refresh_client_auth(inst)
-        session_key = client._default_session_key
-        if not session_key:
-            session_key = f"agent:main:{instance_id}"
-            client._default_session_key = session_key
+                async def _on_event(frame: Dict[str, Any]) -> None:
+                    await event_queue.put(frame)
 
-        stream_url = f"{client.config.gateway_url}{client.config.hooks_path}/agent/stream"
-        headers = client.config.get_hooks_headers()
-        # 传递干员独立 workspace 目录，OpenClaw 将用它加载 AGENTS.md/SOUL.md 等
-        agent_workspace = str(_get_agents_dir() / instance_id)
-        payload = {
-            "message": message,
-            "sessionKey": session_key,
-            "wakeMode": "now",
-            "deliver": False,
-            "timeoutSeconds": 0,
-            "workspace": agent_workspace,
-        }
+                ws_client = OpenClawWSClient(
+                    gateway_url=client.config.gateway_url,
+                    token=client.config.gateway_token,
+                    on_event=_on_event,
+                )
+                if not await ws_client.connect():
+                    yield {"type": "error", "text": "连接干员聊天通道失败"}
+                    return
 
-        logger.info(f"[stream] [{inst.name}] SSE → {stream_url} (使用 OpenClaw 原生工具)")
+                try:
+                    await _sync_latest_travel_report_if_needed(
+                        inst=inst,
+                        ws_client=ws_client,
+                        session_key=session_key,
+                    )
+                    ack = await ws_client.chat_send(
+                        message=message,
+                        session_key=session_key,
+                        timeout_ms=timeout * 1000,
+                    )
+                    run_id = str(ack.get("runId") or "").strip()
+                    if not run_id:
+                        yield {"type": "error", "text": "聊天通道未返回 runId"}
+                        return
 
-        try:
-            async with httpx.AsyncClient() as http:
-                retry_on_unauthorized = True
-                while True:
-                    should_retry = False
-                    async for event in self._do_single_stream(
-                        http, stream_url, headers, payload, timeout, inst.name
-                    ):
-                        if (
-                            retry_on_unauthorized
-                            and event.get("type") == "error"
-                            and int(event.get("statusCode") or 0) == 401
-                        ):
-                            retry_on_unauthorized = False
-                            should_retry = True
-                            logger.warning(f"[stream] [{inst.name}] 收到 401，刷新鉴权并重试一次")
-                            yield {"type": "status", "text": "重新连接干员中"}
-                            self._refresh_client_auth(inst)
-                            restarted = await self._try_start_gateway(inst)
-                            if not restarted:
-                                yield event
+                    last_content = ""
+                    while True:
+                        frame = await asyncio.wait_for(event_queue.get(), timeout=timeout + 30)
+                        if frame.get("type") != "event":
+                            continue
+
+                        event_name = str(frame.get("event") or "").strip()
+                        payload = frame.get("payload") if isinstance(frame.get("payload"), dict) else {}
+
+                        if event_name == "chat":
+                            if str(payload.get("runId") or "").strip() != run_id:
+                                continue
+                            if str(payload.get("sessionKey") or "").strip() != session_key:
+                                continue
+
+                            state = str(payload.get("state") or "").strip()
+                            if state == "delta":
+                                merged = _extract_chat_text(payload.get("message"))
+                                if merged:
+                                    delta = merged[len(last_content):] if merged.startswith(last_content) else merged
+                                    last_content = merged
+                                    if delta:
+                                        yield {"type": "content", "text": delta}
+                                continue
+
+                            if state == "final":
+                                final_text = _extract_chat_text(payload.get("message")) or last_content
+                                yield {"type": "done", "text": final_text}
                                 return
-                            client = inst.client
-                            headers = client.config.get_hooks_headers()
-                            stream_url = f"{client.config.gateway_url}{client.config.hooks_path}/agent/stream"
-                            break
-                        yield event
-                    if should_retry:
-                        continue
-                    break
 
-        except httpx.TimeoutException:
-            logger.warning(f"[stream] [{inst.name}] SSE 超时 {timeout}s")
-            yield {"type": "error", "text": "等待回复超时"}
-        except Exception as e:
-            logger.error(f"[stream] [{inst.name}] SSE 异常: {e}")
-            yield {"type": "error", "text": f"连接失败: {e}"}
+                            if state == "error":
+                                yield {"type": "error", "text": str(payload.get("errorMessage") or "聊天失败")}
+                                return
+
+                            if state == "aborted":
+                                yield {"type": "error", "text": "对话已中止"}
+                                return
+
+                        if event_name == "agent":
+                            if str(payload.get("runId") or "").strip() != run_id:
+                                continue
+                            stream = str(payload.get("stream") or "").strip()
+                            data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+
+                            if stream == "tool":
+                                phase = str(data.get("phase") or "").strip()
+                                tool_name = str(data.get("name") or "工具").strip() or "工具"
+                                if phase == "start":
+                                    yield {"type": "status", "text": f"调用工具: {tool_name}"}
+                                    yield {
+                                        "type": "tool_call",
+                                        "name": tool_name,
+                                        "toolCallId": str(data.get("toolCallId") or ""),
+                                        "args": data.get("args"),
+                                    }
+                                elif phase in {"end", "result"}:
+                                    yield {
+                                        "type": "tool_result",
+                                        "name": tool_name,
+                                        "toolCallId": str(data.get("toolCallId") or ""),
+                                        "isError": bool(data.get("isError", False)),
+                                        "result": data.get("result"),
+                                    }
+                                continue
+
+                            if stream == "lifecycle":
+                                phase = str(data.get("phase") or "").strip()
+                                if phase == "start":
+                                    yield {"type": "status", "text": "思考中"}
+                                elif phase == "error":
+                                    yield {"type": "error", "text": str(data.get("error") or "聊天失败")}
+                                    return
+                finally:
+                    await ws_client.close()
+
+            except asyncio.TimeoutError:
+                logger.warning(f"[stream] [{inst.name}] SSE 超时 {timeout}s")
+                yield {"type": "error", "text": "等待回复超时"}
+            except Exception as e:
+                logger.error(f"[stream] [{inst.name}] chat.send 异常: {e}")
+                yield {"type": "error", "text": f"连接失败: {e}"}
+        finally:
+            lock.release()
 
     @staticmethod
     def _check_port(port: int, host: str = "127.0.0.1") -> bool:
@@ -1139,7 +1490,20 @@ class InstanceManager:
     @staticmethod
     def _ensure_gateway_config():
         try:
-            from .llm_config_bridge import ensure_hooks_allow_request_session_key
+            from .llm_config_bridge import (
+                ensure_gateway_local_mode,
+                ensure_gateway_port,
+                ensure_hooks_allow_request_session_key,
+                ensure_hooks_path,
+                ensure_openclaw_config,
+                inject_naga_llm_config,
+            )
+
+            ensure_openclaw_config()
+            ensure_gateway_local_mode(auto_create=False)
+            ensure_hooks_path(auto_create=False)
             ensure_hooks_allow_request_session_key(auto_create=False)
+            ensure_gateway_port(auto_create=False)
+            inject_naga_llm_config()
         except Exception:
             pass

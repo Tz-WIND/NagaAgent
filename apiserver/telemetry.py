@@ -148,6 +148,26 @@ class TelemetryManager:
         self._last_error: str | None = None
         self._last_upload_count = 0
         self._dropped_events = 0
+        self._auth_blocked_token_hash: str | None = None
+        self._auth_blocked_reason: str | None = None
+
+    def _is_auth_error(self, detail: str, status_code: int | None = None) -> bool:
+        lowered = (detail or "").strip().lower()
+        if status_code in {401, 403}:
+            return True
+        return any(
+            marker in lowered
+            for marker in (
+                "unauthorized",
+                "forbidden",
+                "invalid token",
+                "token expired",
+                "expired token",
+                "令牌无效",
+                "令牌无效或已过期",
+                "已过期",
+            )
+        )
 
     async def start(self) -> None:
         TELEMETRY_DIR.mkdir(parents=True, exist_ok=True)
@@ -294,8 +314,19 @@ class TelemetryManager:
         }
         headers = {"Content-Type": "application/json"}
         token = naga_auth.get_access_token()
+        token_hash = _hash_text(token) if token else None
+        if token_hash and self._auth_blocked_token_hash == token_hash and not force:
+            self._last_error = self._auth_blocked_reason or "telemetry auth blocked"
+            return {
+                "status": "auth_blocked",
+                "error": self._last_error,
+                "count": len(events),
+            }
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        elif not force:
+            self._last_error = "telemetry skipped: no access token"
+            return {"status": "no_auth", "count": len(events)}
 
         upload_url = self._resolve_upload_url()
 
@@ -318,15 +349,22 @@ class TelemetryManager:
                     or response.text.strip()
                     or f"HTTP {response.status_code}"
                 )
+                if self._is_auth_error(detail, response.status_code):
+                    self._auth_blocked_token_hash = token_hash
+                    self._auth_blocked_reason = detail
                 raise RuntimeError(detail)
             if isinstance(response_json, dict) and response_json.get("ok") is False:
-                raise RuntimeError(
-                    str(response_json.get("error") or response_json.get("message") or "telemetry rejected")
-                )
+                detail = str(response_json.get("error") or response_json.get("message") or "telemetry rejected")
+                if self._is_auth_error(detail):
+                    self._auth_blocked_token_hash = token_hash
+                    self._auth_blocked_reason = detail
+                raise RuntimeError(detail)
 
             async with self._lock:
                 await asyncio.to_thread(_rewrite_lines, TELEMETRY_QUEUE_PATH, remainder)
 
+            self._auth_blocked_token_hash = None
+            self._auth_blocked_reason = None
             self._last_error = None
             self._last_upload_at = _utc_now_iso()
             self._last_upload_count = len(events)
@@ -337,7 +375,12 @@ class TelemetryManager:
             }
         except Exception as exc:
             self._last_error = str(exc)
-            logger.debug("[Telemetry] upload failed: %s", exc)
+            if self._is_auth_error(str(exc)):
+                self._auth_blocked_token_hash = token_hash
+                self._auth_blocked_reason = str(exc)
+                logger.debug("[Telemetry] upload paused until token refresh: %s", exc)
+            else:
+                logger.debug("[Telemetry] upload failed: %s", exc)
             return {"status": "error", "error": str(exc), "count": len(events)}
 
     async def _run_flush_loop(self) -> None:
@@ -366,6 +409,8 @@ class TelemetryManager:
             "last_upload_count": self._last_upload_count,
             "last_error": self._last_error,
             "dropped_events": self._dropped_events,
+            "auth_blocked": bool(self._auth_blocked_token_hash),
+            "auth_blocked_reason": self._auth_blocked_reason,
         }
 
 

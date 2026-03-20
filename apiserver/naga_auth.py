@@ -91,12 +91,20 @@ _load_refresh_token()
 
 # ── API 方法 ─────────────────────────────────────
 
-async def get_captcha() -> dict:
-    """获取验证码（数学计算题）"""
-    async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.get(f"{BUSINESS_URL}/api/auth/captcha")
+async def get_captcha(format_type: str = "") -> dict:
+    """获取验证码。请求图像验证码时，若上游未返回 image_data 则直接报错。"""
+    params = {"format": format_type} if format_type else None
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
+        resp = await client.get(f"{BUSINESS_URL}/api/auth/captcha", params=params)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+
+    if format_type == "image":
+        if data.get("image_data"):
+            return data
+        raise ValueError(f"上游未返回图像验证码 image_data: {json.dumps(data, ensure_ascii=False)}")
+
+    return data
 
 
 async def login(username: str, password: str, captcha_id: str = "", captcha_answer: str = "") -> dict:
@@ -301,5 +309,53 @@ async def send_verification(email: str, username: str, captcha_id: str = "", cap
         )
         if resp.status_code != 200:
             logger.error(f"NagaBusiness send-verification 返回 {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+async def send_qq_verification(
+    email: str,
+    access_token: str,
+    captcha_id: str = "",
+    captcha_answer: str = "",
+) -> dict:
+    """发送 QQ 邮箱绑定验证码。"""
+    payload = {"qq_email": email}
+    if captcha_id and captcha_answer:
+        payload["captcha_id"] = captcha_id
+        payload["captcha_answer"] = captcha_answer
+    logger.info(f"send_qq_verification payload: {payload}")
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{BUSINESS_URL}/api/auth/qq-email/send-verification",
+            json=payload,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if resp.status_code != 200:
+            logger.error(f"NagaBusiness qq-email/send-verification 返回 {resp.status_code}: {resp.text}")
+        resp.raise_for_status()
+        return resp.json()
+
+
+
+
+async def bind_qq_email(
+    email: str,
+    verification_code: str,
+    access_token: str,
+) -> dict:
+    """提交 QQ 邮箱绑定。"""
+    payload = {
+        "qq_email": email,
+        "verification_code": verification_code,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            f"{BUSINESS_URL}/api/auth/qq-email",
+            json=payload,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+        if resp.status_code != 200:
+            logger.error(f"NagaBusiness qq-email 返回 {resp.status_code}: {resp.text}")
         resp.raise_for_status()
         return resp.json()

@@ -76,6 +76,26 @@ function formatTime(iso: string): string {
               {{ post.title }}
             </h2>
 
+            <div v-if="post.boards?.length || post.visibilityStatus || post.moderationStatus" class="post-meta-badges">
+              <span
+                v-for="board in post.boards || []"
+                :key="board.id"
+                class="board-badge"
+              >
+                {{ board.name }}
+              </span>
+              <span
+                v-if="post.visibilityStatus"
+                class="status-badge"
+                :class="{ hidden: post.visibilityStatus === 'hidden' }"
+              >
+                {{ post.visibilityStatus === 'hidden' ? '隐藏' : '可见' }}
+              </span>
+              <span v-if="post.moderationStatus" class="status-badge moderation">
+                审核：{{ post.moderationStatus }}
+              </span>
+            </div>
+
             <!-- Markdown content -->
             <div class="markdown-body text-white/70 text-sm leading-relaxed">
               <Markdown :source="post.content" />
@@ -178,6 +198,38 @@ function formatTime(iso: string): string {
 }
 .like-btn.liked svg {
   fill: #d4af37;
+}
+
+.post-meta-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -8px 0 14px;
+}
+
+.board-badge,
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1.2;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.64);
+}
+
+.status-badge.hidden {
+  background: rgba(248, 113, 113, 0.1);
+  color: rgba(252, 165, 165, 0.92);
+  border-color: rgba(248, 113, 113, 0.18);
+}
+
+.status-badge.moderation {
+  background: rgba(212, 175, 55, 0.1);
+  color: rgba(212, 175, 55, 0.92);
+  border-color: rgba(212, 175, 55, 0.18);
 }
 
 .markdown-body :deep(h2) {

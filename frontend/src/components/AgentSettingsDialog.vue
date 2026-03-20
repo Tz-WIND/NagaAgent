@@ -34,6 +34,8 @@ const form = ref<AgentSettings>({
 })
 const privateSkills = ref<SkillCatalogItem[]>([])
 const privateMcps = ref<McpService[]>([])
+const cachedSkills = ref<SkillCatalogItem[]>([])
+const cachedMcps = ref<McpService[]>([])
 
 const showSkillDialog = ref(false)
 const showMcpDialog = ref(false)
@@ -62,6 +64,8 @@ async function loadAgentData() {
   errorMsg.value = ''
   privateSkills.value = []
   privateMcps.value = []
+  cachedSkills.value = []
+  cachedMcps.value = []
 
   try {
     const [charactersRes, skillCatalogRes, mcpServicesRes] = await Promise.all([
@@ -95,8 +99,12 @@ async function loadAgentData() {
     privateSkills.value = skillCatalogRes?.catalog?.privateSkills?.skills?.filter(
       (item: SkillCatalogItem) => item.ownerAgentId === props.agent?.id,
     ) || []
+    cachedSkills.value = skillCatalogRes?.catalog?.localCache?.skills || []
     privateMcps.value = mcpServicesRes?.services?.filter(
       (item: McpService) => item.scope === 'private' && item.ownerAgentId === props.agent?.id,
+    ) || []
+    cachedMcps.value = mcpServicesRes?.services?.filter(
+      (item: McpService) => item.scope === 'public' && item.source !== 'builtin',
     ) || []
   }
   catch (error: any) {
@@ -162,15 +170,38 @@ function openAddPrivateSkill() {
   showSkillDialog.value = true
 }
 
-async function handlePrivateSkillConfirm(data: { name: string, content: string, scope: 'cache' | 'public' | 'private', agentId?: string }) {
+async function handlePrivateSkillConfirm(data:
+  | { mode: 'hub', name: string, source: string }
+  | { mode: 'cache', name: string, sourceScope: 'cache' | 'public' | 'private', sourceAgentId?: string }
+  | { mode: 'custom', name: string, content: string, scope: 'cache' | 'public' | 'private', agentId?: string },
+) {
   if (!props.agent)
     return
   try {
-    await API.importScopedSkill({
-      ...data,
-      scope: 'private',
-      agentId: props.agent.id,
-    })
+    if (data.mode === 'hub') {
+      await API.installHubSkill({
+        name: data.name,
+        scope: 'private',
+        agentId: props.agent.id,
+        source: data.source,
+      })
+    }
+    else if (data.mode === 'cache') {
+      await API.cloneSkill({
+        name: data.name,
+        sourceScope: data.sourceScope,
+        sourceAgentId: data.sourceAgentId,
+        targetScope: 'private',
+        targetAgentId: props.agent.id,
+      })
+    }
+    else {
+      await API.importScopedSkill({
+        ...data,
+        scope: 'private',
+        agentId: props.agent.id,
+      })
+    }
     showSkillDialog.value = false
     await loadAgentData()
   }
@@ -209,6 +240,17 @@ function openEditPrivateMcp(service: McpService) {
 }
 
 async function handlePrivateMcpConfirm(data: {
+  mode: 'hub'
+  name: string
+  source: string
+} | {
+  mode: 'cache'
+  name: string
+  displayName: string
+  description: string
+  config: Record<string, any>
+} | {
+  mode: 'custom'
   name: string
   displayName: string
   description: string
@@ -219,7 +261,25 @@ async function handlePrivateMcpConfirm(data: {
   if (!props.agent)
     return
   try {
-    if (editingMcp.value) {
+    if (data.mode === 'hub') {
+      await API.installHubMcp({
+        name: data.name,
+        scope: 'private',
+        agentId: props.agent.id,
+        source: data.source,
+      })
+    }
+    else if (data.mode === 'cache') {
+      await API.importMcpConfig({
+        name: data.name,
+        config: data.config,
+        displayName: data.displayName,
+        description: data.description,
+        scope: 'private',
+        agentId: props.agent.id,
+      })
+    }
+    else if (editingMcp.value) {
       await API.updateMcpService(data.name, {
         config: data.config,
         displayName: data.displayName,
@@ -402,6 +462,8 @@ async function deletePrivateMcp(service: McpService) {
     :visible="showSkillDialog"
     fixed-scope="private"
     :fixed-agent-id="agent?.id"
+    :cache-items="cachedSkills"
+    hub-enabled
     title="新增专有 Skill"
     @confirm="handlePrivateSkillConfirm"
     @cancel="showSkillDialog = false"
@@ -412,6 +474,8 @@ async function deletePrivateMcp(service: McpService) {
     :edit-data="editingMcp"
     fixed-scope="private"
     :fixed-agent-id="agent?.id"
+    :cache-items="cachedMcps"
+    hub-enabled
     :title="editingMcp ? '编辑专有 MCP' : '新增专有 MCP'"
     @confirm="handlePrivateMcpConfirm"
     @cancel="showMcpDialog = false"

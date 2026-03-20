@@ -175,6 +175,62 @@ async def update_system_config(payload: Dict[str, Any]):
         raise HTTPException(status_code=500, detail=f"更新配置失败: {str(e)}")
 
 
+@router.post("/system/notifications/qq/test")
+async def test_qq_notification(payload: Dict[str, Any]):
+    qq_user_id = str(payload.get("qq_user_id") or "").strip()
+    if not qq_user_id:
+        raise HTTPException(status_code=400, detail="缺少 QQ 号")
+
+    try:
+        from agentserver.travel_notifications import QQNotifyDeliveryError, send_test_qq_notification
+        from apiserver import naga_auth
+
+        naga_user_id = ""
+        user = naga_auth.get_user_info()
+        if not user:
+            token = naga_auth.get_access_token()
+            if token:
+                user = await naga_auth.get_me(token)
+
+        if user:
+            naga_user_id = str(user.get("user_id") or user.get("username") or "").strip()
+
+        status = await send_test_qq_notification(qq_user_id, None, naga_user_id=naga_user_id)
+        emit_telemetry(
+            "qq_notification_test_sent",
+            {
+                "qq_user_id": qq_user_id,
+                "status": status,
+                "naga_user_id": naga_user_id,
+            },
+            source="apiserver",
+        )
+        return {"status": "success", "delivery_status": status}
+    except QQNotifyDeliveryError as e:
+        logger.error(f"QQ 通知测试发送失败: {e}")
+        emit_telemetry(
+            "qq_notification_test_fail",
+            {
+                "qq_user_id": qq_user_id,
+                "error": str(e),
+                "status_code": e.status_code,
+            },
+            source="apiserver",
+        )
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    except Exception as e:
+        logger.error(f"QQ 通知测试发送失败: {e}")
+        emit_telemetry(
+            "qq_notification_test_fail",
+            {
+                "qq_user_id": qq_user_id,
+                "error": str(e),
+            },
+            source="apiserver",
+        )
+        raise HTTPException(status_code=500, detail=f"QQ 通知测试发送失败: {e}")
+
+
 @router.get("/system/prompt")
 async def get_system_prompt(include_skills: bool = False):
     """获取系统提示词（默认只返回人格提示词，不包含技能列表）"""

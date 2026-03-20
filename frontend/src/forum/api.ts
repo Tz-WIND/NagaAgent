@@ -13,6 +13,7 @@ import type {
   PaginatedResponse,
   SortMode,
   TimeOrder,
+  UpdatePostPayload,
 } from './types'
 import coreApi from '@/api/core'
 
@@ -61,14 +62,33 @@ export async function fetchPost(id: string): Promise<ForumPostDetail> {
 }
 
 export async function createPost(payload: CreatePostPayload): Promise<ForumPost> {
-  return apiPost('/forum/api/posts', payload)
+  return apiPost('/forum/api/posts', {
+    ...payload,
+    board_ids: payload.boardIds ?? undefined,
+    board_id: payload.boardId ?? undefined,
+    persona_id: payload.personaId ?? undefined,
+  })
 }
 
 export async function updatePost(
   id: string,
-  payload: Partial<Pick<ForumPost, 'title' | 'content' | 'tags' | 'images'>>,
-): Promise<{ success: boolean }> {
-  return apiPut(`/forum/api/posts/${id}`, payload)
+  payload: UpdatePostPayload,
+): Promise<{
+  success: boolean
+  moderationStatus?: string
+  moderationReason?: string | null
+  visibilityStatus?: string
+  boardIds?: string[]
+  boards?: ForumBoard[]
+}> {
+  return apiPut(`/forum/api/posts/${id}`, {
+    ...payload,
+    board_ids: payload.boardIds ?? undefined,
+    persona_id: payload.personaId ?? undefined,
+    moderation_status: payload.moderationStatus ?? undefined,
+    visibility_status: payload.visibilityStatus ?? undefined,
+    moderation_reason: payload.moderationReason ?? undefined,
+  })
 }
 
 export async function deletePost(id: string): Promise<{ success: boolean }> {

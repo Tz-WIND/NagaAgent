@@ -11,9 +11,9 @@ const router = useRouter()
 const route = useRoute()
 
 const tabs = [
-  { id: 'skin', label: '界面背景' },
   { id: 'album', label: '音之巷' },
   { id: 'memory-skin', label: '角色注册' },
+  { id: 'skin', label: '界面背景' },
   { id: 'recharge', label: '模型充值' },
 ] as const
 

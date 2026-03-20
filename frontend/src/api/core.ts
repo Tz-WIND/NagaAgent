@@ -523,6 +523,22 @@ export class CoreApiClient extends ApiClient {
     return this.instance.post('/skills/import', params)
   }
 
+  cloneSkill(params: {
+    name: string
+    sourceScope: 'cache' | 'public' | 'private'
+    targetScope: 'cache' | 'public' | 'private'
+    sourceAgentId?: string
+    targetAgentId?: string
+  }): Promise<{
+    status: string
+    message: string
+    sourceScope: string
+    targetScope: string
+    path: string
+  }> {
+    return this.instance.post('/skills/clone', params)
+  }
+
   deleteSkill(name: string, scope: 'cache' | 'public' | 'private', agentId?: string): Promise<{
     status: string
     message: string
@@ -541,6 +557,7 @@ export class CoreApiClient extends ApiClient {
     name: string
     scope: 'cache' | 'public' | 'private'
     agentId?: string
+    source?: string
   }): Promise<{
     status: string
     message: string
@@ -556,6 +573,7 @@ export class CoreApiClient extends ApiClient {
     name: string
     scope: 'public' | 'private'
     agentId?: string
+    source?: string
   }): Promise<{
     status: string
     message: string
@@ -658,11 +676,62 @@ export class CoreApiClient extends ApiClient {
     return this.instance.post('/auth/send-verification', { email, username, captcha_id: captchaId, captcha_answer: captchaAnswer })
   }
 
-  authGetCaptcha(): Promise<{
-    captchaId: string
-    question: string
+  authSendQqVerification(email: string, captchaId?: string, captchaAnswer?: string): Promise<{
+    success: boolean
+    message: string
   }> {
-    return this.instance.get('/auth/captcha')
+    return this.instance.post('/auth/send-qq-verification', { email, captcha_id: captchaId, captcha_answer: captchaAnswer })
+  }
+
+  authBindQqEmail(qqEmail: string, verificationCode: string): Promise<{
+    ok: boolean
+    message: string
+    binding?: {
+      userId: string
+      username: string
+      qqEmail: string
+      qqNumber: string
+    }
+  }> {
+    return this.instance.post('/auth/qq-email', { qq_email: qqEmail, verification_code: verificationCode })
+  }
+
+  authGetQqEmailBinding(): Promise<{
+    ok: boolean
+    binding: null | {
+      userId: string
+      username: string
+      qqEmail: string
+      qqNumber: string
+    }
+    qqEmail: string | null
+    qqNumber: string | null
+    currentAccountQqEmail: string | null
+    currentAccountQqNumber: string | null
+    currentAccountEmailVerified: boolean
+    directBindAvailable: boolean
+  }> {
+    return this.instance.get('/auth/qq-email')
+  }
+
+  testQqNotification(qqUserId: string, message?: string): Promise<{
+    status: 'success'
+    deliveryStatus: string
+  }> {
+    return this.instance.post('/system/notifications/qq/test', { qq_user_id: qqUserId, message })
+  }
+
+  authGetCaptcha(format?: 'image'): Promise<{
+    captchaId: string
+    question?: string
+    imageData?: string
+    mimeType?: string
+    answerLength?: number
+    type?: 'image' | 'math'
+    legacyCompatible?: boolean
+  }> {
+    const params = format ? { format } : undefined
+    return this.instance.get('/auth/captcha', { params })
   }
 
   // ── 旅行 ──
@@ -678,8 +747,41 @@ export class CoreApiClient extends ApiClient {
     deliverFullReport?: boolean
     deliverChannel?: string
     deliverTo?: string
+    browserVisible?: boolean
+    browserKeepOpen?: boolean
+    browserIdleTimeoutSeconds?: number
   }): Promise<{ status: 'success', sessionId: string }> {
     return this.instance.post('/travel/start', params)
+  }
+
+  createTravelSession(params: {
+    agentId?: string
+    timeLimitMinutes?: number
+    creditLimit?: number
+    wantFriends?: boolean
+    friendDescription?: string
+    goalPrompt?: string
+    postToForum?: boolean
+    deliverFullReport?: boolean
+    deliverChannel?: string
+    deliverTo?: string
+    browserVisible?: boolean
+    browserKeepOpen?: boolean
+    browserIdleTimeoutSeconds?: number
+  }): Promise<{ status: 'success', sessionId: string, session: TravelSession }> {
+    return this.instance.post('/travel/sessions', params)
+  }
+
+  updateTravelSessionBrowser(sessionId: string, params: {
+    browserVisible?: boolean
+    browserKeepOpen?: boolean
+    browserIdleTimeoutSeconds?: number
+  }): Promise<{ status: 'success', session: TravelSession }> {
+    return this.instance.post(`/travel/sessions/${sessionId}/browser`, params)
+  }
+
+  sendTravelInstruction(sessionId: string, message: string): Promise<{ status: 'success', session: TravelSession }> {
+    return this.instance.post(`/travel/sessions/${sessionId}/instruction`, { message })
   }
 
   getTravelStatus(): Promise<{
@@ -690,8 +792,51 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get('/travel/status')
   }
 
-  stopTravel(): Promise<{ status: 'success', sessionId: string }> {
-    return this.instance.post('/travel/stop')
+  getTravelSessions(): Promise<{
+    status: 'success'
+    sessions: TravelSession[]
+  }> {
+    return this.instance.get('/travel/sessions')
+  }
+
+  getTravelSession(sessionId: string): Promise<{
+    status: 'success'
+    session: TravelSession
+  }> {
+    return this.instance.get(`/travel/sessions/${sessionId}`)
+  }
+
+  getTravelSessionReport(sessionId: string): Promise<{
+    status: 'success'
+    exists: boolean
+    path: string | null
+    title?: string | null
+    content: string | null
+    missingReason?: 'not_generated' | 'missing'
+  }> {
+    return this.instance.get(`/travel/sessions/${sessionId}/report`)
+  }
+
+  getTravelSessionHistory(sessionId: string, limit = 0, includeTools = true): Promise<{
+    status: 'success'
+    sessionId: string
+    sessionKey: string | null
+    messages: Array<Record<string, any>>
+  }> {
+    return this.instance.get(`/travel/sessions/${sessionId}/history`, {
+      params: {
+        limit,
+        include_tools: includeTools,
+      },
+    })
+  }
+
+  stopTravel(sessionId?: string): Promise<{ status: 'success', sessionId: string }> {
+    return this.instance.post('/travel/stop', sessionId ? { sessionId } : {})
+  }
+
+  stopTravelSession(sessionId: string): Promise<{ status: 'success', sessionId: string, session: TravelSession }> {
+    return this.instance.post(`/travel/sessions/${sessionId}/stop`)
   }
 
   getTravelHistory(): Promise<{
@@ -721,6 +866,23 @@ export class CoreApiClient extends ApiClient {
   /** 重命名干员 */
   renameAgent(id: string, name: string): Promise<{ success: boolean, name: string }> {
     return agentAxios.put(`/openclaw/agents/${id}/name`, { name })
+  }
+
+  /** 查询/唤醒干员运行时 */
+  getAgentRuntime(id: string, wake = false): Promise<{
+    success: boolean
+    runtime: {
+      id: string
+      name: string
+      engine: AgentEngine
+      running: boolean
+      woken?: boolean
+      port?: number | null
+      gatewayUrl?: string | null
+      primary?: boolean
+    }
+  }> {
+    return agentAxios.get(`/openclaw/agents/${id}/runtime`, { params: { wake } })
   }
 
   /** 获取干员对话历史 */
