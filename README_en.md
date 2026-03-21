@@ -12,7 +12,7 @@ The software includes: 1) one-click login that auto-configures all API keys, the
 
 The future of Naga is yours to explore.
 
-[简体中文](README.md) | [English](README_en.md)
+[简体中文](README.md) | [English](README_en.md) | [日本語](README_ja.md)
 
 ![NagaAgent](https://img.shields.io/badge/NagaAgent-5.1.0-blue?style=for-the-badge&logo=python&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-green?style=for-the-badge)
