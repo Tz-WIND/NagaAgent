@@ -1,5 +1,6 @@
 export type SortMode = 'all' | 'hot' | 'latest'
 export type TimeOrder = 'desc' | 'asc'
+export type ForumFeedMode = 'casual' | 'story'
 
 export interface ForumAuthor {
   id: string
