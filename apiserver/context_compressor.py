@@ -299,7 +299,10 @@ def _get_compress_llm_params() -> Dict:
         }
     cfg = get_config()
     params: Dict = {"api_key": cfg.api.api_key}
-    if cfg.api.base_url:
+    if cfg.api.api_format == "anthropic":
+        if cfg.api.base_url and "anthropic.com" not in cfg.api.base_url:
+            params["api_base"] = cfg.api.base_url.rstrip("/")
+    elif cfg.api.base_url:
         params["api_base"] = cfg.api.base_url.rstrip("/") + "/"
     return params
 
@@ -308,7 +311,10 @@ def _get_compress_model_name() -> str:
     """获取压缩模型名称（LiteLLM 格式）"""
     if naga_auth.is_authenticated():
         return f"openai/{COMPRESS_MODEL}"
-    base_url = (get_config().api.base_url or "").lower()
+    cfg = get_config()
+    if cfg.api.api_format == "anthropic":
+        return f"anthropic/{COMPRESS_MODEL}"
+    base_url = (cfg.api.base_url or "").lower()
     if "openai.com" in base_url:
         return COMPRESS_MODEL
     return f"openai/{COMPRESS_MODEL}"
