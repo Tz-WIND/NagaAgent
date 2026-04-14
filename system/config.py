@@ -275,6 +275,7 @@ class APIConfig(BaseModel):
     api_key: str = Field(default="sk-placeholder-key-not-set", description="API密钥")
     base_url: str = Field(default="https://api.deepseek.com/v1", description="API基础URL")
     model: str = Field(default="deepseek-v3.2", description="使用的模型名称")
+    api_format: str = Field(default="openai", description="API调用格式：openai 或 anthropic")
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="温度参数")
     max_tokens: int = Field(default=10000, ge=1, le=32768, description="最大token数")
     max_history_rounds: int = Field(default=100, ge=1, le=200, description="最大历史轮数")
@@ -282,6 +283,14 @@ class APIConfig(BaseModel):
     context_load_days: int = Field(default=3, ge=1, le=30, description="加载历史上下文的天数")
     context_parse_logs: bool = Field(default=True, description="是否从日志文件解析上下文")
     applied_proxy: bool = Field(default=True, description="是否应用代理")
+
+    @field_validator("api_format")
+    @classmethod
+    def validate_api_format(cls, v):
+        valid_formats = ["openai", "anthropic"]
+        if v.lower() not in valid_formats:
+            raise ValueError(f"api_format 必须是以下之一: {valid_formats}")
+        return v.lower()
 
 
 class APIServerConfig(BaseModel):
