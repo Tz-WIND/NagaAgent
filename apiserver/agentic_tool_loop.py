@@ -1441,6 +1441,37 @@ async def run_agentic_loop(
 
         # 5. 如果没有可执行的工具调用，循环结束
         if not actionable_calls:
+            # 模型只返回了 live2d 调用而没有文字内容时（Anthropic 常见行为），
+            # 需要将 live2d tool call 的结果回注并再调用一轮 LLM 来生成文字回复
+            if live2d_calls and not complete_text.strip() and use_native and round_num < max_rounds:
+                logger.info(f"[AgenticLoop] Round {round_num}: 模型仅返回 live2d 调用无正文，"
+                            f"回注 tool result 继续下一轮获取文字回复")
+                # 构造 assistant message + tool results for live2d calls
+                assistant_msg = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": c.get("_tool_call_id", f"call_{i}"),
+                            "type": "function",
+                            "function": {
+                                "name": c.get("_original_name", ""),
+                                "arguments": c.get("_original_args", "{}"),
+                            },
+                        }
+                        for i, c in enumerate(live2d_calls)
+                    ],
+                }
+                messages.append(assistant_msg)
+                for c in live2d_calls:
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": c.get("_tool_call_id", ""),
+                        "content": "已执行",
+                    })
+                yield _format_sse_event("round_end", {"round": round_num, "has_more": True})
+                continue
+
             t_round_elapsed = _time.monotonic() - t_round_start
             t_total_elapsed = _time.monotonic() - t_loop_start
             logger.info(f"[AgenticLoop] Round {round_num}: 无工具调用，循环结束 "

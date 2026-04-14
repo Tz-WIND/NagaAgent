@@ -49,11 +49,12 @@ class LLMService:
         """初始化 LiteLLM 配置"""
         try:
             cfg = get_config()
-            # 配置 LiteLLM 使用自定义 base_url
             litellm.api_key = cfg.api.api_key
-            # 设置自定义端点（如果不是标准 OpenAI）
-            if cfg.api.base_url and "openai.com" not in cfg.api.base_url:
-                litellm.api_base = cfg.api.base_url.rstrip("/") + "/"
+            # Anthropic 格式下不设置全局 api_base，由每次调用的参数传递
+            # 避免全局 base 污染导致请求被路由到错误的端点
+            if cfg.api.api_format != "anthropic":
+                if cfg.api.base_url and "openai.com" not in cfg.api.base_url:
+                    litellm.api_base = cfg.api.base_url.rstrip("/") + "/"
             self._initialized = True
             logger.info("LLM服务 (LiteLLM) 初始化成功")
         except Exception as e:
@@ -70,13 +71,20 @@ class LLMService:
         cfg = get_config()
         model = model or cfg.api.model
         base_url = (base_url or cfg.api.base_url or "").lower()
+        api_format = cfg.api.api_format
 
         # NagaModel 网关：使用用户选择的模型名，由服务端路由
         # 需要 openai/ 前缀让 LiteLLM 识别为 OpenAI 兼容提供商
         if naga_auth.is_authenticated():
             return f"openai/{model or 'default'}"
 
-        # 根据 base_url 判断提供商，添加正确的前缀
+        # Anthropic 格式：使用 anthropic/ 前缀让 LiteLLM 走 Anthropic Messages API
+        if api_format == "anthropic":
+            if not model.startswith("anthropic/"):
+                return f"anthropic/{model}"
+            return model
+
+        # OpenAI 格式：根据 base_url 判断提供商，添加正确的前缀
         if "deepseek" in base_url:
             if not model.startswith("deepseek/"):
                 return f"deepseek/{model}"
@@ -100,6 +108,12 @@ class LLMService:
                 "extra_body": {"user_token": token},
             }
         cfg = get_config()
+        if cfg.api.api_format == "anthropic":
+            params: Dict[str, Any] = {"api_key": cfg.api.api_key}
+            if cfg.api.base_url and "anthropic.com" not in cfg.api.base_url:
+                # LiteLLM 会自动追加 /v1/messages，不要加尾部 /
+                params["api_base"] = cfg.api.base_url.rstrip("/")
+            return params
         return {
             "api_key": cfg.api.api_key,
             "api_base": cfg.api.base_url.rstrip("/") + "/" if cfg.api.base_url else None,
@@ -117,10 +131,16 @@ class LLMService:
                 "extra_body": {"user_token": token},
             }
         cfg = get_config()
+        effective_key = api_key or cfg.api.api_key
+        effective_base = api_base or cfg.api.base_url
+        if cfg.api.api_format == "anthropic" and not api_base:
+            params: Dict[str, Any] = {"api_key": effective_key}
+            if effective_base and "anthropic.com" not in effective_base:
+                params["api_base"] = effective_base.rstrip("/")
+            return params
         return {
-            "api_key": api_key or cfg.api.api_key,
-            "api_base": (api_base.rstrip("/") + "/" if api_base else None)
-            or (cfg.api.base_url.rstrip("/") + "/" if cfg.api.base_url else None),
+            "api_key": effective_key,
+            "api_base": (effective_base.rstrip("/") + "/" if effective_base else None),
         }
 
     async def get_response(self, prompt: str, temperature: float = 0.7) -> str:
@@ -294,7 +314,8 @@ class LLMService:
                 }
                 if tools:
                     call_params["tools"] = tools
-                    call_params["parallel_tool_calls"] = True
+                    if get_config().api.api_format != "anthropic":
+                        call_params["parallel_tool_calls"] = True
 
                 response = await acompletion(**call_params)
 

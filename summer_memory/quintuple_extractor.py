@@ -13,19 +13,65 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from system.config import config
 from openai import OpenAI, AsyncOpenAI
 
-# 初始化OpenAI客户端
-client = OpenAI(
-    api_key=config.api.api_key,
-    base_url=config.api.base_url
-)
+_is_anthropic = config.api.api_format == "anthropic"
 
-async_client = AsyncOpenAI(
-    api_key=config.api.api_key,
-    base_url=config.api.base_url
-)
+if _is_anthropic:
+    import httpx
+    from anthropic import Anthropic, AsyncAnthropic
+    _anthropic_base_url = config.api.base_url.rstrip("/") if config.api.base_url and "anthropic.com" not in config.api.base_url else None
+    _anthropic_timeout = httpx.Timeout(timeout=300.0, connect=10.0)
+    _anthropic_client = Anthropic(
+        api_key=config.api.api_key,
+        base_url=_anthropic_base_url,
+        timeout=_anthropic_timeout,
+    )
+    _async_anthropic_client = AsyncAnthropic(
+        api_key=config.api.api_key,
+        base_url=_anthropic_base_url,
+        timeout=_anthropic_timeout,
+    )
+    client = None
+    async_client = None
+else:
+    _anthropic_client = None
+    _async_anthropic_client = None
+    client = OpenAI(
+        api_key=config.api.api_key,
+        base_url=config.api.base_url
+    )
+    async_client = AsyncOpenAI(
+        api_key=config.api.api_key,
+        base_url=config.api.base_url
+    )
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
+
+
+def _anthropic_chat(system: str, user: str, *, temperature: float = 0.3,
+                    max_tokens: int | None = None) -> str:
+    """同步 Anthropic Messages API 调用，返回文本内容"""
+    resp = _anthropic_client.messages.create(
+        model=config.api.model,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=max_tokens or config.api.max_tokens,
+        temperature=temperature,
+    )
+    return resp.content[0].text
+
+
+async def _anthropic_chat_async(system: str, user: str, *, temperature: float = 0.3,
+                                max_tokens: int | None = None) -> str:
+    """异步 Anthropic Messages API 调用，返回文本内容"""
+    resp = await _async_anthropic_client.messages.create(
+        model=config.api.model,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        max_tokens=max_tokens or config.api.max_tokens,
+        temperature=temperature,
+    )
+    return resp.content[0].text
 
 
 # 定义五元组的Pydantic模型
@@ -181,16 +227,24 @@ async def _extract_quintuples_async_fallback(text):
 
     for attempt in range(max_retries + 1):
         try:
-            response = await async_client.chat.completions.create(
-                model=config.api.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=config.api.max_tokens,
-                temperature=0.3,
-                timeout=600 + (attempt * 20)
-            )
-            
-            content = response.choices[0].message.content.strip()
-            
+            if _is_anthropic:
+                content = await _anthropic_chat_async(
+                    system="你是一个专业的中文文本信息抽取专家。",
+                    user=prompt,
+                    temperature=0.3,
+                )
+            else:
+                response = await async_client.chat.completions.create(
+                    model=config.api.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=config.api.max_tokens,
+                    temperature=0.3,
+                    timeout=600 + (attempt * 20)
+                )
+                content = response.choices[0].message.content.strip()
+
+            content = content.strip()
+
             # 尝试解析JSON
             try:
                 quintuples = json.loads(content)
@@ -198,7 +252,6 @@ async def _extract_quintuples_async_fallback(text):
                 return [tuple(t) for t in quintuples if len(t) == 5]
             except json.JSONDecodeError:
                 logger.error(f"JSON解析失败，原始内容: {content[:200]}")
-                # 尝试直接提取数组
                 if '[' in content and ']' in content:
                     start = content.index('[')
                     end = content.rindex(']') + 1
@@ -216,7 +269,8 @@ async def _extract_quintuples_async_fallback(text):
 
 def extract_quintuples(text):
     """同步版本的五元组提取"""
-    # 首先尝试使用结构化输出
+    if _is_anthropic:
+        return _extract_quintuples_fallback(text)
     return _extract_quintuples_structured(text)
 
 
@@ -354,16 +408,24 @@ def _extract_quintuples_fallback(text):
 
     for attempt in range(max_retries + 1):
         try:
-            response = client.chat.completions.create(
-                model=config.api.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=config.api.max_tokens,
-                temperature=0.5,
-                timeout=600 + (attempt * 20)
-            )
+            if _is_anthropic:
+                content = _anthropic_chat(
+                    system="你是一个专业的中文文本信息抽取专家。",
+                    user=prompt,
+                    temperature=0.5,
+                )
+            else:
+                response = client.chat.completions.create(
+                    model=config.api.model,
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=config.api.max_tokens,
+                    temperature=0.5,
+                    timeout=600 + (attempt * 20)
+                )
+                content = response.choices[0].message.content.strip()
 
-            content = response.choices[0].message.content.strip()
-            
+            content = content.strip()
+
             # 尝试解析JSON
             try:
                 quintuples = json.loads(content)
@@ -371,7 +433,6 @@ def _extract_quintuples_fallback(text):
                 return [tuple(t) for t in quintuples if len(t) == 5]
             except json.JSONDecodeError:
                 logger.error(f"JSON解析失败，原始内容: {content[:200]}")
-                # 尝试直接提取数组
                 if '[' in content and ']' in content:
                     start = content.index('[')
                     end = content.rindex(']') + 1
