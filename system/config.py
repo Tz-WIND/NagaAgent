@@ -87,17 +87,6 @@ _RUNTIME_PROTECTED_CONFIG_PATHS = {
 _MODEL_SYNC_CONFIG_PATHS = {
     "api.model",
     "api.api_format",
-    "voice_realtime.provider",
-    "voice_realtime.model",
-    "voice_realtime.tts_model",
-    "voice_realtime.asr_model",
-    "computer_control.model",
-    "computer_control.grounding_model",
-    "embedding.model",
-    "guide_engine.embedding_api_model",
-    "guide_engine.game_guide_llm_api_model",
-    "guide_engine.game_guide_llm_api_type",
-    "openclaw.default_model",
 }
 
 
@@ -209,15 +198,26 @@ def _get_runtime_server_ports() -> Optional[ServerPortsConfig]:
         return None
 
     try:
-        raw_agent_port = server_ports.agent_server
-        raw_mcp_port = server_ports.mcp_server
+        raw_agent_port = getattr(getattr(loaded_config, "agent_server", None), "port", server_ports.agent_server)
+        raw_mcp_port = getattr(getattr(loaded_config, "mcp_server", None), "port", server_ports.mcp_server)
         try:
             config_path = get_config_path()
             if os.path.exists(config_path):
                 with open(config_path, "r", encoding=detect_file_encoding(config_path)) as f:
                     raw_config = json5.load(f)
-                raw_agent_port = int(raw_config.get("agentserver", {}).get("port", raw_agent_port))
-                raw_mcp_port = int(raw_config.get("mcpserver", {}).get("port", raw_mcp_port))
+
+                raw_agent_port = int(
+                    raw_config.get("agent_server", {}).get(
+                        "port",
+                        raw_config.get("agentserver", {}).get("port", raw_agent_port),
+                    )
+                )
+                raw_mcp_port = int(
+                    raw_config.get("mcp_server", {}).get(
+                        "port",
+                        raw_config.get("mcpserver", {}).get("port", raw_mcp_port),
+                    )
+                )
         except Exception:
             pass
 
@@ -397,6 +397,23 @@ class APIServerConfig(BaseModel):
     docs_enabled: bool = Field(default=True, description="是否启用API文档")
 
 
+class AgentServerConfig(BaseModel):
+    """Agent 服务器配置"""
+
+    enabled: bool = Field(default=True, description="是否启用 Agent 服务器")
+    host: str = Field(default="127.0.0.1", description="Agent 服务器主机")
+    port: int = Field(default_factory=lambda: server_ports.agent_server, description="Agent 服务器端口")
+
+
+class MCPServerConfig(BaseModel):
+    """MCP 服务器配置"""
+
+    enabled: bool = Field(default=True, description="是否启用 MCP 服务器")
+    host: str = Field(default="127.0.0.1", description="MCP 服务器主机")
+    port: int = Field(default_factory=lambda: server_ports.mcp_server, description="MCP 服务器端口")
+    agent_discovery: bool = Field(default=True, description="是否启用 Agent 自动发现")
+
+
 class GRAGConfig(BaseModel):
     """GRAG知识图谱记忆系统配置"""
 
@@ -539,6 +556,7 @@ class MemoryServerConfig(BaseModel):
 
     url: str = Field(default="http://localhost:8004", description="NagaMemory 服务地址")
     token: Optional[str] = Field(default=None, description="认证 Token（Bearer），留空则不携带认证头")
+    space_id: Optional[str] = Field(default=None, description="可选的记忆空间 ID")
 
 
 class EmbeddingConfig(BaseModel):
@@ -1302,6 +1320,8 @@ class NagaConfig(BaseModel):
     system: SystemConfig = Field(default_factory=SystemConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     api_server: APIServerConfig = Field(default_factory=APIServerConfig)
+    agent_server: AgentServerConfig = Field(default_factory=AgentServerConfig)
+    mcp_server: MCPServerConfig = Field(default_factory=MCPServerConfig)
     grag: GRAGConfig = Field(default_factory=GRAGConfig)
     handoff: HandoffConfig = Field(default_factory=HandoffConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
