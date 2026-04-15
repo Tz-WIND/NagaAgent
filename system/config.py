@@ -8,6 +8,7 @@ import os
 import sys
 import json
 import re
+import shutil
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -78,6 +79,32 @@ def get_config_path() -> str:
     target = d / "config.json"
     _migrate_config_if_needed(target)
     return str(target)
+
+
+def sync_source_config_to_runtime() -> bool:
+    """源码运行时将项目根目录 config.json 同步到用户数据目录。"""
+    if IS_PACKAGED:
+        return False
+
+    source = Path(__file__).parent.parent / "config.json"
+    if not source.exists():
+        return False
+
+    target = Path(get_data_dir()) / "config.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        source_bytes = source.read_bytes()
+        target_bytes = target.read_bytes() if target.exists() else None
+        if target_bytes == source_bytes:
+            return False
+
+        shutil.copy2(source, target)
+        print(f"已同步源码配置: {source} → {target}")
+        return True
+    except Exception as e:
+        print(f"警告：同步源码配置失败: {e}")
+        return False
 
 from pydantic import BaseModel, Field, field_validator
 from charset_normalizer import from_path
