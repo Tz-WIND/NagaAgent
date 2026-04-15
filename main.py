@@ -89,7 +89,7 @@ if not hasattr(socket, 'EAI_ADDRFAMILY'):
 
 # 本地模块导入
 from system.system_checker import run_system_check, run_quick_check
-from system.config import config, AI_NAME
+from system.config import config, AI_NAME, get_config_path, sync_source_config_to_runtime
 
 # V14版本已移除早期拦截器，采用运行时猴子补丁
 
@@ -628,7 +628,7 @@ def check_and_update_if_needed() -> bool:
     from datetime import datetime
     import json5
 
-    config_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    config_file = get_config_path()
 
     if not os.path.exists(config_file):
         return False
@@ -694,6 +694,8 @@ def _lazy_init_services():
     """延迟初始化服务 - 在需要时才初始化"""
     global service_manager, n
     if not hasattr(_lazy_init_services, '_initialized'):
+        sync_source_config_to_runtime()
+
         # 初始化服务管理器
         service_manager = ServiceManager()
         service_manager.start_background_services()
@@ -777,6 +779,7 @@ if __name__ == "__main__":
         sys.exit(0 if success else 1)
 
     # 检查上次系统检测时间，如果超过7天则执行更新
+    sync_source_config_to_runtime()
     check_and_update_if_needed()
 
     # 启动前清理占用端口的进程
