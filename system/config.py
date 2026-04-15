@@ -8,7 +8,6 @@ import os
 import sys
 import json
 import re
-import shutil
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -81,8 +80,66 @@ def get_config_path() -> str:
     return str(target)
 
 
+_RUNTIME_PROTECTED_CONFIG_PATHS = {
+    "system_check",
+}
+
+_MODEL_SYNC_CONFIG_PATHS = {
+    "api.model",
+    "api.api_format",
+    "voice_realtime.provider",
+    "voice_realtime.model",
+    "voice_realtime.tts_model",
+    "voice_realtime.asr_model",
+    "computer_control.model",
+    "computer_control.grounding_model",
+    "embedding.model",
+    "guide_engine.embedding_api_model",
+    "guide_engine.game_guide_llm_api_model",
+    "guide_engine.game_guide_llm_api_type",
+    "openclaw.default_model",
+}
+
+
+def _merge_source_config_into_runtime(source_value, target_value, path: str = ""):
+    if path in _RUNTIME_PROTECTED_CONFIG_PATHS:
+        return target_value, False
+
+    if path in _MODEL_SYNC_CONFIG_PATHS:
+        if target_value != source_value:
+            return source_value, True
+        return target_value, False
+
+    if isinstance(source_value, dict):
+        target_dict = target_value if isinstance(target_value, dict) else {}
+        merged = dict(target_dict)
+        changed = not isinstance(target_value, dict)
+
+        for key, source_child in source_value.items():
+            child_path = f"{path}.{key}" if path else key
+            if key in target_dict:
+                merged_child, child_changed = _merge_source_config_into_runtime(
+                    source_child,
+                    target_dict[key],
+                    child_path,
+                )
+                if child_changed:
+                    merged[key] = merged_child
+                    changed = True
+            else:
+                merged[key] = source_child
+                changed = True
+
+        return merged, changed
+
+    if target_value is None:
+        return source_value, True
+
+    return target_value, False
+
+
 def sync_source_config_to_runtime() -> bool:
-    """源码运行时将项目根目录 config.json 同步到用户数据目录。"""
+    """源码运行时同步配置结构到用户数据目录，同时强制刷新模型相关配置。"""
     if IS_PACKAGED:
         return False
 
@@ -94,13 +151,23 @@ def sync_source_config_to_runtime() -> bool:
     target.parent.mkdir(parents=True, exist_ok=True)
 
     try:
-        source_bytes = source.read_bytes()
-        target_bytes = target.read_bytes() if target.exists() else None
-        if target_bytes == source_bytes:
+        with open(source, "r", encoding=detect_file_encoding(str(source))) as source_file:
+            source_config = json5.load(source_file)
+
+        if target.exists():
+            with open(target, "r", encoding=detect_file_encoding(str(target))) as target_file:
+                target_config = json5.load(target_file)
+        else:
+            target_config = {}
+
+        merged_config, changed = _merge_source_config_into_runtime(source_config, target_config)
+        if not changed:
             return False
 
-        shutil.copy2(source, target)
-        print(f"已同步源码配置: {source} → {target}")
+        with open(target, "w", encoding="utf-8") as target_file:
+            json.dump(merged_config, target_file, ensure_ascii=False, indent=2)
+
+        print(f"已同步源码配置结构: {source} → {target}")
         return True
     except Exception as e:
         print(f"警告：同步源码配置失败: {e}")
