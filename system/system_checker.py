@@ -25,12 +25,12 @@ class SystemChecker:
         self.project_root = Path(__file__).parent.parent  # 指向项目根目录
         self.venv_path = self.project_root / "venv"  # 更新为venv目录
         self.requirements_file = self.project_root / "requirements.txt"
-        self.config_file = self.project_root / "config.json"
         self.pyproject_file = self.project_root / "pyproject.toml"
         self.results = {}
 
         # 需要检测的端口 - 从config读取
-        from system.config import get_all_server_ports
+        from system.config import get_all_server_ports, get_config_path
+        self.config_file = Path(get_config_path())
         all_ports = get_all_server_ports()
         self.required_ports = [
             all_ports["api_server"],
