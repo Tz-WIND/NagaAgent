@@ -62,7 +62,11 @@ class UnifiedVoiceManager(QObject):
 
         # 检测本地FunASR
         try:
-            response = requests.get("http://localhost:5000/health", timeout=1)
+            from system.config import config
+            response = requests.get(
+                f"http://{config.voice_realtime.asr_host}:{config.asr.port}/health",
+                timeout=1,
+            )
             availability[VoiceMode.LOCAL] = response.status_code == 200
             logger.info(f"[统一语音] 本地FunASR服务: {'可用' if availability[VoiceMode.LOCAL] else '不可用'}")
         except:

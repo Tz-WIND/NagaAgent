@@ -79,6 +79,89 @@ def get_config_path() -> str:
     _migrate_config_if_needed(target)
     return str(target)
 
+
+_RUNTIME_PROTECTED_CONFIG_PATHS = {
+    "system_check",
+}
+
+_MODEL_SYNC_CONFIG_PATHS = {
+    "api.model",
+    "api.api_format",
+}
+
+
+def _merge_source_config_into_runtime(source_value, target_value, path: str = ""):
+    if path in _RUNTIME_PROTECTED_CONFIG_PATHS:
+        return target_value, False
+
+    if path in _MODEL_SYNC_CONFIG_PATHS:
+        if target_value != source_value:
+            return source_value, True
+        return target_value, False
+
+    if isinstance(source_value, dict):
+        target_dict = target_value if isinstance(target_value, dict) else {}
+        merged = dict(target_dict)
+        changed = not isinstance(target_value, dict)
+
+        for key, source_child in source_value.items():
+            child_path = f"{path}.{key}" if path else key
+            if key in target_dict:
+                merged_child, child_changed = _merge_source_config_into_runtime(
+                    source_child,
+                    target_dict[key],
+                    child_path,
+                )
+                if child_changed:
+                    merged[key] = merged_child
+                    changed = True
+            else:
+                merged[key] = source_child
+                changed = True
+
+        return merged, changed
+
+    if target_value is None:
+        return source_value, True
+
+    return target_value, False
+
+
+def sync_source_config_to_runtime() -> bool:
+    """源码运行时同步配置结构到用户数据目录，同时强制刷新模型相关配置。"""
+    if IS_PACKAGED:
+        return False
+
+    source = Path(__file__).parent.parent / "config.json"
+    if not source.exists():
+        return False
+
+    target = Path(get_data_dir()) / "config.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with open(source, "r", encoding=detect_file_encoding(str(source))) as source_file:
+            source_config = json5.load(source_file)
+
+        if target.exists():
+            with open(target, "r", encoding=detect_file_encoding(str(target))) as target_file:
+                target_config = json5.load(target_file)
+        else:
+            target_config = {}
+
+        merged_config, changed = _merge_source_config_into_runtime(source_config, target_config)
+        if not changed:
+            return False
+
+        with open(target, "w", encoding="utf-8") as target_file:
+            json.dump(merged_config, target_file, ensure_ascii=False, indent=2)
+
+        print(f"已同步源码配置结构: {source} → {target}")
+        return True
+    except Exception as e:
+        print(f"警告：同步源码配置失败: {e}")
+        return False
+
 from pydantic import BaseModel, Field, field_validator
 from charset_normalizer import from_path
 import json5  # 支持带注释的JSON解析
@@ -115,15 +198,26 @@ def _get_runtime_server_ports() -> Optional[ServerPortsConfig]:
         return None
 
     try:
-        raw_agent_port = server_ports.agent_server
-        raw_mcp_port = server_ports.mcp_server
+        raw_agent_port = getattr(getattr(loaded_config, "agent_server", None), "port", server_ports.agent_server)
+        raw_mcp_port = getattr(getattr(loaded_config, "mcp_server", None), "port", server_ports.mcp_server)
         try:
             config_path = get_config_path()
             if os.path.exists(config_path):
                 with open(config_path, "r", encoding=detect_file_encoding(config_path)) as f:
                     raw_config = json5.load(f)
-                raw_agent_port = int(raw_config.get("agentserver", {}).get("port", raw_agent_port))
-                raw_mcp_port = int(raw_config.get("mcpserver", {}).get("port", raw_mcp_port))
+
+                raw_agent_port = int(
+                    raw_config.get("agent_server", {}).get(
+                        "port",
+                        raw_config.get("agentserver", {}).get("port", raw_agent_port),
+                    )
+                )
+                raw_mcp_port = int(
+                    raw_config.get("mcp_server", {}).get(
+                        "port",
+                        raw_config.get("mcpserver", {}).get("port", raw_mcp_port),
+                    )
+                )
         except Exception:
             pass
 
@@ -303,6 +397,23 @@ class APIServerConfig(BaseModel):
     docs_enabled: bool = Field(default=True, description="是否启用API文档")
 
 
+class AgentServerConfig(BaseModel):
+    """Agent 服务器配置"""
+
+    enabled: bool = Field(default=True, description="是否启用 Agent 服务器")
+    host: str = Field(default="127.0.0.1", description="Agent 服务器主机")
+    port: int = Field(default_factory=lambda: server_ports.agent_server, description="Agent 服务器端口")
+
+
+class MCPServerConfig(BaseModel):
+    """MCP 服务器配置"""
+
+    enabled: bool = Field(default=True, description="是否启用 MCP 服务器")
+    host: str = Field(default="127.0.0.1", description="MCP 服务器主机")
+    port: int = Field(default_factory=lambda: server_ports.mcp_server, description="MCP 服务器端口")
+    agent_discovery: bool = Field(default=True, description="是否启用 Agent 自动发现")
+
+
 class GRAGConfig(BaseModel):
     """GRAG知识图谱记忆系统配置"""
 
@@ -445,6 +556,7 @@ class MemoryServerConfig(BaseModel):
 
     url: str = Field(default="http://localhost:8004", description="NagaMemory 服务地址")
     token: Optional[str] = Field(default=None, description="认证 Token（Bearer），留空则不携带认证头")
+    space_id: Optional[str] = Field(default=None, description="可选的记忆空间 ID")
 
 
 class EmbeddingConfig(BaseModel):
@@ -1208,6 +1320,8 @@ class NagaConfig(BaseModel):
     system: SystemConfig = Field(default_factory=SystemConfig)
     api: APIConfig = Field(default_factory=APIConfig)
     api_server: APIServerConfig = Field(default_factory=APIServerConfig)
+    agent_server: AgentServerConfig = Field(default_factory=AgentServerConfig)
+    mcp_server: MCPServerConfig = Field(default_factory=MCPServerConfig)
     grag: GRAGConfig = Field(default_factory=GRAGConfig)
     handoff: HandoffConfig = Field(default_factory=HandoffConfig)
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
