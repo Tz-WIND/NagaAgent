@@ -143,6 +143,18 @@ class LLMService:
             "api_base": (effective_base.rstrip("/") + "/" if effective_base else None),
         }
 
+    def _normalize_temperature(self, model_name: str, temperature: Optional[float]) -> Optional[float]:
+        """兼容不支持自定义 temperature 的模型参数约束。"""
+        if temperature is None:
+            return None
+
+        normalized_model = (model_name or "").lower()
+        if "gpt-5" in normalized_model and temperature != 1:
+            logger.info(f"[LLM] 模型 {model_name} 仅支持 temperature=1，自动调整当前值 {temperature}")
+            return 1
+
+        return temperature
+
     async def get_response(self, prompt: str, temperature: float = 0.7) -> str:
         """为其他模块提供API调用接口（保持向后兼容，只返回 content）"""
         response = await self.get_response_with_reasoning(prompt, temperature)
@@ -156,10 +168,11 @@ class LLMService:
                 return LLMResponse(content="LLM服务不可用: 客户端初始化失败")
 
         try:
+            model_name = self._get_model_name()
             response = await acompletion(
-                model=self._get_model_name(),
+                model=model_name,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=temperature,
+                temperature=self._normalize_temperature(model_name, temperature),
                 max_tokens=get_config().api.max_tokens,
                 **self._get_llm_params()
             )
@@ -212,7 +225,7 @@ class LLMService:
             response = await acompletion(
                 model=model_name,
                 messages=messages,
-                temperature=temperature,
+                temperature=self._normalize_temperature(model_name, temperature),
                     max_tokens=get_config().api.max_tokens if hasattr(get_config().api, 'max_tokens') else None,
                 **self._get_overridden_llm_params(final_api_key, final_base)
             )
@@ -304,7 +317,7 @@ class LLMService:
                 call_params = {
                     "model": model_name,
                     "messages": messages,
-                    "temperature": temperature,
+                    "temperature": self._normalize_temperature(model_name, temperature),
                     "max_tokens": get_config().api.max_tokens if hasattr(get_config().api, "max_tokens") else None,
                     "stream": True,
                     "timeout": 120,
