@@ -4,6 +4,8 @@ import { useStorage } from '@vueuse/core'
 import { ref } from 'vue'
 import API from '@/api/core'
 
+export const proactiveNotifier = ref<null | ((source: string, content: string) => void)>(null)
+
 export interface Message {
   role: 'system' | 'user' | 'assistant' | 'info'
   content: string
@@ -57,6 +59,19 @@ export function getActiveTab(): ChatTab {
 
 export function getNagaTab(): ChatTab {
   return tabs.value[0]!
+}
+
+export function appendNagaMessage(message: Message) {
+  MESSAGES.value.push(message)
+  syncNagaMessages()
+}
+
+export async function reloadCurrentSessionMessages() {
+  if (!CURRENT_SESSION_ID.value)
+    return
+  const detail = await API.getProactiveMessageHistory(CURRENT_SESSION_ID.value)
+  MESSAGES.value = normalizeMessages(detail.messages)
+  syncNagaMessages()
 }
 
 function normalizeToolEvent(input: any): ToolEvent | null {
