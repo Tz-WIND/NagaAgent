@@ -26,12 +26,13 @@ import { useElectron } from '@/composables/useElectron'
 import { useMusicPlayer } from '@/composables/useMusicPlayer'
 import { useParallax } from '@/composables/useParallax'
 import { useStartupProgress } from '@/composables/useStartupProgress'
+import { connectRealtimeUi, disconnectRealtimeUi } from '@/composables/useRealtimeUi'
 import { startToolPolling, stopToolPolling } from '@/composables/useToolStatus'
 import { checkForUpdate, showUpdateDialog, updateInfo } from '@/composables/useVersionCheck'
 import { backendConnected, CONFIG } from '@/utils/config'
 import { clearExpression, setExpression } from '@/utils/live2dController'
 import { destroyParallax, initParallax } from '@/utils/parallax'
-import { activeTabId, agentContacts, tabs } from '@/utils/session'
+import { activeTabId, agentContacts, proactiveNotifier, tabs } from '@/utils/session'
 import { messageViewExpanded } from '@/utils/uiState'
 import FloatingView from '@/views/FloatingView.vue'
 
@@ -346,6 +347,14 @@ function openLoginDialog() {
 
 // 提供给子组件使用
 provide('openLoginDialog', openLoginDialog)
+proactiveNotifier.value = (source, content) => {
+  toast.add({
+    severity: 'info',
+    summary: source,
+    detail: content,
+    life: 5000,
+  })
+}
 
 function onSplashDismiss() {
   _splashDismissed = true
@@ -452,10 +461,16 @@ watch(isNagaLoggedIn, (loggedIn) => {
 }, { immediate: true })
 
 watch(backendConnected, (connected) => {
-  if (connected && isNagaLoggedIn.value) {
-    startToolPolling()
+  if (connected) {
+    connectRealtimeUi()
+    if (isNagaLoggedIn.value) {
+      startToolPolling()
+    }
   }
-})
+  else {
+    disconnectRealtimeUi()
+  }
+}, { immediate: true })
 
 onMounted(() => {
   initParallax()
@@ -512,9 +527,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  proactiveNotifier.value = null
   destroyParallax()
   cleanup()
   stopToolPolling()
+  disconnectRealtimeUi()
   unsubStateChange?.()
 })
 </script>
