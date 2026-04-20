@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from system.config import build_system_prompt, build_context_supplement
 from apiserver.message_manager import message_manager
 from apiserver.llm_service import get_llm_service
+from apiserver.websocket_manager import get_websocket_manager
 
 logger = logging.getLogger(__name__)
 
@@ -454,14 +455,26 @@ async def receive_proactive_message(payload: Dict[str, Any]):
         message = payload.get("message", "")
         source = payload.get("source", "ProactiveVision")
         timestamp = payload.get("timestamp", time.time())
+        session_id = payload.get("session_id")
 
         if not message:
             raise HTTPException(400, "message 不能为空")
 
         logger.info(f"[ProactiveMessage] 收到主动消息: {message[:50]}... (来源: {source})")
 
-        # 创建一个特殊的会话ID用于主动消息
-        proactive_session_id = f"proactive_{int(timestamp)}"
+        if not session_id:
+            recent_session_ids = [
+                sid for sid, session in message_manager.sessions.items()
+                if session.get("messages") and not session.get("temporary")
+            ]
+            if recent_session_ids:
+                recent_session_ids.sort(
+                    key=lambda sid: message_manager.sessions[sid].get("last_activity", ""),
+                    reverse=True,
+                )
+                session_id = recent_session_ids[0]
+            else:
+                session_id = message_manager.create_session()
 
         # 构建通知数据
         notification_data = {
@@ -469,24 +482,29 @@ async def receive_proactive_message(payload: Dict[str, Any]):
             "content": message,
             "source": source,
             "timestamp": timestamp,
-            "session_id": proactive_session_id,
+            "session_id": session_id,
         }
 
-        # TODO: 通过WebSocket或SSE推送到前端
-        # 目前暂存到消息管理器，前端可通过轮询获取
+        ws_manager = get_websocket_manager()
+
+        # 持久化到当前会话
+        message_manager.create_session(session_id)
         message_manager.add_message(
-            session_id=proactive_session_id,
+            session_id=session_id,
             role="assistant",
             content=f"[主动提醒 - {source}]\n{message}",
         )
 
-        logger.info(f"[ProactiveMessage] 主动消息已处理: {proactive_session_id}")
+        pushed = await ws_manager.send_proactive_message(message, source, session_id=session_id)
+
+        logger.info(f"[ProactiveMessage] 主动消息已处理: {session_id}, pushed={pushed}")
 
         return {
             "status": "ok",
             "message": "主动消息已接收",
-            "session_id": proactive_session_id,
+            "session_id": session_id,
             "data": notification_data,
+            "pushed": pushed,
         }
 
     except Exception as e:
