@@ -120,7 +120,7 @@ class WebSocketManager:
         logger.debug(f"[WebSocket] 广播完成: 发送{sent_count}条")
         return sent_count
 
-    async def send_proactive_message(self, message: str, source: str):
+    async def send_proactive_message(self, message: str, source: str, session_id: str = None):
         """发送主动消息（ProactiveVision专用）"""
         payload = {
             "type": "proactive_message",
@@ -128,6 +128,8 @@ class WebSocketManager:
             "source": source,
             "timestamp": asyncio.get_running_loop().time(),
         }
+        if session_id:
+            payload["session_id"] = session_id
 
         # 广播到所有连接
         sent_count = await self.broadcast(payload)
