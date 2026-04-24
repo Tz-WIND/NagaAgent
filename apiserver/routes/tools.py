@@ -463,6 +463,7 @@ async def receive_proactive_message(payload: Dict[str, Any]):
         logger.info(f"[ProactiveMessage] 收到主动消息: {message[:50]}... (来源: {source})")
 
         if not session_id:
+            logger.warning("[ProactiveMessage] 未指定 session_id，将自动选择最近活跃会话")
             recent_session_ids = [
                 sid for sid, session in message_manager.sessions.items()
                 if session.get("messages") and not session.get("temporary")
@@ -485,10 +486,12 @@ async def receive_proactive_message(payload: Dict[str, Any]):
             "session_id": session_id,
         }
 
+        # 确保会话存在再写入消息
+        message_manager.create_session(session_id)
+
         ws_manager = get_websocket_manager()
 
         # 持久化到当前会话
-        message_manager.create_session(session_id)
         message_manager.add_message(
             session_id=session_id,
             role="assistant",

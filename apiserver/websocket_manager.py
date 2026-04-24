@@ -6,6 +6,7 @@ WebSocket 连接管理器
 import asyncio
 import json
 import logging
+import time
 from typing import Dict, Set, Any
 from fastapi import WebSocket, WebSocketDisconnect
 
@@ -126,7 +127,7 @@ class WebSocketManager:
             "type": "proactive_message",
             "content": message,
             "source": source,
-            "timestamp": asyncio.get_running_loop().time(),
+            "timestamp": time.time(),
         }
         if session_id:
             payload["session_id"] = session_id

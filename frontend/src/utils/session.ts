@@ -69,7 +69,7 @@ export function appendNagaMessage(message: Message) {
 export async function reloadCurrentSessionMessages() {
   if (!CURRENT_SESSION_ID.value)
     return
-  const detail = await API.getProactiveMessageHistory(CURRENT_SESSION_ID.value)
+  const detail = await API.getSessionDetail(CURRENT_SESSION_ID.value)
   MESSAGES.value = normalizeMessages(detail.messages)
   syncNagaMessages()
 }

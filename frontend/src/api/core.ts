@@ -323,15 +323,6 @@ export class CoreApiClient extends ApiClient {
     return this.instance.get('/sessions')
   }
 
-  getProactiveMessageHistory(sessionId: string): Promise<{
-    status: string
-    sessionId: string
-    messages: Array<{ role: string, content: string }>
-    conversationRounds: number
-  }> {
-    return this.instance.get(`/sessions/${sessionId}`)
-  }
-
   getSessionDetail(id: string): Promise<{
     status: string
     sessionId: string

@@ -1,9 +1,16 @@
-import { appendNagaMessage, CURRENT_SESSION_ID, proactiveNotifier, reloadCurrentSessionMessages } from '@/utils/session'
+import { appendNagaMessage, CURRENT_SESSION_ID, proactiveNotifier } from '@/utils/session'
 
 let socket: WebSocket | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let reconnectAttempts = 0
 let manuallyClosed = false
+
+// HMR 兜底：模块重载时先清理旧连接
+if (import.meta.hot) {
+  import.meta.hot.accept(() => {
+    disconnectRealtimeUi()
+  })
+}
 
 function buildWebSocketUrl() {
   const endpoint = import.meta.env.DEV ? 'http://localhost:8000' : window.location.origin
@@ -52,10 +59,6 @@ async function handleMessage(event: MessageEvent<string>) {
     })
 
     proactiveNotifier.value?.(source, payload.content)
-
-    if (sessionId && CURRENT_SESSION_ID.value === sessionId) {
-      await reloadCurrentSessionMessages()
-    }
   }
   catch (error) {
     console.debug('[RealtimeUI] 忽略无法解析的消息', error)

@@ -143,15 +143,21 @@ class LLMService:
             "api_base": (effective_base.rstrip("/") + "/" if effective_base else None),
         }
 
+    # 不支持自定义 temperature 的模型约束表: {前缀: 强制值}
+    _TEMPERATURE_CONSTRAINTS: Dict[str, float] = {
+        "gpt-5": 1,
+    }
+
     def _normalize_temperature(self, model_name: str, temperature: Optional[float]) -> Optional[float]:
         """兼容不支持自定义 temperature 的模型参数约束。"""
         if temperature is None:
             return None
 
         normalized_model = (model_name or "").lower()
-        if "gpt-5" in normalized_model and temperature != 1:
-            logger.info(f"[LLM] 模型 {model_name} 仅支持 temperature=1，自动调整当前值 {temperature}")
-            return 1
+        for prefix, forced_value in self._TEMPERATURE_CONSTRAINTS.items():
+            if normalized_model.startswith(prefix) and temperature != forced_value:
+                logger.info(f"[LLM] 模型 {model_name} 仅支持 temperature={forced_value}，自动调整当前值 {temperature}")
+                return forced_value
 
         return temperature
 
